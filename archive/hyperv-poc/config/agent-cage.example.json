@@ -1,0 +1,22 @@
+{
+  "vmName": "AGENT-CAGE",
+  "workspaceRoot": "D:\\AgentWork",
+  "shareName": "AgentWorkspace",
+  "guestDrive": "W:",
+  "guestWorkspace": "W:\\Workspace",
+  "accessAccount": "AgentCageAccess",
+  "defaultApplication": "cursor",
+  "network": {
+    "internet": true,
+    "lan": false
+  },
+  "integration": {
+    "clipboard": false,
+    "hostDrives": false,
+    "usb": false
+  },
+  "checkpoint": {
+    "createBeforeLaunch": false,
+    "baselineName": "AGENT-CAGE-BASELINE"
+  }
+}

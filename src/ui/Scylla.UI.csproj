@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>Scylla.UI</RootNamespace>
+    <AssemblyName>Scylla.UI</AssemblyName>
+    <ApplicationTitle>Scylla</ApplicationTitle>
+    <ApplicationIcon>Assets\scylla.ico</ApplicationIcon>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\scylla.ico" />
+    <Resource Include="Assets\scylla-logo.png" />
+  </ItemGroup>
+  <Target Name="CopyNativeEngine" AfterTargets="Build">
+    <ItemGroup>
+      <_Native Include="$(MSBuildThisFileDirectory)..\..\build\Release\scylla.exe" Condition="Exists('$(MSBuildThisFileDirectory)..\..\build\Release\scylla.exe')" />
+      <_Native Include="$(MSBuildThisFileDirectory)..\..\build\Release\scylla-test-parent.exe" Condition="Exists('$(MSBuildThisFileDirectory)..\..\build\Release\scylla-test-parent.exe')" />
+      <_Native Include="$(MSBuildThisFileDirectory)..\..\build\Release\scylla-probe.exe" Condition="Exists('$(MSBuildThisFileDirectory)..\..\build\Release\scylla-probe.exe')" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_Native)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

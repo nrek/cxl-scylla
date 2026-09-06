@@ -1,0 +1,380 @@
+#include "scyllagpt/store.h"
+
+#include "scyllagpt/utf.h"
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <rpc.h>
+
+#include <algorithm>
+#include <cstring>
+
+#pragma comment(lib, "rpcrt4.lib")
+
+namespace scyllagpt {
+namespace {
+
+std::string read_all(const std::wstring& path) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                            nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    LARGE_INTEGER sz{};
+    GetFileSizeEx(h, &sz);
+    if (sz.QuadPart <= 0 || sz.QuadPart > 8 * 1024 * 1024) {
+        CloseHandle(h);
+        return {};
+    }
+    std::string raw(static_cast<std::size_t>(sz.QuadPart), 0);
+    DWORD rd = 0;
+    ReadFile(h, raw.data(), static_cast<DWORD>(raw.size()), &rd, nullptr);
+    CloseHandle(h);
+    raw.resize(rd);
+    return raw;
+}
+
+bool write_all(const std::wstring& path, const std::string& body) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD wr = 0;
+    const BOOL ok = WriteFile(h, body.data(), static_cast<DWORD>(body.size()), &wr, nullptr);
+    CloseHandle(h);
+    return ok != 0;
+}
+
+std::wstring lower_copy(std::wstring s) {
+    CharLowerBuffW(s.data(), static_cast<DWORD>(s.size()));
+    return s;
+}
+
+}  // namespace
+
+std::uint64_t fnv1a64(const void* data, std::size_t n) {
+    auto* p = static_cast<const unsigned char*>(data);
+    std::uint64_t h = 14695981039346656037ull;
+    for (std::size_t i = 0; i < n; ++i) {
+        h ^= p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+std::string make_uuid() {
+    UUID u{};
+    UuidCreate(&u);
+    RPC_CSTR str = nullptr;
+    if (UuidToStringA(&u, &str) != RPC_S_OK || !str) {
+        return {};
+    }
+    std::string out(reinterpret_cast<char*>(str));
+    RpcStringFreeA(&str);
+    return out;
+}
+
+std::wstring canonicalize_path(const std::wstring& path) {
+    wchar_t full[MAX_PATH * 4]{};
+    if (!GetFullPathNameW(path.c_str(), MAX_PATH * 4, full, nullptr)) {
+        return path;
+    }
+    std::wstring s = full;
+    while (s.size() > 3 && (s.back() == L'\\' || s.back() == L'/')) {
+        s.pop_back();
+    }
+    return s;
+}
+
+std::wstring file_identity(const std::wstring& path) {
+    HANDLE h = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                            FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    const BOOL ok = GetFileInformationByHandle(h, &info);
+    CloseHandle(h);
+    if (!ok) {
+        return {};
+    }
+    return std::to_wstring(info.dwVolumeSerialNumber) + L":" + std::to_wstring(info.nFileIndexHigh) + L":" +
+           std::to_wstring(info.nFileIndexLow);
+}
+
+Project* WorkspaceStore::by_id(const std::string& id) {
+    for (auto& p : projects) {
+        if (p.id == id) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
+
+const Project* WorkspaceStore::by_id(const std::string& id) const {
+    for (const auto& p : projects) {
+        if (p.id == id) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
+
+Project* WorkspaceStore::active() {
+    return by_id(active_project_id);
+}
+
+Project* WorkspaceStore::open_or_create(const std::wstring& folder) {
+    const std::wstring root = canonicalize_path(folder);
+    const std::wstring ident = file_identity(root);
+    for (auto& p : projects) {
+        if (!ident.empty() && p.identity == ident) {
+            active_project_id = p.id;
+            if (p.root != root) {
+                p.root = root;
+            }
+            return &p;
+        }
+    }
+    for (auto& p : projects) {
+        if (_wcsicmp(canonicalize_path(p.root).c_str(), root.c_str()) == 0) {
+            active_project_id = p.id;
+            if (!ident.empty()) {
+                p.identity = ident;
+            }
+            p.root = root;
+            return &p;
+        }
+    }
+    Project p;
+    p.id = make_uuid();
+    p.root = root;
+    p.identity = ident;
+    p.name = root;
+    const auto slash = root.find_last_of(L"\\/");
+    if (slash != std::wstring::npos && slash + 1 < root.size()) {
+        p.name = root.substr(slash + 1);
+    }
+    projects.push_back(std::move(p));
+    active_project_id = projects.back().id;
+    return &projects.back();
+}
+
+Conversation* WorkspaceStore::by_thread(const std::string& thread_id) {
+    for (auto& c : conversations) {
+        if (c.thread_id == thread_id) {
+            return &c;
+        }
+    }
+    return nullptr;
+}
+
+const Conversation* WorkspaceStore::by_thread(const std::string& thread_id) const {
+    for (const auto& c : conversations) {
+        if (c.thread_id == thread_id) {
+            return &c;
+        }
+    }
+    return nullptr;
+}
+
+bool WorkspaceStore::remove_thread(const std::string& thread_id) {
+    for (auto it = conversations.begin(); it != conversations.end(); ++it) {
+        if (it->thread_id == thread_id) {
+            conversations.erase(it);
+            return true;
+        }
+    }
+    return false;
+}
+
+Conversation* WorkspaceStore::upsert_thread(const std::string& project_id, const std::string& account,
+                                              const std::string& thread_id, const std::string& title,
+                                              const std::string& preview) {
+    if (thread_id.empty()) {
+        return nullptr;
+    }
+    if (auto* existing = by_thread(thread_id)) {
+        if (!title.empty() && (existing->title.empty() || existing->title == thread_id)) {
+            existing->title = title;
+        }
+        if (!preview.empty()) {
+            existing->preview = preview;
+        }
+        if (existing->account.empty()) {
+            existing->account = account;
+        }
+        return existing;
+    }
+    Conversation c;
+    c.id = make_uuid();
+    c.project_id = project_id;
+    c.account = account;
+    c.thread_id = thread_id;
+    c.title = title.empty() ? thread_id : title;
+    c.preview = preview;
+    conversations.push_back(std::move(c));
+    return &conversations.back();
+}
+
+std::vector<Conversation*> WorkspaceStore::list_visible(const std::string& account, const std::wstring& search) {
+    std::vector<Conversation*> out;
+    std::wstring q = lower_copy(search);
+    for (auto& c : conversations) {
+        if (c.archived) {
+            continue;
+        }
+        if (!account.empty() && !c.account.empty() && c.account != account) {
+            continue;
+        }
+        if (!history_all_projects && !active_project_id.empty() && c.project_id != active_project_id) {
+            continue;
+        }
+        if (!q.empty()) {
+            std::wstring hay = utf16(c.title + " " + c.preview);
+            CharLowerBuffW(hay.data(), static_cast<DWORD>(hay.size()));
+            if (hay.find(q) == std::wstring::npos) {
+                continue;
+            }
+        }
+        out.push_back(&c);
+    }
+    std::stable_sort(out.begin(), out.end(), [](const Conversation* a, const Conversation* b) {
+        if (a->pinned != b->pinned) {
+            return a->pinned && !b->pinned;
+        }
+        return a->title < b->title;
+    });
+    return out;
+}
+
+bool WorkspaceStore::load(const std::wstring& path) {
+    projects.clear();
+    conversations.clear();
+    active_project_id.clear();
+    const std::string raw = read_all(path);
+    if (raw.empty()) {
+        return true;
+    }
+    std::string err;
+    Json j = Json::parse(raw, &err);
+    if (!err.empty() || !j.is_object()) {
+        return false;
+    }
+    active_project_id = j.at("active_project_id").as_string("");
+    history_all_projects = false;  // Always current-project chats only.
+    const Json& pj = j.at("projects");
+    if (pj.is_array()) {
+        for (const auto& it : pj.array_items()) {
+            Project p;
+            p.id = it.at("id").as_string();
+            p.name = utf16(it.at("name").as_string());
+            p.root = utf16(it.at("root").as_string());
+            p.identity = utf16(it.at("identity").as_string());
+            p.last_thread_id = it.at("last_thread_id").as_string("");
+            p.files_w = static_cast<int>(it.at("files_w").as_int(220));
+            p.agent_w = static_cast<int>(it.at("agent_w").as_int(400));
+            p.history_w = static_cast<int>(it.at("history_w").as_int(232));
+            if (!p.id.empty()) {
+                projects.push_back(std::move(p));
+            }
+        }
+    }
+    const Json& cj = j.at("conversations");
+    if (cj.is_array()) {
+        for (const auto& it : cj.array_items()) {
+            Conversation c;
+            c.id = it.at("id").as_string();
+            c.project_id = it.at("project_id").as_string();
+            c.account = it.at("account").as_string();
+            c.backend = it.at("backend").as_string("codex-app-server");
+            c.provider_id = it.at("provider_id").as_string("openai");
+            c.thread_id = it.at("thread_id").as_string();
+            c.title = it.at("title").as_string();
+            c.preview = it.at("preview").as_string("");
+            c.pinned = it.at("pinned").as_bool(false);
+            c.archived = it.at("archived").as_bool(false);
+            c.resumable = it.at("resumable").as_bool(true);
+            if (!c.id.empty()) {
+                conversations.push_back(std::move(c));
+            }
+        }
+    }
+    return true;
+}
+
+bool WorkspaceStore::save(const std::wstring& path) const {
+    Json j = Json::object();
+    j["active_project_id"] = Json::string(active_project_id);
+    j["history_all_projects"] = Json::boolean(history_all_projects);
+    Json arr = Json::array();
+    for (const auto& p : projects) {
+        Json o = Json::object();
+        o["id"] = Json::string(p.id);
+        o["name"] = Json::string(utf8(p.name));
+        o["root"] = Json::string(utf8(p.root));
+        o["identity"] = Json::string(utf8(p.identity));
+        o["last_thread_id"] = Json::string(p.last_thread_id);
+        o["files_w"] = Json::number(p.files_w);
+        o["agent_w"] = Json::number(p.agent_w);
+        o["history_w"] = Json::number(p.history_w);
+        arr.push(std::move(o));
+    }
+    j["projects"] = std::move(arr);
+    Json ca = Json::array();
+    for (const auto& c : conversations) {
+        Json o = Json::object();
+        o["id"] = Json::string(c.id);
+        o["project_id"] = Json::string(c.project_id);
+        o["account"] = Json::string(c.account);
+        o["backend"] = Json::string(c.backend);
+        o["provider_id"] = Json::string(c.provider_id.empty() ? "openai" : c.provider_id);
+        o["thread_id"] = Json::string(c.thread_id);
+        o["title"] = Json::string(c.title);
+        o["preview"] = Json::string(c.preview);
+        o["pinned"] = Json::boolean(c.pinned);
+        o["archived"] = Json::boolean(c.archived);
+        o["resumable"] = Json::boolean(c.resumable);
+        ca.push(std::move(o));
+    }
+    j["conversations"] = std::move(ca);
+    return write_all(path, j.dump());
+}
+
+std::string snapshot_context(const std::vector<ContextChip>& chips) {
+    if (chips.empty()) {
+        return {};
+    }
+    std::string out = "Context attached by Scylla (explicit; not a full-tree grant):\n";
+    for (const auto& c : chips) {
+        out += "\n### ";
+        if (c.kind == "image") {
+            out += "Image attachment — ";
+            out += c.label;
+            out += "\nPath: ";
+            // Wide path → UTF-8 for the prompt note (path-only; not multimodal vision).
+            out += c.body;
+            out += "\n";
+            continue;
+        }
+        out += c.unsaved ? "Unsaved buffer" : "Saved file";
+        out += " — ";
+        out += c.label;
+        if (c.line0 > 0) {
+            out += " (L" + std::to_string(c.line0);
+            if (c.line1 > c.line0) {
+                out += "-" + std::to_string(c.line1);
+            }
+            out += ")";
+        }
+        out += "\n```\n";
+        out += c.body;
+        if (!c.body.empty() && c.body.back() != '\n') {
+            out += "\n";
+        }
+        out += "```\n";
+    }
+    return out;
+}
+
+}  // namespace scyllagpt

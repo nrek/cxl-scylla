@@ -1,0 +1,110 @@
+<Window x:Class="Scylla.UI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="clr-namespace:Scylla.UI.ViewModels"
+        Title="SCYLLA"
+        Icon="pack://application:,,,/Assets/scylla.ico"
+        Width="620"
+        MinWidth="520" MinHeight="520"
+        SizeToContent="Height"
+        Background="{StaticResource Bg}"
+        Foreground="{StaticResource Fg}"
+        FontFamily="Segoe UI" FontSize="13"
+        Loaded="OnLoaded"
+        Closing="OnClosing"
+        PreviewTextInput="OnPreviewTextInput"
+        PreviewKeyDown="OnPreviewKeyDown">
+    <Window.DataContext>
+        <vm:MainWindowViewModel/>
+    </Window.DataContext>
+    <Window.Resources>
+        <DataTemplate x:Key="AppTile">
+            <Button Click="OnAppButtonClick"
+                    Tag="{Binding}"
+                    Width="88" Height="96" Margin="0,0,8,8" Padding="6">
+                <StackPanel>
+                    <Image Source="{Binding Icon}" Width="32" Height="32" Stretch="Uniform"
+                           RenderOptions.BitmapScalingMode="HighQuality"/>
+                    <TextBlock Text="{Binding DisplayName}" TextAlignment="Center" TextWrapping="Wrap"
+                               FontSize="11" Margin="0,6,0,0"/>
+                </StackPanel>
+            </Button>
+        </DataTemplate>
+        <ItemsPanelTemplate x:Key="AppRow">
+            <WrapPanel/>
+        </ItemsPanelTemplate>
+    </Window.Resources>
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+            <Image Source="pack://application:,,,/Assets/scylla.ico"
+                   Width="28" Height="28" Margin="0,0,8,0"
+                   RenderOptions.BitmapScalingMode="HighQuality"/>
+            <TextBlock Text="SCYLLA" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="1">
+            <Label Content="Profile"/>
+            <DockPanel Margin="0,0,0,12">
+                <Button DockPanel.Dock="Right" Content="Delete" Command="{Binding DeleteProfileCommand}"/>
+                <Button DockPanel.Dock="Right" Content="Save" Command="{Binding SaveProfileCommand}"/>
+                <Button DockPanel.Dock="Right" Content="New" Command="{Binding NewProfileCommand}"/>
+                <ComboBox ItemsSource="{Binding ProfileNames}"
+                          Text="{Binding ProfileName, UpdateSourceTrigger=PropertyChanged}"
+                          SelectedItem="{Binding SelectedProfileName}"
+                          IsEditable="True"/>
+            </DockPanel>
+
+            <Label Content="Applications"/>
+            <DockPanel Margin="0,0,0,8">
+                <TextBlock DockPanel.Dock="Right" Text="type to filter" Foreground="{StaticResource Muted}"
+                           VerticalAlignment="Center" Margin="8,0,0,0"/>
+                <TextBox x:Name="AppFilterBox"
+                         Text="{Binding AppFilter, UpdateSourceTrigger=PropertyChanged}"/>
+            </DockPanel>
+            <ScrollViewer x:Name="AppScroll"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled"
+                          MaxHeight="416"
+                          Margin="0,0,0,12">
+                <StackPanel Width="{Binding ViewportWidth, ElementName=AppScroll}">
+                    <TextBlock Text="AI / Development" FontSize="11"
+                               Foreground="{StaticResource Muted}" Margin="0,4,0,6"/>
+                    <ItemsControl ItemsSource="{Binding AiApps}"
+                              ItemTemplate="{StaticResource AppTile}"
+                              ItemsPanel="{StaticResource AppRow}"/>
+                    <TextBlock Text="Other Installed Applications" FontSize="11"
+                               Foreground="{StaticResource Muted}" Margin="0,12,0,6"/>
+                    <ItemsControl ItemsSource="{Binding OtherApps}"
+                              ItemTemplate="{StaticResource AppTile}"
+                              ItemsPanel="{StaticResource AppRow}"/>
+                </StackPanel>
+            </ScrollViewer>
+            <TextBlock Text="{Binding Executable}" Foreground="{StaticResource Muted}"
+                       FontFamily="Consolas" FontSize="11" Margin="0,0,0,12" TextWrapping="Wrap"/>
+
+            <Label Content="Status" Margin="0,12,0,0"/>
+            <TextBlock Text="{Binding StatusLine}" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,4"/>
+            <TextBlock Text="{Binding MonitorLine}" Foreground="{StaticResource Accent}" FontFamily="Consolas" FontSize="12"/>
+            <TextBlock Text="{Binding SessionId}" Foreground="{StaticResource Muted}" FontFamily="Consolas" FontSize="11"/>
+            <TextBlock Margin="0,6,0,0" Foreground="{StaticResource Muted}">
+                <Run Text="Processes: "/><Run Text="{Binding Contained}"/>
+            </TextBlock>
+            <TextBlock Text="{Binding Detail}" TextWrapping="Wrap" Margin="0,8,0,0" FontFamily="Consolas" FontSize="11"/>
+        </StackPanel>
+
+        <DockPanel Grid.Row="2" Margin="0,16,0,0">
+            <Button DockPanel.Dock="Right" Content="STOP APP" Command="{Binding StopCommand}"
+                    MinWidth="110" Padding="16,8"/>
+            <Button DockPanel.Dock="Right" Content="RUN APP" Command="{Binding RunCommand}"
+                    MinWidth="110" Padding="16,8"/>
+            <TextBlock VerticalAlignment="Center" Foreground="{StaticResource Muted}"
+                       Text="Click an app. Runs as ScyllaUser. STOP or closing Scylla kills the tree."/>
+        </DockPanel>
+    </Grid>
+</Window>
