@@ -2,8 +2,6 @@
 #include "path.h"
 #include "sandbox_probe.h"
 #include "session.h"
-#include "discover.h"
-#include "identity.h"
 
 #include <windows.h>
 #include <iostream>
@@ -24,8 +22,6 @@ void usage() {
     std::wcout << L"scylla.exe strict launch --app <exe>|--profile test-parent --allow-rw <dir> [--allow-ro <dir>] [--args <str>] [--seconds N] [--no-internet] [--kill-related] [--json]\n";
     std::wcout << L"scylla.exe strict status [--json]\n";
     std::wcout << L"scylla.exe strict processes [--json]\n";
-    std::wcout << L"scylla.exe identity check [--user ScyllaUser] [--json]\n";
-    std::wcout << L"scylla.exe identity launch [--user ScyllaUser] [--app <exe>|chatgpt]\n";
     std::wcout << L"scylla.exe strict stop [--json]\n";
 }
 
@@ -254,12 +250,6 @@ int wmain(int argc, wchar_t** argv) {
             return 2;
         }
         return cmd_launch(app, ws);
-    }
-    if (cmd == L"identity") {
-        return scylla::cmd_identity(argc, argv);
-    }
-    if (cmd == L"discover") {
-        return scylla::cmd_discover(argc, argv);
     }
     if (cmd == L"audit") {
         if (argc < 3) {

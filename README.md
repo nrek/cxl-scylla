@@ -2,34 +2,27 @@
 
 ![Scylla Workbench screenshot](docs/images/scylla-workbench-screen.png)
 
-Scylla is experimental Windows-native tooling for running desktop applications with explicit filesystem access. The repository contains two related applications:
+Scylla is an experimental Windows-native coding workspace with AI providers, a source editor, integrated terminals, and explicit controls for project access, knowledge folders, connections, and secrets.
 
-- **Scylla Cage** — a C++20 CLI and WPF shell that launch Win32 applications inside a Windows AppContainer.
-- **[Scylla Workbench](scyllagpt/README.md)** — a native C++ desktop workspace for Codex and Claude Code.
+The product in this repository is **Scylla Workbench** (`scylla-workbench.exe`). The former AppContainer CLI (Scylla Cage) is archived under [`archive/scylla-cage/`](archive/scylla-cage/) and is not built.
 
 > [!WARNING]
-> This is pre-release security software. Review the threat model, test with non-sensitive data, and verify the resulting token and ACL behavior before relying on it. A sandbox reduces access; it does not make untrusted software safe.
-
-## Scylla Cage
-
-`scylla.exe launch` creates an AppContainer profile, grants the selected application read/execute access to its install tree, grants only the requested workspace access, and launches the process with the restricted token. If sandbox setup fails, Scylla fails closed instead of launching the target normally.
-
-Strict sessions add:
-
-- multiple read-only and read/write grants;
-- optional network removal with `--no-internet`;
-- related-process preflight checks;
-- a Job Object for process-tree lifecycle control;
-- machine-readable lifecycle events with `--json`;
-- cleanup and grant revocation when the session ends.
-
-The WPF shell (`Scylla.UI.exe`) calls the CLI through its JSON interface. The CLI remains usable independently.
+> This is pre-release software. Review the threat model and lockdown notes, test with non-sensitive data, and verify provider and grant behavior before relying on it. Sandbox and policy controls reduce access; they do not make untrusted software safe.
 
 ## Scylla Workbench
 
-Scylla Workbench is a separate native Win32 application. It embeds the Codex app-server over stdio and can invoke an authenticated Claude Code CLI in print mode. It provides a project tree, Scintilla editor, agent pane, local conversation list, explicit project grants, and isolated Codex configuration.
+Workbench is a native C++20 Win32 application with Scintilla and Lexilla. It runs a locally installed Codex app-server over stdio and invokes Claude Code in print mode. Provider software and account access are obtained separately.
 
-Workbench is **not** launched inside the AppContainer cage. Its policy and Codex sandbox controls are documented in [scyllagpt/docs/lockdown.md](scyllagpt/docs/lockdown.md).
+| Area | Available now |
+|---|---|
+| Projects and agents | Project tree, tabbed editor, syntax highlighting, file/selection context, local conversations, and provider/model selection. |
+| Terminal | Integrated ConPTY shells, terminal profiles, multiple sessions, rename/restart/duplicate/close actions, and project environment selection. |
+| Knowledge | Additional folders with project scope, agent availability, access settings, folder overrides, and health checks; separate Knowledge and Skills explorer groups. |
+| MCP connections | HTTP OAuth, credential storage, connection management, project scope, and HTTP/stdio connection checks. Live tool invocation is deferred. |
+| Strata | Optional knowledge-service integration with connection status, recent records, previews, and pending counts. |
+| Security | One encrypted app-level Keyring, global/project secret scopes, project environment profiles, and execution policy for protected terminal values. |
+
+Workbench runs as the signed-in Windows user. Project grants, Knowledge access, terminal policy, provider sign-in, MCP authentication, and Keyring unlock are separate controls. Connecting a service does not make all of its capabilities available to the agent. Codex isolation is policy + Job Object + an isolated Codex home — not an OS AppContainer.
 
 ## Requirements
 
@@ -37,157 +30,120 @@ Workbench is **not** launched inside the AppContainer cage. Its policy and Codex
 - Visual Studio 2022 with **Desktop development with C++**
 - Windows 10/11 SDK
 - CMake 3.20 or newer
-- .NET 9 SDK (only for the WPF cage UI)
 - Optional: ChatGPT desktop/Codex CLI and Claude Code for Workbench providers
+
+Strata is optional and requires a separately configured service or bridge. MCP connections require their own server configuration and, where applicable, authentication. Neither is required for basic editor and provider use. The former WPF launcher is archived; .NET is not required.
 
 ## Install from source
 
-The instructions below build and run the applications from a local source checkout. Workbench does not yet ship an installer or auto-updater.
+The instructions below build and run Workbench from a local source checkout. Workbench does not yet ship an installer or auto-updater.
 
 1. Clone this repository using its **Code → HTTPS** URL, or download and extract its ZIP archive. Git is needed only for cloning.
 2. Open **Developer PowerShell for VS 2022** from the Start menu.
 3. Change into the extracted or cloned repository directory containing `CMakeLists.txt` and this README. Run all commands below from that directory.
 
-Build the native CLI, test tools, and Workbench:
+Build from the repository root (preferred):
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release
+cmake --build build --config Release --target scyllagpt scyllagpt-tests
+.\build\Release\scyllagpt-tests.exe
 ```
 
-Optional, for the WPF Cage UI only (requires the .NET 9 SDK):
+Native builds use the MSVC runtime; another machine may need the Visual C++ v14 Redistributable (x64).
+
+For a Workbench-only configure tree (same sources, separate build directory):
 
 ```powershell
-dotnet build .\src\ui\Scylla.UI.csproj -c Release
+cmake -S scyllagpt -B scyllagpt/build -G "Visual Studio 17 2022" -A x64
+cmake --build scyllagpt/build --config Release --target scyllagpt scyllagpt-tests
+.\scyllagpt\build\Release\scyllagpt-tests.exe
 ```
 
-Build the native tools first: the WPF build copies `scylla.exe`, `scylla-probe.exe`, and `scylla-test-parent.exe` into its output directory. Keep these files alongside `Scylla.UI.exe` when copying the UI elsewhere. The WPF build is framework-dependent; another machine also needs the .NET 9 Desktop Runtime. Native builds use the MSVC runtime; another machine may need the Visual C++ v14 Redistributable (x64).
+The CMake target is `scyllagpt`; its executable is `scylla-workbench.exe`. The root build writes it to `build/Release`; the standalone build writes it to `scyllagpt/build/Release`. Use the executable from the tree you built. Close Workbench before rebuilding that executable to avoid a linker file-lock error.
 
 Primary outputs:
 
 ```text
-build/Release/scylla.exe
-build/Release/scylla-probe.exe
-build/Release/scylla-test-parent.exe
 build/Release/scylla-workbench.exe
-src/ui/bin/Release/net9.0-windows/Scylla.UI.exe
+build/Release/scyllagpt-tests.exe
 ```
 
 ## Quick start
 
-Use disposable directories while evaluating the sandbox. Start with the bundled process-tree fixture so no third-party application is required:
-
 ```powershell
-New-Item -ItemType Directory -Force .\sandbox-workspace | Out-Null
-
-.\build\Release\scylla.exe capabilities
-.\build\Release\scylla.exe selftest-path
-.\build\Release\scylla.exe discover --json
-
-.\build\Release\scylla.exe strict launch `
-  --profile test-parent `
-  --allow-rw "$PWD\sandbox-workspace" `
-  --args "--seconds 60" `
-  --no-internet `
-  --json
-```
-
-The path check should print `SCYLLA: PATH TESTS OK`. A successful strict launch emits a JSON event with `"event":"started"` and `"state":"RUNNING"`. The fixture runs for about 60 seconds; session cleanup emits a `closed` event. Check its `ok` field and cleanup details rather than assuming that process exit means cleanup succeeded.
-
-While the foreground session is active, open a second terminal in the repository root to inspect it and request shutdown:
-
-```powershell
-.\build\Release\scylla.exe strict status --json
-.\build\Release\scylla.exe strict stop --json
-```
-
-To launch your own application, replace the example executable path with an existing Win32 executable:
-
-```powershell
-.\build\Release\scylla.exe strict launch `
-  --app "C:\Path\To\Application.exe" `
-  --allow-rw "$PWD\sandbox-workspace" `
-  --no-internet `
-  --json
-```
-
-For a basic launch with one writable workspace and internet access enabled:
-
-```powershell
-.\build\Release\scylla.exe launch `
-  --app "C:\Path\To\Application.exe" `
-  --workspace "$PWD\sandbox-workspace"
-```
-
-Launch the optional WPF Cage UI:
-
-```powershell
-.\src\ui\bin\Release\net9.0-windows\Scylla.UI.exe
-```
-
-Launch Workbench:
-
-```powershell
+.\build\Release\scyllagpt-tests.exe
 .\build\Release\scylla-workbench.exe
 ```
 
-Follow the [Workbench provider setup and first-run instructions](scyllagpt/README.md#first-run) before sending a message.
+Run `scyllagpt-tests.exe` directly: the test executable is not currently registered with CTest. A successful run reports `all tests passed` and exits with code 0.
 
-## Cage configuration
+1. Open **File → Settings → AI Providers** and connect Codex, Claude Code, or both. Follow the [provider setup instructions](scyllagpt/README.md#first-run) for installation, discovery, and sign-in.
+2. Open a project folder, choose an agent/model, and start a new chat. Confirm the project grant before requesting edits.
+3. Use **View → Terminal** for an integrated shell. Configure shell profiles in **Settings → Terminal**.
+4. If you need documentation outside the project, add its folder in **Settings → Knowledge**, choose its access and project scope, and enable **Available to agent**. Review the access limitation below before granting it.
+5. Configure optional MCP and Strata connections in their Settings sections. Use **Settings → Security** for the Keyring, project environments, and execution policy.
 
-CLI launches take their configuration from command-line arguments:
+## Workbench configuration and access
 
-| Option | Behavior / default |
+Workbench stores local configuration under `%LOCALAPPDATA%\ScyllaGPT`; the legacy directory name is retained for compatibility.
+
+| Configuration | Location / behavior |
 |---|---|
-| `launch --workspace <dir>` | Grants read/write access to one workspace. Required for basic launch. |
-| `strict launch --allow-rw <dir>` | Grants read/write access. Repeat for multiple directories; at least one is required. The first is the process working directory. |
-| `strict launch --allow-ro <dir>` | Adds a read-only grant. Repeat as needed; none by default. |
-| `strict launch --no-internet` | Omits the internet capability. Both basic and strict launches enable internet access by default; basic launch has no network-disable flag. |
-| `strict launch --args <str>` | Passes an argument string to the target application. |
-| `strict launch --seconds N` | Limits session duration; otherwise Scylla waits for exit or a stop request. |
-| `strict launch --kill-related` | Terminates related applications already running outside the session. Without this flag, the CLI refuses to start when related processes are present. Save their work and close them first. |
-| `--json` | Emits structured output on commands that support it, including strict lifecycle commands. |
+| Preferences and execution policy | `settings.json`; configure through Settings. |
+| Knowledge folders | `knowledge.json`; enable sources, choose scope, and control agent availability. |
+| Terminal profiles | `terminals.json`; environment bindings are stored separately in `environments.json`. |
+| MCP connections | `mcp_connections.json`; HTTP OAuth tokens are stored in Windows Credential Manager. |
+| Strata connection | `strata.json`; configure the service/bridge through Settings. |
+| Codex runtime | `codex-home`; managed `config.toml` is rewritten on launch and grant changes. The normal `%USERPROFILE%\.codex` configuration is separate. |
+| Diagnostics | **Help → Diagnostics** and `runtime-stderr.log`. Redact account details, source content, and personal paths before sharing logs. |
 
-The WPF UI saves application, filesystem, network, and strict-session profiles under `%LOCALAPPDATA%\Scylla\profiles`. Configure these through the UI and review the selected profile before launching. Workbench has [separate settings and storage](scyllagpt/README.md#configuration-and-local-data).
+With no project selected, Codex uses a read-only policy with shell access disabled. With a project selected, it receives workspace editing access plus enabled, in-scope Knowledge roots marked available to the agent. Turns include the absolute Knowledge paths so the agent can locate those sources.
+
+**Current Knowledge limitation:** Codex receives those source roots as writable roots, including sources labeled read-only in Knowledge Settings. Folder-level `No Access` overrides filter Workbench browsing but are not translated into exclusions from the parent agent grant. Do not rely on these UI settings to enforce read-only or child-folder isolation for the agent. Claude receives the Knowledge path context, but its print-mode launch does not apply the same Codex grant list.
+
+The Keyring is one encrypted application vault; projects define secret scopes and environment-variable bindings. Plain environment values do not require a Keyring. Protected values can be supplied to human terminals according to execution policy; agent terminal environments strip protected values. Secret execution recipes and the agent execution broker remain deferred.
+
+See the [Workbench documentation](scyllagpt/README.md) and [lockdown notes](scyllagpt/docs/lockdown.md) for additional details.
 
 ## Troubleshooting
 
 | Symptom | Check |
 |---|---|
 | `cmake` or the Visual Studio generator is unavailable | Install the C++ workload, Windows SDK, and CMake; reopen Developer PowerShell for VS 2022. |
-| `dotnet` is unavailable | Install the .NET 9 SDK, or skip the optional WPF build. |
-| WPF reports `scylla.exe` missing | Build the native Release targets, then rebuild the WPF project so the native tools are copied alongside the UI. |
-| Strict launch reports related processes already running | Save work and close those processes, then retry. |
-| Launch refuses a path or ACL grant | Read the reported reason; use an existing executable and a disposable local workspace whose permissions you can modify. Avoid drive roots, user-profile roots, and redirected workspace paths. |
 | Workbench cannot find or connect a provider | Follow [Workbench troubleshooting](scyllagpt/README.md#troubleshooting). |
+| Build cannot find the Workbench target | Re-run the configure command for the chosen build tree. An older generated solution may predate the current targets. |
+| Linker cannot write `scylla-workbench.exe` | Close the running Workbench, then rebuild the same tree. |
+| Agent cannot find Knowledge folders | Confirm source enablement, project scope, and **Available to agent**; check that the grant display includes Knowledge roots. After upgrading, fully quit and launch the newly built executable, then start a new chat. |
+
+## Current limitations
+
+This is an evolving Workbench, not a full IDE. Live MCP tool invocation, Strata context capture/sync UI, Knowledge search and alias routing, secret execution recipes, and the agent secret broker are deferred. Terminal Ports, split panes, and scrollback search are also unfinished. The Problems panel currently lists unsaved documents; it is not a compiler or language-server diagnostic feed. See [capability status](scyllagpt/docs/capability.md) for the wider checklist.
 
 ## Repository layout
 
 ```text
-src/scylla/       AppContainer launch, identity, ACL, discovery, and sessions
-src/probe/        Sandbox capability probe
-src/test_parent/  Process-tree test fixture
-src/ui/           WPF management shell
-scyllagpt/        Scylla Workbench native Win32 source
-docs/             Architecture, threat-model, and implementation notes
+scyllagpt/              Scylla Workbench (product)
+  src/domain/           Providers, knowledge, MCP, Strata, Keyring, environments
+  src/ui/               Editor, terminal sessions, settings, shared UI
+archive/scylla-cage/    Archived AppContainer CLI (not built)
+archive/                Other historical sources (not built)
+docs/                   Index and Workbench screenshot assets
 ```
 
 ## Security notes
 
-- Grant the smallest possible directories; do not grant an entire user profile.
-- Reparse points and unsafe workspace roots are rejected.
-- AppContainer filesystem access is implemented with explicit ACL grants.
-- Basic and strict launches enable internet access by default. Use `strict launch --no-internet` to omit the internet capability.
-- `--json` is the supported automation contract; do not parse human-readable output.
+- Grant the smallest useful project and Knowledge folders; do not grant an entire user profile.
+- Codex runs as the signed-in Windows user under Workbench policy and sandbox settings — not an OS AppContainer.
 - Report security-sensitive findings privately before publishing details.
 
 ## Documentation
 
-See [docs/README.md](docs/README.md) for the technical documentation index and [scyllagpt/docs/capability.md](scyllagpt/docs/capability.md) for Workbench capability status.
+See [docs/README.md](docs/README.md) for the documentation index and [scyllagpt/docs/capability.md](scyllagpt/docs/capability.md) for Workbench capability status.
 
 ## Third-party software
 
-Scylla Workbench includes Scintilla and Lexilla source code under their permissive license. External Codex, ChatGPT, OpenAI, Anthropic, and Claude products are not distributed by this repository and remain subject to their respective terms.
+Scylla Workbench includes Scintilla, Lexilla, and the Argon2 implementation used by the Keyring. Bundled components retain their own licenses. External Codex, ChatGPT, OpenAI, Anthropic, and Claude products are not distributed by this repository and remain subject to their respective terms.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 

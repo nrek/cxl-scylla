@@ -1,6 +1,9 @@
 #pragma once
 
+#include "scyllagpt/agent_activity.h"
+
 #include "scyllagpt/json.h"
+#include "scyllagpt/mcp_manager.h"
 #include "scyllagpt/paths.h"
 #include "scyllagpt/runtime.h"
 #include "scyllagpt/settings.h"
@@ -11,6 +14,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace scyllagpt {
 
@@ -65,6 +69,7 @@ public:
     Settings settings;
 
     AppState state = AppState::Offline;
+    AgentActivity activity;
     std::wstring status_text = L"Offline";
     AccountInfo account;
     std::vector<ModelChoice> models;
@@ -98,6 +103,8 @@ public:
     void logout();
     void new_conversation();
     void open_thread(const std::string& id);
+    std::string chat_title_seed;
+    int chats_epoch = 0;
     void send_user(const std::string& text);
     // Called on UI thread when a Claude -p worker finishes (ok + text or error).
     void complete_claude_print(bool ok, const std::string& text, const std::wstring& error);
@@ -106,6 +113,14 @@ public:
     bool has_project_grant() const;
     std::wstring grant_label() const;
     bool sync_lockdown_config();
+    // Knowledge source roots the agent may browse (enabled + agent_available).
+    void set_knowledge_accessible_paths(std::vector<std::wstring> paths);
+    void set_mcp_manager(const McpManager* manager) { mcp_manager_ = manager; }
+    const std::vector<std::wstring>& knowledge_accessible_paths() const {
+        return knowledge_accessible_paths_;
+    }
+    // Absolute-path preamble so the model looks under Knowledge roots, not only cwd.
+    std::string knowledge_grant_preamble() const;
     std::string account_scope() const;
     void cancel_turn();
     void refresh_threads();
@@ -121,6 +136,8 @@ public:
     void set_draft(const std::string& thread_id, const std::string& text);
 
     bool runtime_live() const { return runtime_.running(); }
+    bool thread_busy(const std::string& thread_id) const;
+    bool active_thread_busy() const { return thread_busy(active_thread_id); }
 
 private:
     std::int64_t next_id_ = 1;
@@ -131,7 +148,7 @@ private:
     bool models_replace_next_ = true;
     std::int64_t logout_id_ = 0;
     std::int64_t thread_list_id_ = 0;
-    std::int64_t thread_start_id_ = 0;
+    std::int64_t thread_start_id_ = -1;
     std::int64_t thread_resume_id_ = 0;
     std::int64_t thread_read_id_ = 0;
     std::int64_t turn_start_id_ = 0;
@@ -155,15 +172,31 @@ private:
     void ensure_selected_model();
     void ensure_claude_thread();
     void send_claude_user(const std::string& text);
+    void send_user_to_thread(const std::string& text, const std::string& thread_id, bool foreground);
     static int model_sort_rank(const std::string& id, const std::string& provider_id);
     void handle_response(const Json& msg);
     void handle_notification(const Json& msg);
     void handle_server_request(const Json& msg);
     void apply_account(const Json& account);
-    void extract_history(const Json& thread);
+    void extract_history(const Json& thread, const std::string& thread_id);
+    void select_thread_runtime(const std::string& thread_id);
+
+    struct ThreadRuntime {
+        AgentActivity activity;
+        std::string stream;
+        std::string turn_id;
+    };
+    std::unordered_map<std::string, ThreadRuntime> thread_runtime_;
+    std::unordered_map<std::int64_t, std::string> turn_start_threads_;
+    std::unordered_map<std::int64_t, std::string> pending_thread_prompts_;
+    std::unordered_map<std::int64_t, std::string> thread_read_threads_;
+    std::unordered_map<std::string, std::string> turn_threads_;
 
     bool claude_busy_ = false;
     std::atomic<bool> claude_cancel_{false};
+
+    std::vector<std::wstring> knowledge_accessible_paths_;
+    const McpManager* mcp_manager_ = nullptr;
 };
 
 const wchar_t* state_label(AppState s);

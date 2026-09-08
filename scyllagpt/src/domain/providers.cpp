@@ -196,6 +196,38 @@ std::wstring discover_claude_cli() {
     return {};
 }
 
+std::wstring discover_cursor_agent_cli() {
+    auto env = [](const wchar_t* name) {
+        const DWORD n = GetEnvironmentVariableW(name, nullptr, 0);
+        std::wstring value(n, L'\0');
+        if (n) value.resize(GetEnvironmentVariableW(name, value.data(), n));
+        return value;
+    };
+    std::vector<std::wstring> dirs;
+    const auto home = env(L"USERPROFILE");
+    if (!home.empty()) dirs.push_back(home + L"\\.local\\bin");
+    const auto path = env(L"PATH");
+    std::size_t begin = 0;
+    while (begin < path.size()) {
+        const auto end = path.find(L';', begin);
+        auto dir = path.substr(begin, end == std::wstring::npos ? end : end - begin);
+        if (dir.size() >= 2 && dir.front() == L'"' && dir.back() == L'"')
+            dir = dir.substr(1, dir.size() - 2);
+        // No relative or UNC paths: provider discovery must not probe project scripts/network shares.
+        if (dir.size() > 2 && dir[1] == L':' && (dir[2] == L'\\' || dir[2] == L'/')) dirs.push_back(dir);
+        if (end == std::wstring::npos) break;
+        begin = end + 1;
+    }
+    for (const auto& dir : dirs) {
+        for (const auto* name : {L"agent.exe", L"agent.cmd", L"cursor-agent.exe", L"cursor-agent.cmd"}) {
+            const auto candidate = dir + L"\\" + name;
+            const auto attrs = GetFileAttributesW(candidate.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) return candidate;
+        }
+    }
+    return {};
+}
+
 bool claude_code_login_launch(std::wstring* error) {
     const std::wstring cli = discover_claude_cli();
     if (cli.empty()) {

@@ -17,8 +17,6 @@ AppContainer is the primary OS boundary. Filesystem access also depends on Windo
 
 Strict mode checks for related processes before launch because an already-running unrestricted instance is outside the cage. The session can report a degraded state if a related unrestricted process appears while the contained process is running.
 
-Dedicated-user mode is a compatibility option for applications that cannot run in AppContainer. It provides identity separation, not AppContainer isolation, and requires careful deny/allow ACL design.
-
 ## Non-goals
 
 Scylla does not claim to:

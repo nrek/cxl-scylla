@@ -28,6 +28,7 @@ void menu_apply_command_state(HMENU popup, const CommandUiState& st) {
     set_ck(Cmd_ToggleFiles, st.files_visible);
     set_ck(Cmd_ToggleHistory, st.history_visible);
     set_ck(Cmd_FocusEditor, st.focus_editor);
+    set_ck(Cmd_ToggleTerminal, st.terminal_visible);
 }
 
 const wchar_t* content_view_title(ContentView view) {
@@ -35,13 +36,15 @@ const wchar_t* content_view_title(ContentView view) {
         case ContentView::Settings:
             return L"Settings";
         case ContentView::Access:
-            return L"Current Access";
+            return L"Project Security";
         case ContentView::Diagnostics:
             return L"Diagnostics";
         case ContentView::Shortcuts:
             return L"Keyboard Shortcuts";
         case ContentView::GettingStarted:
             return L"Getting Started";
+        case ContentView::Keyring:
+            return L"Scylla Keyring";
         default:
             return L"";
     }
@@ -53,6 +56,16 @@ const wchar_t* settings_section_label(SettingsSection section) {
             return L"AI Providers";
         case SettingsSection::Editor:
             return L"Editor";
+        case SettingsSection::Terminal:
+            return L"Terminal";
+        case SettingsSection::Knowledge:
+            return L"Knowledge/Skills";
+        case SettingsSection::Mcp:
+            return L"MCP";
+        case SettingsSection::Strata:
+            return L"STRATA";
+        case SettingsSection::Security:
+            return L"Security";
         case SettingsSection::Advanced:
             return L"Advanced";
         default:

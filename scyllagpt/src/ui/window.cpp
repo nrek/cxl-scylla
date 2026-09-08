@@ -1,16 +1,42 @@
 #include "scyllagpt/window.h"
+#include "scyllagpt/workflow.h"
+#include "scyllagpt/chat_history.h"
+#include "scyllagpt/chat_list.h"
+#include "scyllagpt/agent_files.h"
 #include "scyllagpt/resource.h"
 
 #include "scyllagpt/document.h"
 #include "scyllagpt/editor_host.h"
 #include "scyllagpt/commands.h"
+#include "scyllagpt/environment_settings_ui.h"
+#include "scyllagpt/keyring.h"
+#include "scyllagpt/keyring_ui.h"
+#include "scyllagpt/knowledge.h"
+#include "scyllagpt/knowledge_settings_ui.h"
 #include "scyllagpt/layout.h"
+#include "scyllagpt/mcp_manager.h"
+#include "scyllagpt/mcp_oauth.h"
+#include "scyllagpt/mcp_settings_ui.h"
 #include "scyllagpt/paths.h"
+#include "scyllagpt/project_environment.h"
+#include "scyllagpt/security_overview_ui.h"
+#include "scyllagpt/security_policy_ui.h"
+#include "scyllagpt/ui_space.h"
 #include "scyllagpt/provider.h"
 #include "scyllagpt/session.h"
 #include "scyllagpt/store.h"
+#include "scyllagpt/strata_bridge.h"
+#include "scyllagpt/strata_client.h"
+#include "scyllagpt/strata_settings_ui.h"
+#include "scyllagpt/terminal_host.h"
+#include "scyllagpt/terminal_profiles.h"
+#include "scyllagpt/terminal_session.h"
+#include "scyllagpt/terminal_settings_ui.h"
 #include "scyllagpt/theme.h"
+#include "scyllagpt/ui_gallery.h"
+#include "scyllagpt/ui_kit.h"
 #include "scyllagpt/utf.h"
+#include "scyllagpt/workbench_panel.h"
 
 #include "Scintilla.h"
 
@@ -27,8 +53,11 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #pragma comment(lib, "comctl32.lib")
@@ -47,21 +76,27 @@ constexpr UINT WM_SCYLLA_LINE = WM_APP + 41;
 constexpr UINT WM_SCYLLA_CLOSE_SEL = WM_APP + 42;
 constexpr UINT WM_SCYLLA_PICK_SEL = WM_APP + 45;
 constexpr UINT WM_SCYLLA_OPEN_SEL = WM_APP + 46;
+constexpr UINT WM_SCYLLA_TERMINAL_OUT = WM_APP + 40;
+constexpr UINT WM_SCYLLA_MCP_AUTH = WM_APP + 47;
+// Defer panel chrome layout off BN_CLICKED / LBUTTONDOWN — SetWindowPos/RedrawWindow on the
+// control still inside its notify handler crashes (surface tabs after hosts parented under content_).
+constexpr UINT WM_SCYLLA_RELAYOUT = WM_APP + 48;
+constexpr WPARAM kRelayoutEnsurePanel = 1;
 constexpr wchar_t kSelectorClass[] = L"ScyllaGPTSelectorPopup";
 
-constexpr COLORREF kWindow = RGB(0x14, 0x16, 0x18);
-constexpr COLORREF kFiles = RGB(0x18, 0x1A, 0x1D);
-constexpr COLORREF kEditor = RGB(0x1C, 0x1E, 0x21);
-constexpr COLORREF kAgent = RGB(0x1C, 0x1E, 0x21);
-constexpr COLORREF kHistory = RGB(0x18, 0x1A, 0x1D);
-constexpr COLORREF kInput = RGB(0x23, 0x26, 0x2A);
-constexpr COLORREF kText = RGB(0xE4, 0xE7, 0xEB);
-constexpr COLORREF kMuted = RGB(0x94, 0x9D, 0xA8);
+constexpr COLORREF kWindow = RGB(0x0C, 0x0F, 0x12);   // theme.app_bg
+constexpr COLORREF kFiles = RGB(0x10, 0x13, 0x17);    // theme.panel / navigation
+constexpr COLORREF kEditor = RGB(0x10, 0x13, 0x17);   // settings content = panel (no striping)
+constexpr COLORREF kAgent = RGB(0x14, 0x18, 0x1D);    // theme.surface
+constexpr COLORREF kHistory = RGB(0x10, 0x13, 0x17);
+constexpr COLORREF kInput = RGB(0x0F, 0x13, 0x17);
+constexpr COLORREF kText = RGB(0xD7, 0xDC, 0xE2);
+constexpr COLORREF kMuted = RGB(0x72, 0x7C, 0x87);
 constexpr COLORREF kAccent = RGB(0xE6, 0x94, 0x05);
-constexpr COLORREF kYouBody = RGB(0xA8, 0xB0, 0xBA);  // dimmer than white "You" heading
-constexpr COLORREF kAsst = RGB(0xE4, 0xE7, 0xEB);
-constexpr COLORREF kBorder = RGB(0x30, 0x33, 0x38);
-constexpr COLORREF kRule = RGB(0x28, 0x2B, 0x30);  // very subtle divider
+constexpr COLORREF kYouBody = RGB(0xA2, 0xAB, 0xB5);
+constexpr COLORREF kAsst = RGB(0xD7, 0xDC, 0xE2);
+constexpr COLORREF kBorder = RGB(0x30, 0x37, 0x40);
+constexpr COLORREF kRule = RGB(0x26, 0x2C, 0x33);
 
 enum {
     ID_SIGNIN = Cmd_SignIn,
@@ -88,6 +123,12 @@ enum {
     ID_ACCOUNT = Cmd_Account,
     ID_HOMEHINT = Cmd_HomeHint,
     ID_THREADS = Cmd_Threads,
+    ID_WORKFLOW = 29004,
+    ID_KNOWLEDGE_TREE = 29001,
+    ID_KNOWLEDGE_HEADER = 29002,
+    ID_KNOWLEDGE_MANAGE = 29003,
+    ID_MARKDOWN_VIEW = 29004,
+    ID_MARKDOWN_TOGGLE = 29005,
     ID_TREE = Cmd_Tree,
     ID_FILTER = Cmd_Filter,
     ID_SEARCH = Cmd_Search,
@@ -126,9 +167,12 @@ enum {
     ID_EDIT_SELECT_ALL = Cmd_EditSelectAll,
     ID_VIEW_WRAP = Cmd_ViewWrap,
     ID_VIEW_WHITESPACE = Cmd_ViewWhitespace,
+    ID_TOGGLE_TERMINAL = Cmd_ToggleTerminal,
+    ID_NEW_TERMINAL = Cmd_NewTerminal,
     ID_CLEAR_CTX = Cmd_ClearCtx,
     ID_ACCESS_SHOW = Cmd_AccessShow,
     ID_ACCESS_FOLDERS = Cmd_AccessFolders,
+    ID_ACCESS_KEYRING = Cmd_AccessKeyring,
     ID_HELP_ABOUT = Cmd_HelpAbout,
     ID_HELP_SHORTCUTS = Cmd_HelpShortcuts,
     ID_HELP_DIAG = Cmd_HelpDiag,
@@ -154,12 +198,37 @@ enum {
     ID_SET_ENTER_SENDS = Cmd_SetEnterSends,
     ID_GS_OPEN_FOLDER = Cmd_GsOpenFolder,
     ID_GS_PROVIDERS = Cmd_GsProviders,
+    ID_TERMINAL = Cmd_Terminal,
+    ID_PANEL_PROBLEMS = Cmd_PanelShowProblems,
+    ID_PANEL_OUTPUT = Cmd_PanelShowOutput,
+    ID_PANEL_PORTS = Cmd_PanelShowPorts,
+    ID_UI_GALLERY = Cmd_UiGallery,
+    ID_MCP_LIST = Cmd_McpList,
+    ID_MCP_DETAIL = Cmd_McpDetail,
+    ID_MCP_ADD = Cmd_McpAdd,
+    ID_MCP_ADD_ACCOUNT = Cmd_McpAddAccount,
+    ID_MCP_MANAGE = Cmd_McpManage,
+    ID_MCP_REAUTH = Cmd_McpReauth,
+    ID_MCP_CHECK = Cmd_McpCheck,
+    ID_MCP_DISABLE = Cmd_McpDisable,
+    ID_MCP_DISCONNECT = Cmd_McpDisconnect,
+    ID_MCP_REMOVE = Cmd_McpRemove,
+    ID_MCP_ADD_TEMPLATE = Cmd_McpAddTemplate,
+    ID_MCP_ADD_NAME = Cmd_McpAddName,
+    ID_MCP_ADD_ALIAS = Cmd_McpAddAlias,
+    ID_MCP_ADD_ENDPOINT = Cmd_McpAddEndpoint,
+    ID_MCP_ADD_SAVE = Cmd_McpAddSave,
+    ID_MCP_ADD_CANCEL = Cmd_McpAddCancel,
+    ID_MCP_ALIAS_POPUP = Cmd_McpAliasPopup,
 };
 
 struct TreeNode {
     std::wstring path;
     bool dir = false;
     bool loaded = false;
+    enum class Kind { Project, KnowledgeHeader, KnowledgeSource, KnowledgeEntry };
+    Kind kind = Kind::Project;
+    std::string source_id;
 };
 
 struct OpenDoc {
@@ -175,6 +244,10 @@ struct OpenDoc {
     IndentInfo indent{};
     std::string language;
     bool large_file = false;
+    bool from_knowledge = false;
+    bool markdown_source = false;
+    std::string knowledge_source_id;
+    std::wstring knowledge_label;
 };
 
 struct AttachedImage {
@@ -199,6 +272,10 @@ struct Ui {
     HWND hdr_files = nullptr;
     HWND filter = nullptr;
     HWND tree = nullptr;
+    HWND knowledge_tree = nullptr;
+    HWND knowledge_header = nullptr;
+    HWND knowledge_manage = nullptr;
+    bool knowledge_collapsed = false;
     HWND hdr_editor = nullptr;
     HWND tabs = nullptr;
     HWND find = nullptr;
@@ -206,6 +283,10 @@ struct Ui {
     HWND save = nullptr;
     bool find_open = false;
     HWND editor = nullptr;
+    HWND markdown_view = nullptr;
+    HWND markdown_toggle = nullptr;
+    long markdown_stream_start = -1;
+    bool agent_heading_pending = false;
     HWND editor_status = nullptr;
     HWND gutter = nullptr;
     HWND empty_editor = nullptr;
@@ -221,6 +302,8 @@ struct Ui {
     HWND neu = nullptr;
     HWND agent_hint = nullptr;
     HWND transcript = nullptr;
+    HWND activity = nullptr;
+    std::wstring activity_text;
     HWND composer = nullptr;
     HWND send = nullptr;
     HWND cancel = nullptr;
@@ -230,7 +313,8 @@ struct Ui {
     HWND threads = nullptr;
     HWND ctx = nullptr;
     HWND add_file = nullptr;
-    HWND add_sel = nullptr;
+    HWND workflow = nullptr;
+    bool suppress_submit_char = false;
     HWND pin = nullptr;
     HWND archive = nullptr;
     HWND tab_editor = nullptr;
@@ -252,6 +336,9 @@ struct Ui {
     RECT composer_box{};
     RECT thumb_row{};
     std::vector<AttachedImage> images;
+    std::unordered_map<std::wstring, std::vector<DisplayAttachment>> message_attachments;
+    HWND attachment_tray = nullptr;
+    HWND attachment_lightbox = nullptr;
     WNDPROC tabs_prev = nullptr;
     WNDPROC chat_tabs_prev = nullptr;
     WNDPROC panel_prev = nullptr;
@@ -272,26 +359,35 @@ struct Ui {
     WNDPROC filter_prev = nullptr;
     WNDPROC search_prev = nullptr;
     WNDPROC find_prev = nullptr;
-    int drag = 0;  // 1 files|editor, 2 editor|agent, 3 agent|history
+    int drag = 0;  // 1 files|editor, 2 editor|agent, 3 agent|history, 4 terminal, 5 knowledge
     int drag_origin = 0;
     int files_w0 = 0;
     int agent_w0 = 0;
     int history_w0 = 0;
+    int terminal_h0 = 0;
+    int knowledge_h0 = 0;
+    int knowledge_height = 0;
+    int knowledge_max_height = 0;
     RECT split1{};
     RECT split2{};
     RECT split3{};
+    RECT split_term{};
+    RECT split_knowledge{};
     PaneLayout panes{};
     int narrow_tab = 0;
     bool focus_restore_files = false;
     bool focus_restore_history = false;
     std::wstring editor_path;
     std::vector<std::string> thread_ids;
+    std::vector<std::wstring> chat_groups;
+    bool restore_chat_pending = true;
     std::vector<OpenDoc> docs;
     int active_doc = -1;
     bool suppress_edit = false;
 
     ContentView content_view = ContentView::Editor;
     SettingsSection settings_section = SettingsSection::Providers;
+    SecuritySubpage security_subpage = SecuritySubpage::Overview;
     int claude_auth_polls = 0;  // remaining WM_TIMER ticks to re-query `claude auth status`
     HWND content_host = nullptr;
     HWND content_back = nullptr;
@@ -302,6 +398,7 @@ struct Ui {
     HWND set_oa_signin = nullptr;
     HWND set_oa_signout = nullptr;
     HWND set_cl_status = nullptr;
+    HWND set_cursor_status = nullptr;
     HWND set_cl_key = nullptr;
     HWND set_cl_code = nullptr;
     HWND set_cl_disc = nullptr;
@@ -312,8 +409,47 @@ struct Ui {
     HWND set_wrap = nullptr;
     HWND set_whitespace = nullptr;
     HWND set_enter_sends = nullptr;
+    HWND set_ui_gallery = nullptr;
     HWND gs_open_folder = nullptr;
     HWND gs_providers = nullptr;
+
+    TerminalSessionManager terminal_sessions;
+    WorkbenchPanel workbench_panel;
+    TerminalSettingsUi terminal_ui;
+    std::vector<TerminalProfile> terminal_profiles;
+    int terminal_profile_sel = 0;
+    bool panel_collapsed = false;
+    int panel_h_before_maximize = 0;
+    // Last dirty-document set pushed to the Problems surface. refresh_tabs runs on every keystroke,
+    // so the surface is only rebuilt when the set actually changes.
+    std::wstring problems_signature;
+
+    KnowledgeStore knowledge;
+    KnowledgeSettingsUi knowledge_ui;
+    McpManager mcp;
+    McpSettingsUi mcp_ui;
+    std::vector<AgentFile> mention_files;
+    HWND mcp_alias_popup = nullptr;
+    std::vector<std::string> mcp_alias_completions;
+    std::vector<std::string> mcp_auth_queue;  // connection ids awaiting silent freshness check
+    bool mcp_auth_busy = false;
+    int mcp_auth_tick = 0;  // periodic re-queue (~5 min at 2s timer)
+    unsigned chat_busy_frame = 0;
+    StrataClient strata;
+    StrataBridge strata_bridge;
+    StrataSettingsUi strata_ui;
+    KeyringUi keyring_ui;
+    ProjectEnvironmentManager environments;
+    EnvironmentSettingsUi environment_ui;
+    SecurityOverviewUi security_overview;
+    SecurityPolicyUi security_policy;
+    HWND sec_tab_overview = nullptr;
+    HWND sec_tab_keyring = nullptr;
+    HWND sec_tab_environments = nullptr;
+    HWND sec_tab_policy = nullptr;
+    // Status-bar chip for the active project's environment (click = pick / manage).
+    HWND status_env = nullptr;
+    UiGallery ui_gallery;
 };
 
 Ui* g_ui = nullptr;
@@ -322,6 +458,11 @@ std::wstring get_window_text(HWND h);
 void do_find(Ui* ui);
 void do_goto(Ui* ui);
 void layout(Ui* ui);
+void append_attachment_footer(Ui* ui, const std::vector<DisplayAttachment>& attachments);
+void show_attachment_tray(Ui* ui, const std::wstring& key, HWND source, long position);
+void close_attachment_windows(Ui* ui);
+void apply_stream(Ui* ui);
+void refresh_settings_data(Ui* ui);
 void center_single_line_edit(HWND edit, HFONT font);
 
 int dip(HWND hwnd, int v) {
@@ -421,6 +562,7 @@ void load_doc_into_editor(Ui* ui, OpenDoc& d) {
     editor_set_text(ui->editor, d.text);
     d.indent = editor_detect_indent(d.text);
     d.language = detect_language_id(d.path);
+    if (d.language == "markdown" && !d.large_file) ui_kit::set_markdown(ui->markdown_view, d.text);
     editor_apply_indent(ui->editor, d.indent);
     editor_apply_chrome(ui->editor, ui->font_mono, 13, static_cast<int>(GetDpiForWindow(ui->wnd)));
     editor_set_language(ui->editor, d.path, d.large_file);
@@ -519,7 +661,7 @@ void append_rich(HWND edit, const std::wstring& text, COLORREF color, bool bold)
     SendMessageW(edit, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&end));
     CHARFORMAT2W cf{};
     cf.cbSize = sizeof(cf);
-    cf.dwMask = CFM_COLOR | CFM_BOLD | CFM_FACE | CFM_SIZE | CFM_BACKCOLOR;
+    cf.dwMask = CFM_COLOR | CFM_BOLD | CFM_FACE | CFM_SIZE | CFM_BACKCOLOR | CFM_ITALIC | CFM_LINK | CFM_UNDERLINE | CFM_STRIKEOUT;
     cf.crTextColor = color;
     cf.dwEffects = (bold ? CFE_BOLD : 0) | CFE_AUTOBACKCOLOR;
     lstrcpynW(cf.szFaceName, L"Segoe UI", LF_FACESIZE);
@@ -542,25 +684,13 @@ void append_divider(HWND edit) {
 void append_user_message(HWND edit, const std::wstring& text) {
     ShowWindow(edit, SW_SHOW);
     append_rich(edit, L"You\r\n", kText, true);
-    std::wstring body = text;
-    for (auto& ch : body) {
-        if (ch == L'\n') {
-            ch = L'\r';
-        }
-    }
-    append_rich(edit, body + L"\r\n", kYouBody, false);
+    ui_kit::append_markdown(edit, text);
 }
 
 void append_agent_message(HWND edit, const std::wstring& text) {
     ShowWindow(edit, SW_SHOW);
     append_rich(edit, L"Agent\r\n", kAccent, true);
-    std::wstring body = text;
-    for (auto& ch : body) {
-        if (ch == L'\n') {
-            ch = L'\r';
-        }
-    }
-    append_rich(edit, body + L"\r\n", kAsst, false);
+    ui_kit::append_markdown(edit, text);
 }
 
 std::wstring get_window_text(HWND h) {
@@ -627,7 +757,9 @@ HTREEITEM insert_tree_item(HWND tree, HTREEITEM parent, const std::wstring& name
     return TreeView_InsertItem(tree, &ins);
 }
 
-void fill_dir(HWND tree, HTREEITEM parent, const std::wstring& dir, const std::wstring& filter) {
+void fill_dir(HWND tree, HTREEITEM parent, const std::wstring& dir, const std::wstring& filter,
+              TreeNode::Kind kind = TreeNode::Kind::Project, const std::string& source_id = {},
+              const KnowledgeStore* knowledge = nullptr) {
     std::wstring glob = dir;
     if (!glob.empty() && glob.back() != L'\\' && glob.back() != L'/') {
         glob += L'\\';
@@ -636,7 +768,10 @@ void fill_dir(HWND tree, HTREEITEM parent, const std::wstring& dir, const std::w
     WIN32_FIND_DATAW fd{};
     HANDLE h = FindFirstFileW(glob.c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) {
-        auto* n = new TreeNode{L"", false, true};
+        auto* n = new TreeNode{};
+        n->loaded = true;
+        n->kind = kind;
+        n->source_id = source_id;
         insert_tree_item(tree, parent, L"(unavailable)", n, false);
         return;
     }
@@ -653,6 +788,9 @@ void fill_dir(HWND tree, HTREEITEM parent, const std::wstring& dir, const std::w
             continue;
         }
         std::wstring name = fd.cFileName;
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && unresolved_environment_directory(name)) {
+            continue;
+        }
         if (!filter.empty()) {
             std::wstring low = name;
             std::wstring f = filter;
@@ -667,6 +805,13 @@ void fill_dir(HWND tree, HTREEITEM parent, const std::wstring& dir, const std::w
         e.path = dir + L"\\" + name;
         e.dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
         e.reparse = (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        // Knowledge cascade: root R/W|RO applies to descendants; No Access overrides are omitted.
+        if (knowledge && !source_id.empty()) {
+            const EffectiveAccess eff = knowledge->resolve_effective_access(source_id, e.path);
+            if (!eff.readable) {
+                continue;
+            }
+        }
         if (e.dir) {
             dirs.push_back(std::move(e));
         } else {
@@ -678,31 +823,108 @@ void fill_dir(HWND tree, HTREEITEM parent, const std::wstring& dir, const std::w
     std::sort(dirs.begin(), dirs.end(), less);
     std::sort(files.begin(), files.end(), less);
     for (const auto& e : dirs) {
-        auto* n = new TreeNode{e.path, true, e.reparse};
+        auto* n = new TreeNode{};
+        n->path = e.path;
+        n->dir = true;
+        n->loaded = e.reparse;  // reparse: do not expand
+        n->kind = kind;
+        n->source_id = source_id;
         insert_tree_item(tree, parent, e.reparse ? (e.name + L" ↗") : e.name, n, !e.reparse);
     }
     for (const auto& e : files) {
-        auto* n = new TreeNode{e.path, false, true};
+        auto* n = new TreeNode{};
+        n->path = e.path;
+        n->dir = false;
+        n->loaded = true;
+        n->kind = kind;
+        n->source_id = source_id;
         insert_tree_item(tree, parent, e.name, n, false);
     }
 }
 
 void rebuild_tree(Ui* ui) {
+    std::vector<std::pair<std::string, std::wstring>> expanded;
+    std::function<void(HTREEITEM)> remember = [&](HTREEITEM item) {
+        for (; item; item = TreeView_GetNextSibling(ui->knowledge_tree, item)) {
+            TVITEMW value{};
+            value.mask = TVIF_PARAM | TVIF_STATE;
+            value.stateMask = TVIS_EXPANDED;
+            value.hItem = item;
+            TreeView_GetItem(ui->knowledge_tree, &value);
+            auto* node = reinterpret_cast<TreeNode*>(value.lParam);
+            if (node && (value.state & TVIS_EXPANDED)) expanded.emplace_back(node->source_id, node->path);
+            remember(TreeView_GetChild(ui->knowledge_tree, item));
+        }
+    };
+    remember(TreeView_GetRoot(ui->knowledge_tree));
     TreeView_DeleteAllItems(ui->tree);
-    if (ui->session.settings.project_folder.empty()) {
-        return;
+    TreeView_DeleteAllItems(ui->knowledge_tree);
+    const auto& project = ui->session.settings.project_folder;
+    if (!project.empty()) {
+        const DWORD attrs = GetFileAttributesW(project.c_str());
+        auto* root = new TreeNode{};
+        root->loaded = true;
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            root->path = project;
+            root->dir = true;
+            HTREEITEM item = insert_tree_item(ui->tree, TVI_ROOT, folder_name(project), root, true);
+            fill_dir(ui->tree, item, project, get_window_text(ui->filter));
+            TreeView_Expand(ui->tree, item, TVE_EXPAND);
+        } else insert_tree_item(ui->tree, TVI_ROOT, L"Folder missing — use Open folder", root, false);
     }
-    const DWORD a = GetFileAttributesW(ui->session.settings.project_folder.c_str());
-    if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-        auto* n = new TreeNode{L"", false, true};
-        insert_tree_item(ui->tree, TVI_ROOT, L"Folder missing — use Open folder", n, false);
-        return;
+    // Separate KNOWLEDGE / SKILLS sections — never merge into project src tree. Disabled sources
+    // are configuration only and stay out of the explorer entirely.
+    const std::string pid = ui->session.store.active_project_id;
+    const auto sources = ui->knowledge.list_enabled_for_project(pid);
+    std::vector<const KnowledgeSource*> knowledge_sources;
+    std::vector<const KnowledgeSource*> skills_sources;
+    for (const KnowledgeSource* s : sources) {
+        if (!s) {
+            continue;
+        }
+        (s->type == SourceType::Skills ? skills_sources : knowledge_sources).push_back(s);
     }
-    auto* root = new TreeNode{ui->session.settings.project_folder, true, false};
-    HTREEITEM r = insert_tree_item(ui->tree, TVI_ROOT, folder_name(ui->session.settings.project_folder), root, true);
-    fill_dir(ui->tree, r, ui->session.settings.project_folder, get_window_text(ui->filter));
-    root->loaded = true;
-    TreeView_Expand(ui->tree, r, TVE_EXPAND);
+
+    auto add_source = [&](const KnowledgeSource* source, HTREEITEM parent) {
+        auto* node = new TreeNode{};
+        node->path = source->path;
+        node->dir = true;
+        node->kind = TreeNode::Kind::KnowledgeSource;
+        node->source_id = source->id;
+        std::wstring label = source->label.empty() ? folder_name(source->path) : source->label;
+        if (source->access == AccessMode::ReadOnly) label += L" (read-only)";
+        insert_tree_item(ui->knowledge_tree, parent, label, node, true);
+    };
+    for (const auto* source : knowledge_sources) add_source(source, TVI_ROOT);
+    if (!skills_sources.empty()) {
+        auto* header = new TreeNode{};
+        header->dir = header->loaded = true;
+        header->kind = TreeNode::Kind::KnowledgeHeader;
+        HTREEITEM skills = insert_tree_item(ui->knowledge_tree, TVI_ROOT, L"Skills", header, true);
+        for (const auto* source : skills_sources) add_source(source, skills);
+        TreeView_Expand(ui->knowledge_tree, skills, TVE_EXPAND);
+    }
+    if (sources.empty()) {
+        auto* empty = new TreeNode{};
+        empty->loaded = true;
+        empty->kind = TreeNode::Kind::KnowledgeHeader;
+        insert_tree_item(ui->knowledge_tree, TVI_ROOT, L"Add folders in Knowledge settings", empty, false);
+    }
+    refresh_thin_scrollbar(ui->knowledge_tree);
+    std::function<void(HTREEITEM)> restore = [&](HTREEITEM item) {
+        for (; item; item = TreeView_GetNextSibling(ui->knowledge_tree, item)) {
+            TVITEMW value{};
+            value.mask = TVIF_PARAM;
+            value.hItem = item;
+            TreeView_GetItem(ui->knowledge_tree, &value);
+            auto* node = reinterpret_cast<TreeNode*>(value.lParam);
+            if (node && std::find(expanded.begin(), expanded.end(), std::make_pair(node->source_id, node->path)) != expanded.end()) {
+                TreeView_Expand(ui->knowledge_tree, item, TVE_EXPAND);
+                restore(TreeView_GetChild(ui->knowledge_tree, item));
+            }
+        }
+    };
+    restore(TreeView_GetRoot(ui->knowledge_tree));
     refresh_thin_scrollbar(ui->tree);
 }
 
@@ -734,6 +956,7 @@ void reopen_model_selector(Ui* ui, HWND face);
 void refill_model_selector(Ui* ui);
 void refresh_threads(Ui* ui);
 void refresh_chrome(Ui* ui);
+void refresh_settings_data(Ui* ui);
 void refresh_models(Ui* ui);
 void apply_selector(Ui* ui, int owner, int sel);
 std::wstring model_choice_label(const ModelChoice& m);
@@ -746,6 +969,8 @@ void open_chat_index(Ui* ui, int index);
 std::wstring prompt_text(HWND parent, const wchar_t* caption, const std::wstring& initial);
 bool rename_chat_id(Ui* ui, const std::string& thread_id);
 LRESULT CALLBACK chat_tabs_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
+void go_back_content(Ui* ui);
+void refresh_workbench_problems(Ui* ui);
 
 void pull_editor(Ui* ui) {
     if (ui->active_doc < 0 || ui->active_doc >= static_cast<int>(ui->docs.size())) {
@@ -768,6 +993,24 @@ void show_doc(Ui* ui, int i) {
 
 bool open_document(Ui* ui, const std::wstring& path, bool pin) {
     const std::wstring full = canonicalize_path(path);
+    // Folder overrides are enforced here, before the file is read — a No Access subtree must not
+    // be openable just because it is reachable from the explorer.
+    const KnowledgeSource* owning_source =
+        ui->knowledge.source_for_path(full, ui->session.store.active_project_id);
+    EffectiveAccess knowledge_access;
+    if (owning_source) {
+        knowledge_access = ui->knowledge.resolve_effective_access(owning_source->id, full);
+        if (!knowledge_access.readable) {
+            const wchar_t* msg = L"This path is not readable under the knowledge source permissions.";
+            if (!owning_source->enabled) {
+                msg = L"This knowledge source is disabled.";
+            } else if (knowledge_access.from_override && knowledge_access.mode == AccessMode::NoAccess) {
+                msg = L"This path is under a No Access folder override for this knowledge source.";
+            }
+            MessageBoxW(ui->wnd, msg, L"Scylla", MB_ICONWARNING);
+            return false;
+        }
+    }
     for (std::size_t i = 0; i < ui->docs.size(); ++i) {
         if (_wcsicmp(ui->docs[i].path.c_str(), full.c_str()) == 0) {
             if (pin) {
@@ -804,6 +1047,15 @@ bool open_document(Ui* ui, const std::wstring& path, bool pin) {
     if (loaded.too_large) {
         d.large_file = true;
         d.readonly = true;
+    }
+    if (owning_source) {
+        d.from_knowledge = true;
+        d.knowledge_source_id = owning_source->id;
+        d.knowledge_label =
+            owning_source->label.empty() ? folder_name(owning_source->path) : owning_source->label;
+        if (!knowledge_access.writable) {
+            d.readonly = true;
+        }
     }
     if (!pin) {
         for (std::size_t i = 0; i < ui->docs.size(); ++i) {
@@ -860,6 +1112,8 @@ void refresh_tabs(Ui* ui) {
         InvalidateRect(ui->hdr_editor, nullptr, TRUE);
         ui->editor_path = d.path;
     }
+    // The tab strip and the Problems surface report the same dirty set; keep them in step.
+    refresh_workbench_problems(ui);
 }
 
 struct PromptOut {
@@ -871,7 +1125,7 @@ LRESULT CALLBACK prompt_wnd_proc(HWND hwnd, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_CREATE) {
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(l);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
-        CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP, 12, 16, 320, 28,
+        CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP, 12, 16, 320, 28,
                         hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(100)), nullptr, nullptr);
         CreateWindowExW(0, L"BUTTON", L"OK", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP, 160, 60, 80, 28, hwnd,
                         reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDOK)), nullptr, nullptr);
@@ -1020,8 +1274,9 @@ void edit_target_action(Ui* ui, int id) {
 HMENU build_menu_bar() {
     HMENU bar = CreateMenu();
     HMENU file = CreatePopupMenu();
-    AppendMenuW(file, MF_STRING, ID_OPEN_FOLDER, L"Open Folder…\tCtrl+O");
-    AppendMenuW(file, MF_STRING, ID_OPEN_FILE, L"Open File…");
+    // Labels must match the accelerator table: Ctrl+O opens a file, Ctrl+Shift+O a folder.
+    AppendMenuW(file, MF_STRING, ID_OPEN_FILE, L"Open File…\tCtrl+O");
+    AppendMenuW(file, MF_STRING, ID_OPEN_FOLDER, L"Open Folder…\tCtrl+Shift+O");
     AppendMenuW(file, MF_STRING, ID_SAVE, L"Save\tCtrl+S");
     AppendMenuW(file, MF_STRING, ID_CLOSE_TAB, L"Close Tab\tCtrl+W");
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
@@ -1049,6 +1304,11 @@ HMENU build_menu_bar() {
     AppendMenuW(view, MF_STRING, ID_TOGGLE_HISTORY, L"Chat History");
     AppendMenuW(view, MF_STRING, ID_FOCUS, L"Focus Editor");
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(view, MF_STRING, ID_TOGGLE_TERMINAL, L"Terminal\tCtrl+`");
+    AppendMenuW(view, MF_STRING, ID_NEW_TERMINAL, L"New Terminal");
+    AppendMenuW(view, MF_STRING, ID_PANEL_PROBLEMS, L"Problems");
+    AppendMenuW(view, MF_STRING, ID_PANEL_OUTPUT, L"Output");
+    AppendMenuW(view, MF_STRING, ID_PANEL_PORTS, L"Ports");
     AppendMenuW(view, MF_STRING, ID_VIEW_WRAP, L"Word Wrap");
     AppendMenuW(view, MF_STRING, ID_VIEW_WHITESPACE, L"Show Whitespace");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), L"&View");
@@ -1066,8 +1326,9 @@ HMENU build_menu_bar() {
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(agent), L"&Agent");
 
     HMENU access = CreatePopupMenu();
-    AppendMenuW(access, MF_STRING, ID_ACCESS_SHOW, L"Show Current Access");
+    AppendMenuW(access, MF_STRING, ID_ACCESS_SHOW, L"Project Security");
     AppendMenuW(access, MF_STRING, ID_ACCESS_FOLDERS, L"Authorized Folders…");
+    AppendMenuW(access, MF_STRING, ID_ACCESS_KEYRING, L"Keyring…");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(access), L"A&ccess");
 
     HMENU help = CreatePopupMenu();
@@ -1090,20 +1351,79 @@ CommandUiState capture_command_state(Ui* ui) {
     st.files_visible = ui->panes.show_files;
     st.history_visible = ui->panes.show_history;
     st.focus_editor = ui->session.settings.focus_editor;
+    st.terminal_visible = ui->session.settings.terminal_visible;
     st.has_context_chips = !ui->session.context_chips.empty();
     return st;
 }
 
 void hide_settings_controls(Ui* ui) {
     const HWND ctrls[] = {ui->content_nav, ui->set_oa_status, ui->set_oa_signin, ui->set_oa_signout,
-                          ui->set_cl_status, ui->set_cl_key, ui->set_cl_code, ui->set_cl_disc, ui->set_def_label,
+                          ui->set_cl_status, ui->set_cursor_status, ui->set_cl_key, ui->set_cl_code, ui->set_cl_disc, ui->set_def_label,
                           ui->set_def_combo, ui->set_codex, ui->set_copy_runtime, ui->set_wrap, ui->set_whitespace,
-                          ui->set_enter_sends, ui->gs_open_folder, ui->gs_providers};
+                          ui->set_enter_sends, ui->set_ui_gallery, ui->gs_open_folder, ui->gs_providers};
     for (HWND h : ctrls) {
         if (h) {
             ShowWindow(h, SW_HIDE);
         }
     }
+    ui->knowledge_ui.set_visible(false);
+    ui->mcp_ui.hide();
+    ui->strata_ui.set_visible(false);
+    ui->keyring_ui.show(false);
+    ui->environment_ui.set_visible(false);
+    ui->security_overview.set_visible(false);
+    ui->security_policy.set_visible(false);
+    for (HWND tab : {ui->sec_tab_overview, ui->sec_tab_keyring, ui->sec_tab_environments, ui->sec_tab_policy}) {
+        if (tab) {
+            ShowWindow(tab, SW_HIDE);
+        }
+    }
+    ui->terminal_ui.set_visible(false);
+    ui->ui_gallery.show(false);
+}
+
+void apply_security_subpage(Ui* ui) {
+    if (!ui) {
+        return;
+    }
+    const bool on_security =
+        ui->content_view == ContentView::Settings && ui->settings_section == SettingsSection::Security;
+    if (!on_security) {
+        return;
+    }
+    ui->security_overview.set_visible(ui->security_subpage == SecuritySubpage::Overview);
+    ui->environment_ui.set_visible(ui->security_subpage == SecuritySubpage::Environments);
+    ui->security_policy.set_visible(ui->security_subpage == SecuritySubpage::Policy);
+    // Keyring full page under Security, or Access→Keyring ContentView.
+    const bool show_kr = ui->security_subpage == SecuritySubpage::Keyring;
+    ui->keyring_ui.show(show_kr);
+    for (HWND tab : {ui->sec_tab_overview, ui->sec_tab_keyring, ui->sec_tab_environments, ui->sec_tab_policy}) {
+        if (tab) {
+            ShowWindow(tab, SW_SHOW);
+            InvalidateRect(tab, nullptr, TRUE);
+        }
+    }
+}
+
+void set_security_subpage(Ui* ui, SecuritySubpage page) {
+    if (!ui) {
+        return;
+    }
+    ui->security_subpage = page;
+    if (page == SecuritySubpage::Keyring) {
+        std::wstring pname;
+        for (const auto& p : ui->session.store.projects) {
+            if (p.id == ui->session.store.active_project_id) {
+                pname = p.name;
+                break;
+            }
+        }
+        ui->keyring_ui.ensure_app_vault_bound();
+        ui->keyring_ui.set_active_project(ui->session.store.active_project_id, pname);
+    }
+    refresh_settings_data(ui);
+    apply_security_subpage(ui);
+    layout(ui);
 }
 
 void refresh_settings_pane(Ui* ui) {
@@ -1129,6 +1449,9 @@ void refresh_settings_pane(Ui* ui) {
     }
     cl_line += L"\n(Chat via Claude Code — print mode)";
     SetWindowTextW(ui->set_cl_status, cl_line.c_str());
+    SetWindowTextW(ui->set_cursor_status, discover_cursor_agent_cli().empty()
+        ? L"Cursor ACP — Agent CLI not found\nIntegration in progress. Install the Agent CLI separately from Cursor desktop."
+        : L"Cursor ACP — Agent CLI found\nIntegration in progress. Account connection and chat are not available yet.");
     EnableWindow(ui->set_oa_signin, !ui->session.account.signed_in);
     EnableWindow(ui->set_oa_signout, ui->session.account.signed_in);
     const bool claude_cli = !discover_claude_cli().empty();
@@ -1148,16 +1471,777 @@ void refresh_settings_pane(Ui* ui) {
     refresh_models(ui);
 }
 
+std::wstring user_profile_home() {
+    wchar_t home[MAX_PATH]{};
+    const DWORD n = GetEnvironmentVariableW(L"USERPROFILE", home, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        return {};
+    }
+    return home;
+}
+
+int settings_section_nav_index(SettingsSection section) {
+    switch (section) {
+        case SettingsSection::Providers:
+            return 0;
+        case SettingsSection::Editor:
+            return 1;
+        case SettingsSection::Terminal:
+            return 2;
+        case SettingsSection::Knowledge:
+            return 3;
+        case SettingsSection::Mcp:
+            return 4;
+        case SettingsSection::Strata:
+            return 5;
+        case SettingsSection::Security:
+            return 6;
+        case SettingsSection::Advanced:
+            return 7;
+        default:
+            return 0;
+    }
+}
+
+SettingsSection settings_section_from_nav(int sel) {
+    switch (sel) {
+        case 0:
+            return SettingsSection::Providers;
+        case 1:
+            return SettingsSection::Editor;
+        case 2:
+            return SettingsSection::Terminal;
+        case 3:
+            return SettingsSection::Knowledge;
+        case 4:
+            return SettingsSection::Mcp;
+        case 5:
+            return SettingsSection::Strata;
+        case 6:
+            return SettingsSection::Security;
+        default:
+            return SettingsSection::Advanced;
+    }
+}
+
+bool settings_section_uses_body(SettingsSection section) {
+    (void)section;
+    return false;  // Terminal / Knowledge / MCP / Strata use interactive panels
+}
+
+std::wstring keyring_status_label(Ui* ui, const std::string& /*project_id*/) {
+    if (ui) {
+        return ui->keyring_ui.status_label();
+    }
+    return Keyring::app_vault_exists() ? L"Locked" : L"None";
+}
+
+void reload_terminal_profiles(Ui* ui) {
+    if (!ui) {
+        return;
+    }
+    const auto discovered = discover_terminal_profiles();
+    const auto custom = load_custom_terminal_profiles(ui->session.paths.terminals_path);
+    ui->terminal_profiles =
+        merge_terminal_profiles(discovered, custom, ui->session.settings.terminal_profile_enabled);
+}
+
+void wire_workbench_panel(Ui* ui);
+
+// Environment chooser for an explicit "new terminal" gesture. Returns false when the menu was
+// dismissed; on success |out| holds the chosen environment id (empty = launch with none).
+// Silently yields the project default when there is nothing to choose between.
+bool prompt_terminal_environment(Ui* ui, std::string* out) {
+    if (!ui || !ui->wnd || !out) {
+        return false;
+    }
+    out->clear();
+    const std::string pid = ui->session.store.active_project_id;
+    const ProjectEnvironmentState* st = pid.empty() ? nullptr : ui->environments.state_for(pid);
+    const std::string active = pid.empty() ? std::string{} : ui->environments.active_environment_id(pid);
+    if (!st || st->environments.empty()) {
+        *out = active;
+        return true;
+    }
+
+    constexpr UINT kIdDefault = 1;
+    constexpr UINT kIdNone = 2;
+    constexpr UINT kIdFirstEnv = 100;
+    std::wstring default_label = L"Project default — ";
+    if (const auto* e = active.empty() ? nullptr : ui->environments.find_environment(pid, active)) {
+        default_label += utf16(e->name);
+    } else {
+        default_label += L"None";
+    }
+
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, kIdDefault, default_label.c_str());
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    UINT item = kIdFirstEnv;
+    for (const auto& e : st->environments) {
+        UINT flags = MF_STRING;
+        if (e.id == active) {
+            flags |= MF_CHECKED;
+        }
+        AppendMenuW(m, flags, item++, utf16(e.name).c_str());
+    }
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, kIdNone, L"No environment");
+
+    POINT p{};
+    GetCursorPos(&p);
+    const int chosen = TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, p.x, p.y, 0,
+                                      ui->wnd, nullptr);
+    DestroyMenu(m);
+    if (chosen == 0) {
+        return false;  // dismissed — do not launch
+    }
+    if (chosen == static_cast<int>(kIdDefault)) {
+        *out = active;
+        return true;
+    }
+    if (chosen == static_cast<int>(kIdNone)) {
+        return true;  // out already empty
+    }
+    const auto idx = static_cast<std::size_t>(chosen - static_cast<int>(kIdFirstEnv));
+    if (idx >= st->environments.size()) {
+        return false;
+    }
+    *out = st->environments[idx].id;
+    return true;
+}
+
+// Resolves |env_id| into a launchable environment block and applies Execution Policy → Human
+// terminals to protected values. Returns false when the launch must be abandoned (resolve error or
+// a policy refusal). |env_block| must outlive the spawn: opts->environment points into it.
+bool resolve_terminal_environment(Ui* ui, const std::string& env_id, TerminalCreateOpts* opts,
+                                  std::wstring* env_block) {
+    if (!ui || !ui->wnd || !opts || !env_block) {
+        return false;
+    }
+    const std::string pid = ui->session.store.active_project_id;
+    if (pid.empty() || env_id.empty()) {
+        return true;
+    }
+    auto resolved = ui->environments.resolve_for_terminal(pid, env_id, ui->keyring_ui.keyring(),
+                                                          /*agent_terminal=*/false);
+    if (resolved.status != EnvResolveStatus::Ok) {
+        std::wstring msg = L"Environment resolve failed: ";
+        msg += utf16(resolved.message.empty() ? env_resolve_status_string(resolved.status)
+                                              : resolved.message);
+        SetWindowTextW(ui->status, msg.c_str());
+        ui->workbench_panel.append_output(L"terminal", msg);
+        MessageBoxW(ui->wnd, msg.c_str(), L"Scylla Environments", MB_OK | MB_ICONWARNING);
+        return false;
+    }
+    if (resolved.includes_protected) {
+        // Execution Policy → Human terminals decides whether this is silent, confirmed, or
+        // refused. Human Only is marked either way: the process really does hold secrets.
+        const PolicyMode policy = ui->session.settings.execution_policy.human_terminals;
+        if (policy == PolicyMode::Block) {
+            SetWindowTextW(ui->status, L"Execution Policy blocks protected values in terminals.");
+            ui->workbench_panel.append_output(
+                L"terminal", L"Blocked by Execution Policy: protected environment values are not "
+                             L"allowed in terminals.");
+            MessageBoxW(ui->wnd,
+                        L"This environment injects Keyring-backed secrets, and Execution "
+                        L"Policy blocks protected values in terminals.\r\n\r\nChange it under "
+                        L"Settings → Security → Execution Policy, or launch with no "
+                        L"environment.",
+                        L"Blocked by Execution Policy", MB_OK | MB_ICONWARNING);
+            return false;
+        }
+        if (policy == PolicyMode::Ask) {
+            const int ans =
+                MessageBoxW(ui->wnd,
+                            L"This environment injects Keyring-backed secrets.\r\n\r\n"
+                            L"The terminal will be marked Human Only — do not use it for agent "
+                            L"tasks.\r\n\r\nContinue?",
+                            L"Protected environment", MB_YESNO | MB_ICONWARNING);
+            if (ans != IDYES) {
+                return false;
+            }
+        }
+        opts->human_only = true;
+    }
+    if (!resolved.entries.empty()) {
+        *env_block = ProjectEnvironmentManager::merge_into_process_env(resolved.entries);
+        opts->environment = env_block;
+    }
+    opts->environment_id = env_id;
+    if (const auto* env = ui->environments.find_environment(pid, env_id)) {
+        opts->environment_name = utf16(env->name);
+    }
+    return true;
+}
+
+// Enabled profile matching |id|, or nullptr. Restart/Duplicate need the session's own profile back,
+// not the workspace default.
+const TerminalProfile* find_enabled_terminal_profile(Ui* ui, const std::string& id) {
+    if (!ui || id.empty()) {
+        return nullptr;
+    }
+    for (const auto& p : ui->terminal_profiles) {
+        if (p.id == id && p.enabled) {
+            return &p;
+        }
+    }
+    return nullptr;
+}
+
+void ensure_terminal_panel(Ui* ui);
+bool prompt_terminal_environment(Ui* ui, std::string* out);
+bool new_terminal_session(Ui* ui, const std::string& profile_id_override = {},
+                          const std::string* env_override = nullptr,
+                          const std::wstring* cwd_override = nullptr);
+
+HWND terminal_host_parent(Ui* ui) {
+    if (!ui) {
+        return nullptr;
+    }
+    // Do not call ensure_terminal_panel here — layout() already did, and ensure→set_surface→callback
+    // must not re-enter layout while chrome/hosts are mid-move.
+    if (HWND c = ui->workbench_panel.content_hwnd()) {
+        return c;
+    }
+    if (HWND p = ui->workbench_panel.hwnd()) {
+        return p;
+    }
+    return ui->wnd;
+}
+
+void request_new_terminal(Ui* ui) {
+    if (!ui) {
+        return;
+    }
+    ensure_terminal_panel(ui);
+    ui->session.settings.terminal_visible = true;
+    ui->panel_collapsed = false;
+    ui->workbench_panel.set_collapsed(false);
+    ui->workbench_panel.set_surface(PanelSurface::Terminal);
+    std::string env_id;
+    if (!prompt_terminal_environment(ui, &env_id)) {
+        layout(ui);
+        return;
+    }
+    new_terminal_session(ui, {}, &env_id);
+    layout(ui);
+    ui->terminal_sessions.focus_active();
+    refresh_chrome(ui);
+}
+
+// |env_override| nullptr = use the project's active environment (auto-created panel sessions).
+// |cwd_override| nullptr = resolve from the profile; Duplicate passes the source session's cwd so
+// the copy lands in the same directory even if the profile resolves differently now.
+bool new_terminal_session(Ui* ui, const std::string& profile_id_override,
+                          const std::string* env_override,
+                          const std::wstring* cwd_override) {
+    if (!ui || !ui->wnd) {
+        return false;
+    }
+    if (ui->terminal_profiles.empty()) {
+        reload_terminal_profiles(ui);
+    }
+    const TerminalProfile* prof = find_enabled_terminal_profile(ui, profile_id_override);
+    if (!prof) {
+        prof = find_default_terminal_profile(ui->terminal_profiles,
+                                            ui->session.settings.default_terminal_profile_id);
+    }
+    if (!prof) {
+        SetWindowTextW(ui->status, L"No enabled terminal profile. Configure Settings → Terminal.");
+        ui->workbench_panel.append_output(
+            L"terminal", L"Spawn refused: no enabled terminal profile (Settings → Terminal).");
+        return false;
+    }
+    const std::wstring cwd =
+        (cwd_override && !cwd_override->empty())
+            ? *cwd_override
+            : resolve_profile_cwd(*prof, ui->session.project_root, user_profile_home());
+
+    TerminalCreateOpts opts;
+    std::wstring env_block;
+    const std::string pid = ui->session.store.active_project_id;
+    const std::string env_id =
+        env_override ? *env_override : ui->environments.active_environment_id(pid);
+    if (!resolve_terminal_environment(ui, env_id, &opts, &env_block)) {
+        return false;
+    }
+
+    std::wstring err;
+    const bool spawned = ui->terminal_sessions.create_session(
+        terminal_host_parent(ui), ui->wnd, GetModuleHandleW(nullptr), ID_TERMINAL, *prof, cwd, opts, &err);
+    // Wipe resolved secret material from the local block once CreateProcess is done with it —
+    // including the failure path, where a live block would otherwise outlive its use.
+    if (!env_block.empty()) {
+        SecureZeroMemory(env_block.data(), env_block.size() * sizeof(wchar_t));
+    }
+    if (!spawned) {
+        if (!err.empty()) {
+            SetWindowTextW(ui->status, err.c_str());
+        }
+        std::wstring log = L"Spawn failed: ";
+        log += prof->name;
+        log += L" in ";
+        log += cwd.empty() ? L"(no cwd)" : cwd;
+        if (!err.empty()) {
+            log += L" — ";
+            log += err;
+        }
+        ui->workbench_panel.append_output(L"terminal", log);
+        return false;
+    }
+    ui->workbench_panel.refresh_session_tabs(ui->terminal_sessions);
+    ui->workbench_panel.set_enabled_profiles(enabled_terminal_profiles(ui->terminal_profiles));
+    return true;
+}
+
+// Problems v0. There is no language-server or linter pipeline yet, so the surface reports the
+// workbench findings it can actually vouch for: documents with unsaved edits. |ref| carries the
+// OpenDoc index so activating a row can jump to that tab.
+void refresh_workbench_problems(Ui* ui) {
+    if (!ui) {
+        return;
+    }
+    std::vector<WorkbenchProblem> items;
+    std::wstring signature;
+    for (std::size_t i = 0; i < ui->docs.size(); ++i) {
+        const auto& d = ui->docs[i];
+        if (!d.dirty) {
+            continue;
+        }
+        const std::size_t slash = d.path.find_last_of(L"\\/");
+        const std::wstring leaf =
+            (slash == std::wstring::npos) ? d.path : d.path.substr(slash + 1);
+        WorkbenchProblem p;
+        p.primary = L"Unsaved: " + (leaf.empty() ? std::wstring(L"(untitled)") : leaf);
+        p.secondary = d.path;
+        p.ref = static_cast<int>(i);
+        signature += std::to_wstring(i) + L"|" + d.path + L"\n";
+        items.push_back(std::move(p));
+    }
+    if (signature == ui->problems_signature) {
+        return;  // typing in an already-dirty document must not churn the list control
+    }
+    ui->problems_signature = signature;
+    ui->workbench_panel.set_problems(std::move(items));
+}
+
+void ensure_terminal_panel(Ui* ui) {
+    if (!ui || !ui->wnd) {
+        return;
+    }
+    if (!ui->workbench_panel.created()) {
+        wire_workbench_panel(ui);
+    }
+    const bool show = ui->session.settings.terminal_visible;
+    ui->workbench_panel.set_visible(show);
+    ui->terminal_sessions.set_panel_visible(show && !ui->panel_collapsed &&
+                                           ui->workbench_panel.surface() == PanelSurface::Terminal);
+    if (show) {
+        ui->workbench_panel.set_surface(parse_panel_surface(ui->session.settings.panel_surface));
+        if (ui->terminal_sessions.count() == 0 &&
+            ui->workbench_panel.surface() == PanelSurface::Terminal) {
+            new_terminal_session(ui, {});
+        }
+        ui->workbench_panel.refresh_session_tabs(ui->terminal_sessions);
+        ui->workbench_panel.set_enabled_profiles(enabled_terminal_profiles(ui->terminal_profiles));
+    }
+}
+
+void toggle_terminal(Ui* ui) {
+    if (!ui) {
+        return;
+    }
+    ui->session.settings.terminal_visible = !ui->session.settings.terminal_visible;
+    if (!ui->session.settings.terminal_visible) ui->terminal_sessions.destroy_all();
+    ui->panel_collapsed = false;
+    ui->workbench_panel.set_collapsed(false);
+    save_settings(ui->session.paths.settings_path, ui->session.settings);
+    ensure_terminal_panel(ui);
+    layout(ui);
+}
+
+void show_panel_surface(Ui* ui, PanelSurface surface) {
+    if (!ui) {
+        return;
+    }
+    ui->session.settings.terminal_visible = true;
+    ui->session.settings.panel_surface = panel_surface_string(surface);
+    ui->panel_collapsed = false;
+    ui->workbench_panel.set_collapsed(false);
+    save_settings(ui->session.paths.settings_path, ui->session.settings);
+    ensure_terminal_panel(ui);
+    ui->workbench_panel.set_surface(surface);
+    layout(ui);
+}
+
+void poll_terminal(Ui* ui) {
+    if (!ui) {
+        return;
+    }
+    // Repaint the tab strip only when a session's alive state actually flips. Calling
+    // refresh_session_tabs unconditionally would invalidate the panel on every timer tick.
+    std::size_t alive_before = 0;
+    for (const auto& s : ui->terminal_sessions.sessions()) {
+        alive_before += s.alive ? 1u : 0u;
+    }
+    ui->terminal_sessions.poll_all();
+    std::size_t alive_after = 0;
+    for (const auto& s : ui->terminal_sessions.sessions()) {
+        alive_after += s.alive ? 1u : 0u;
+    }
+    if (alive_after != alive_before) {
+        ui->workbench_panel.refresh_session_tabs(ui->terminal_sessions);
+    }
+}
+
+void wire_workbench_panel(Ui* ui) {
+    if (!ui || ui->workbench_panel.created()) {
+        return;
+    }
+    ui->workbench_panel.create(ui->wnd, GetModuleHandleW(nullptr), ui->font, ui->font_small);
+    ui->workbench_panel.set_on_hide([ui]() {
+        ui->session.settings.terminal_visible = false;
+        ui->terminal_sessions.destroy_all();
+        ui->workbench_panel.refresh_session_tabs(ui->terminal_sessions);
+        save_settings(ui->session.paths.settings_path, ui->session.settings);
+        PostMessageW(ui->wnd, WM_SCYLLA_RELAYOUT, kRelayoutEnsurePanel, 0);
+    });
+    ui->workbench_panel.set_on_collapse([ui]() {
+        ui->panel_collapsed = !ui->panel_collapsed;
+        ui->workbench_panel.set_collapsed(ui->panel_collapsed);
+        PostMessageW(ui->wnd, WM_SCYLLA_RELAYOUT, kRelayoutEnsurePanel, 0);
+    });
+    ui->workbench_panel.set_on_maximize([ui]() {
+        if (ui->workbench_panel.maximized()) {
+            if (ui->panel_h_before_maximize > 0) {
+                ui->session.settings.terminal_h = ui->panel_h_before_maximize;
+            }
+            ui->workbench_panel.set_maximized(false);
+        } else {
+            ui->panel_h_before_maximize = ui->session.settings.terminal_h;
+            ui->session.settings.terminal_h = 480;
+            ui->workbench_panel.set_maximized(true);
+        }
+        save_settings(ui->session.paths.settings_path, ui->session.settings);
+        PostMessageW(ui->wnd, WM_SCYLLA_RELAYOUT, 0, 0);
+    });
+    // A new / switched / closed session changes the Env and Human Only status segments and where
+    // typing should go. refresh_chrome + focus_active keep both honest.
+    // An explicit + offers the environment chooser first; a dismissed menu cancels the launch.
+    ui->workbench_panel.set_on_new_terminal([ui]() {
+        request_new_terminal(ui);
+    });
+    ui->workbench_panel.set_on_new_with_profile([ui](const std::string& id) {
+        ensure_terminal_panel(ui);
+        ui->session.settings.terminal_visible = true;
+        ui->panel_collapsed = false;
+        ui->workbench_panel.set_collapsed(false);
+        ui->workbench_panel.set_surface(PanelSurface::Terminal);
+        std::string env_id;
+        if (!prompt_terminal_environment(ui, &env_id)) {
+            return;
+        }
+        new_terminal_session(ui, id, &env_id);
+        layout(ui);
+        ui->terminal_sessions.focus_active();
+        refresh_chrome(ui);
+    });
+    ui->workbench_panel.set_on_close_session([ui](int index, bool confirm) {
+        // |confirm| is set by the tab context menu's Close item; the X button and middle-click
+        // stay immediate, matching the editor tab strip.
+        if (confirm) {
+            const auto& titles = ui->workbench_panel.session_titles();
+            const std::wstring name = (index >= 0 && index < static_cast<int>(titles.size()))
+                                          ? titles[static_cast<std::size_t>(index)]
+                                          : std::wstring(L"this terminal");
+            if (!ui_kit::confirm_destructive(ui->wnd, L"Close", name.c_str(),
+                                             L"Anything still running in it is terminated.")) {
+                return;
+            }
+        }
+        ui->terminal_sessions.close_session_at(index);
+        if (ui->terminal_sessions.count() == 0) {
+            ui->session.settings.terminal_visible = false;
+            save_settings(ui->session.paths.settings_path, ui->session.settings);
+        }
+        ui->workbench_panel.refresh_session_tabs(ui->terminal_sessions);
+        PostMessageW(ui->wnd, WM_SCYLLA_RELAYOUT, 0, 1);
+    });
+    ui->workbench_panel.set_on_activate_session([ui](int index) {
+        ui->terminal_sessions.set_active(index);
+        ui->workbench_panel.refresh_session_tabs(ui->terminal_sessions);
+        // Defer layout/focus — same reentrancy risk as surface BN_CLICKED (raise_chrome / hosts).
+        PostMessageW(ui->wnd, WM_SCYLLA_RELAYOUT, 0, 1);
+    });
+    // Instance-level rename: the tab title changes, the profile behind it does not.
+    ui->workbench_panel.set_on_rename_session([ui](int index) {
+        auto* s = ui->terminal_sessions.session_at(index);
+        if (!s) {
+            return;
+        }
+        const std::wstring cur = s->title;
+        // prompt_text echoes |initial| back on Cancel, so an unchanged value means "no rename".
+        const std::wstring next = prompt_text(ui->wnd, L"Rename terminal", cur);
+        if (next.empty() || next == cur) {
+            return;
+        }
+        ui->terminal_sessions.rename_session_at(index, next);
+        ui->workbench_panel.refresh_session_tabs(ui->terminal_sessions);
+        refresh_chrome(ui);
+    });
+    // Restart respawns the same profile in the same cwd, keeping the tab's id / title / position.
+    // The environment is re-resolved so a rotated secret lands in the new process.
+    ui->workbench_panel.set_on_restart_session([ui](int index) {
+        auto* s = ui->terminal_sessions.session_at(index);
+        if (!s) {
+            return;
+        }
+        const std::wstring title = s->title;
+        if (s->alive &&
+            !ui_kit::confirm_destructive(ui->wnd, L"Restart", title.c_str(),
+                                         L"The running shell is terminated before the new one starts.")) {
+            return;
+        }
+        if (ui->terminal_profiles.empty()) {
+            reload_terminal_profiles(ui);
+        }
+        const std::string profile_id = s->profile_id;
+        const std::string env_id = s->environment_id;
+        const std::wstring cwd_hint = s->cwd;
+        const TerminalProfile* prof = find_enabled_terminal_profile(ui, profile_id);
+        if (!prof) {
+            prof = find_default_terminal_profile(ui->terminal_profiles,
+                                                ui->session.settings.default_terminal_profile_id);
+        }
+        if (!prof) {
+            SetWindowTextW(ui->status, L"No enabled terminal profile. Configure Settings → Terminal.");
+            ui->workbench_panel.append_output(L"terminal",
+                                              L"Restart refused: no enabled terminal profile.");
+            return;
+        }
+        const std::wstring cwd =
+            cwd_hint.empty() ? resolve_profile_cwd(*prof, ui->session.project_root, user_profile_home())
+                             : cwd_hint;
+        TerminalCreateOpts opts;
+        std::wstring env_block;
+        if (!resolve_terminal_environment(ui, env_id, &opts, &env_block)) {
+            return;
+        }
+        std::wstring err;
+        const bool ok = ui->terminal_sessions.restart_session_at(
+            index, terminal_host_parent(ui), ui->wnd, GetModuleHandleW(nullptr), ID_TERMINAL, *prof, cwd, opts,
+            &err);
+        if (!env_block.empty()) {
+            SecureZeroMemory(env_block.data(), env_block.size() * sizeof(wchar_t));
+        }
+        if (ok) {
+            ui->workbench_panel.append_output(L"terminal", L"Restarted " + title + L" in " + cwd);
+        } else {
+            std::wstring log = L"Restart failed: " + title;
+            if (!err.empty()) {
+                log += L" — " + err;
+                SetWindowTextW(ui->status, err.c_str());
+            }
+            ui->workbench_panel.append_output(L"terminal", log);
+        }
+        ui->workbench_panel.refresh_session_tabs(ui->terminal_sessions);
+        layout(ui);
+        ui->terminal_sessions.focus_active();
+        refresh_chrome(ui);
+    });
+    // Duplicate = a fresh session on the same profile / environment / cwd. No env chooser: the
+    // gesture already says which environment is wanted.
+    ui->workbench_panel.set_on_duplicate_session([ui](int index) {
+        auto* s = ui->terminal_sessions.session_at(index);
+        if (!s) {
+            return;
+        }
+        // create_session grows the session vector, which invalidates |s| — copy first.
+        const std::string profile_id = s->profile_id;
+        const std::string env_id = s->environment_id;
+        const std::wstring cwd = s->cwd;
+        new_terminal_session(ui, profile_id, &env_id, &cwd);
+        layout(ui);
+        ui->terminal_sessions.focus_active();
+        refresh_chrome(ui);
+    });
+    ui->workbench_panel.set_on_problems_refresh([ui]() {
+        // Dirty state lives in the editor control until it is pulled back into the OpenDoc.
+        pull_editor(ui);
+        ui->problems_signature.clear();  // an explicit Refresh always rebuilds the rows
+        refresh_workbench_problems(ui);
+    });
+    ui->workbench_panel.set_on_problem_activate([ui](int ref) {
+        // |ref| is the OpenDoc index the row was built from, not the list position.
+        if (ref < 0 || ref >= static_cast<int>(ui->docs.size())) {
+            return;
+        }
+        go_back_content(ui);  // a Problems row is only reachable from the editor surface
+        show_doc(ui, ref);
+        refresh_chrome(ui);
+    });
+    ui->workbench_panel.set_on_surface_changed([ui]() {
+        ui->session.settings.panel_surface = panel_surface_string(ui->workbench_panel.surface());
+        save_settings(ui->session.paths.settings_path, ui->session.settings);
+        // Must not layout/raise_chrome while the surface BUTTON is still in BN_CLICKED.
+        PostMessageW(ui->wnd, WM_SCYLLA_RELAYOUT, kRelayoutEnsurePanel, 0);
+    });
+}
+
+std::wstring terminal_settings_body(Ui* /*ui*/) {
+    return L"";  // interactive TerminalSettingsUi
+}
+
+void ensure_terminal_host(Ui* ui) {
+    // Back-compat alias — panel show path.
+    ensure_terminal_panel(ui);
+}
+
+std::wstring knowledge_settings_body(Ui* ui) {
+    (void)ui;
+    return L"";  // Knowledge/Skills uses KnowledgeSettingsUi (not prose body).
+}
+
+std::wstring mcp_settings_body(Ui* ui) {
+    const std::string pid = ui->session.store.active_project_id;
+    std::wstring msg = L"MCP\r\n\r\n";
+    msg += L"Store: ";
+    msg += ui->session.paths.mcp_path.empty() ? L"(n/a)" : ui->session.paths.mcp_path;
+    msg += L"\r\n\r\nCONNECTIONS";
+    if (!pid.empty()) {
+        msg += L" (project-scoped + global)\r\n";
+    } else {
+        msg += L"\r\n";
+    }
+    if (pid.empty()) {
+        if (ui->mcp.connections().empty()) {
+            msg += L"(none)\r\n";
+        } else {
+            for (const auto& c : ui->mcp.connections()) {
+                msg += L"• ";
+                msg += c.display_name.empty() ? utf16(c.service_id) : c.display_name;
+                msg += c.enabled ? L"" : L" (disabled)";
+                msg += L"\r\n";
+            }
+        }
+    } else {
+        const auto conns = static_cast<const McpManager&>(ui->mcp).list_for_project(pid);
+        if (conns.empty()) {
+            msg += L"(none for this project)\r\n";
+        } else {
+            for (const McpConnection* c : conns) {
+                if (!c) {
+                    continue;
+                }
+                msg += L"• ";
+                msg += c->display_name.empty() ? utf16(c->service_id) : c->display_name;
+                msg += c->enabled ? L"" : L" (disabled)";
+                msg += L"\r\n";
+            }
+        }
+    }
+    msg += L"\r\nKNOWN TEMPLATES\r\n";
+    for (const auto& t : McpManager::known_templates()) {
+        msg += L"• ";
+        msg += utf16(t.display_name);
+        msg += L" (";
+        msg += utf16(t.service_id);
+        msg += L")\r\n";
+    }
+    return msg;
+}
+
+std::wstring strata_settings_body(Ui* ui) {
+    (void)ui;
+    return L"";  // STRATA uses StrataSettingsUi (native bridge panel).
+}
+
+void populate_settings_section_body(Ui* ui) {
+    if (!ui || ui->content_view != ContentView::Settings) {
+        return;
+    }
+    if (ui->settings_section == SettingsSection::Mcp) {
+        ui->mcp_ui.refresh(ui->mcp);
+        return;
+    }
+    if (ui->settings_section == SettingsSection::Knowledge) {
+        ui->knowledge_ui.reload(ui->knowledge, ui->session.store.active_project_id);
+        return;
+    }
+    if (!ui->content_body || !settings_section_uses_body(ui->settings_section)) {
+        return;
+    }
+    std::wstring text;
+    switch (ui->settings_section) {
+        case SettingsSection::Terminal:
+            text = terminal_settings_body(ui);
+            break;
+        case SettingsSection::Strata:
+            text = strata_settings_body(ui);
+            break;
+        default:
+            break;
+    }
+    SetWindowTextW(ui->content_body, text.c_str());
+}
+
 std::wstring access_body_text(Ui* ui) {
-    std::wstring msg = L"ACTIVE PROJECT\r\n";
+    const std::string pid = ui->session.store.active_project_id;
+    const std::string policy = normalize_agent_terminal_policy(ui->session.settings.agent_terminal_policy);
+    const auto knowledge_roots = static_cast<const KnowledgeStore&>(ui->knowledge).list_for_project(pid);
+    const auto mcp_conns =
+        pid.empty() ? std::vector<const McpConnection*>{}
+                    : static_cast<const McpManager&>(ui->mcp).list_for_project(pid);
+    const StrataHealth health = ui->strata.health_check();
+    const StrataBinding* binding = pid.empty() ? nullptr : ui->strata.binding_for(pid);
+
+    std::wstring msg = L"PROJECT SECURITY\r\n\r\n";
+    msg += L"ACTIVE PROJECT\r\n";
     msg += ui->session.project_root.empty() ? L"(none — open a folder)" : ui->session.project_root;
-    msg += L"\r\n\r\nSESSION MODE\r\n";
+    msg += L"\r\nId: ";
+    msg += pid.empty() ? L"(none)" : utf16(pid);
+
+    msg += L"\r\n\r\nFILES GRANT\r\n";
     msg += ui->session.has_project_grant() ? L"Allow edits (workspace-write + sandboxed shell)"
                                           : L"Read only (no project grant)";
-    msg += L"\r\nAsk before tool use — approval_policy on-request (always)\r\n";
-    msg += L"\r\nAUTHORIZED FOLDERS\r\n";
+    msg += L"\r\nAsk before tool use — approval_policy on-request (always)";
+
+    msg += L"\r\n\r\nAGENT TERMINAL POLICY\r\n";
+    msg += utf16(policy);
+    msg += L"\r\n(Human View → Terminal is independent of this policy.)";
+
+    msg += L"\r\n\r\nKNOWLEDGE ROOTS\r\n";
+    msg += std::to_wstring(knowledge_roots.size());
+    msg += L" configured for this project";
+
+    msg += L"\r\n\r\nMCP CONNECTIONS\r\n";
+    msg += std::to_wstring(mcp_conns.size());
+    msg += L" in scope for this project";
+
+    msg += L"\r\n\r\nSTRATA (native memory)\r\n";
+    msg += L"Local: ";
+    msg += ui->strata_bridge.running() || health.ok ? L"available" : L"not connected";
+    msg += L"\r\nShared: central pending";
+    if (binding) {
+        msg += L"\r\nBinding: ";
+        msg += utf16(binding->org);
+        msg += L"/";
+        msg += utf16(binding->strata_project);
+    } else {
+        msg += L"\r\nBinding: (none)";
+    }
+
+    msg += L"\r\n\r\nSCYLLA KEYRING\r\n";
+    msg += keyring_status_label(ui, pid);
+    msg += L"\r\n";
+    msg += Keyring::default_app_vault_path();
+    msg += L"\r\n(Access → Keyring… to create, unlock, or manage secrets. "
+           L"Agent sees references only — never values.)";
+
+    msg += L"\r\n\r\nAUTHORIZED FOLDERS\r\n";
     msg += ui->session.project_root.empty() ? L"(none)" : ui->session.project_root;
-    msg += L"\r\n\r\nUse Access > Authorized Folders… (or Open Folder) to set the project grant.";
+    msg += L"\r\n\r\nUse Access → Authorized Folders… (or Open Folder) to set the project grant.";
     return msg;
 }
 
@@ -1192,14 +2276,18 @@ std::wstring shortcuts_body_text() {
     return L"FILES\r\n"
            L"Ctrl+S             Save\r\n"
            L"Ctrl+W             Close tab\r\n"
-           L"Ctrl+O             Open folder\r\n"
+           L"Ctrl+O             Open file\r\n"
+           L"Ctrl+Shift+O       Open folder\r\n"
            L"\r\nSEARCH\r\n"
            L"Ctrl+F             Find\r\n"
            L"Ctrl+H             Replace\r\n"
            L"Ctrl+G             Go to line\r\n"
            L"\r\nSCYLLA\r\n"
-           L"Escape             Back from Settings / utility view\r\n"
-           L"Enter              Send (when Enter-sends)\r\n"
+           L"Enter              Submit the focused form\r\n"
+           L"Escape             Cancel form · close Find · back from Settings\r\n"
+           L"Ctrl+`             Toggle Workbench Panel (sessions keep running)\r\n"
+           L"View → Problems/Output/Ports   Show panel surface\r\n"
+           L"Ctrl+Enter         Send message\r\n"
            L"\r\nMenus: File / Edit / View / Agent / Access / Help";
 }
 
@@ -1270,14 +2358,52 @@ void show_content_view(Ui* ui, ContentView view, SettingsSection section = Setti
         SendMessageW(ui->content_nav, LB_RESETCONTENT, 0, 0);
         SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"AI Providers"));
         SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Editor"));
+        SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Terminal"));
+        SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Knowledge/Skills"));
+        SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"MCP"));
+        SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"STRATA"));
+        SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Security"));
         SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Advanced"));
-        const int sel = section == SettingsSection::Editor ? 1 : (section == SettingsSection::Advanced ? 2 : 0);
-        SendMessageW(ui->content_nav, LB_SETCURSEL, sel, 0);
+        SendMessageW(ui->content_nav, LB_SETCURSEL, settings_section_nav_index(section), 0);
         refresh_settings_pane(ui);
+        populate_settings_section_body(ui);
+        if (section == SettingsSection::Security) {
+            std::wstring pname;
+            for (const auto& p : ui->session.store.projects) {
+                if (p.id == ui->session.store.active_project_id) {
+                    pname = p.name;
+                    break;
+                }
+            }
+            ui->keyring_ui.ensure_app_vault_bound();
+            ui->keyring_ui.set_active_project(ui->session.store.active_project_id, pname);
+            ui->keyring_ui.maybe_prompt_migration(ui->wnd);
+            apply_security_subpage(ui);
+        }
     }
-    if (view != ContentView::Settings) {
+    if (view == ContentView::Keyring) {
+        std::wstring pname;
+        for (const auto& p : ui->session.store.projects) {
+            if (p.id == ui->session.store.active_project_id) {
+                pname = p.name;
+                break;
+            }
+        }
+        ui->keyring_ui.ensure_app_vault_bound();
+        ui->keyring_ui.set_active_project(ui->session.store.active_project_id, pname);
+        ui->keyring_ui.show(true);
+        ui->keyring_ui.maybe_prompt_migration(ui->wnd);
+    } else if (!(view == ContentView::Settings && section == SettingsSection::Security &&
+                 ui->security_subpage == SecuritySubpage::Keyring)) {
+        // Keep Keyring visible only on Access→Keyring or Security→Keyring.
+        if (!(view == ContentView::Settings && section == SettingsSection::Security)) {
+            ui->keyring_ui.show(false);
+        }
+    }
+    if (view != ContentView::Settings && view != ContentView::Keyring) {
         populate_content_body(ui);
     }
+    refresh_settings_data(ui);
     layout(ui);
 }
 
@@ -1319,6 +2445,129 @@ void open_ai_providers_settings(Ui* ui) {
 
 void open_settings_section(Ui* ui, SettingsSection section) {
     show_content_view(ui, ContentView::Settings, section);
+}
+
+struct McpAuthJob {
+    HWND hwnd = nullptr;
+    std::wstring endpoint;
+    std::string connection_id;
+    std::wstring display_name;
+};
+
+struct McpAuthPosted {
+    std::string connection_id;
+    std::wstring display_name;
+    McpOAuthResult result;
+};
+
+DWORD WINAPI mcp_auth_worker(LPVOID param) {
+    std::unique_ptr<McpAuthJob> job(static_cast<McpAuthJob*>(param));
+    if (!job || !job->hwnd) {
+        return 0;
+    }
+    auto* posted = new McpAuthPosted{};
+    posted->connection_id = job->connection_id;
+    posted->display_name = job->display_name;
+    posted->result = mcp_oauth_freshness_check(job->endpoint, job->connection_id);
+    PostMessageW(job->hwnd, WM_SCYLLA_MCP_AUTH, 0, reinterpret_cast<LPARAM>(posted));
+    return 0;
+}
+
+void queue_mcp_auth_checks(Ui* ui, bool force_all) {
+    if (!ui) {
+        return;
+    }
+    for (const auto& c : ui->mcp.connections()) {
+        if (c.transport_kind != McpTransportKind::Http || !c.enabled || c.disconnected ||
+            c.endpoint_or_cmd.empty()) {
+            continue;
+        }
+        if (!force_all && c.auth_state == McpAuthState::NeedsReauth) {
+            // Already known to need interactive sign-in — don't probe forever.
+            continue;
+        }
+        if (std::find(ui->mcp_auth_queue.begin(), ui->mcp_auth_queue.end(), c.id) ==
+            ui->mcp_auth_queue.end()) {
+            ui->mcp_auth_queue.push_back(c.id);
+        }
+    }
+}
+
+void pump_mcp_auth_queue(Ui* ui) {
+    if (!ui || ui->mcp_auth_busy || ui->mcp_auth_queue.empty()) {
+        return;
+    }
+    const std::string id = ui->mcp_auth_queue.front();
+    ui->mcp_auth_queue.erase(ui->mcp_auth_queue.begin());
+    const McpConnection* c = ui->mcp.by_id(id);
+    if (!c || c->transport_kind != McpTransportKind::Http || !c->enabled || c->disconnected ||
+        c->endpoint_or_cmd.empty()) {
+        return;
+    }
+    auto* job = new McpAuthJob{};
+    job->hwnd = ui->wnd;
+    job->endpoint = c->endpoint_or_cmd;
+    job->connection_id = c->id;
+    job->display_name = !c->connection_name.empty() ? c->connection_name : c->display_name;
+    ui->mcp_auth_busy = true;
+    HANDLE th = CreateThread(nullptr, 0, mcp_auth_worker, job, 0, nullptr);
+    if (th) {
+        CloseHandle(th);
+    } else {
+        ui->mcp_auth_busy = false;
+        delete job;
+    }
+}
+
+void handle_mcp_auth_result(Ui* ui, McpAuthPosted* posted) {
+    std::unique_ptr<McpAuthPosted> hold(posted);
+    if (!ui || !hold) {
+        return;
+    }
+    ui->mcp_auth_busy = false;
+    ui->mcp.mark_auth(hold->connection_id, hold->result.state, hold->result.message);
+    ui->mcp.save(ui->session.paths.mcp_path);
+    if (ui->content_view == ContentView::Settings && ui->settings_section == SettingsSection::Mcp) {
+        ui->mcp_ui.refresh(ui->mcp);
+    }
+    if (hold->result.state != McpAuthState::NeedsReauth) {
+        pump_mcp_auth_queue(ui);
+        return;
+    }
+    std::wstring name = hold->display_name.empty() ? L"MCP connection" : hold->display_name;
+    std::wstring msg = L"\"" + name +
+                       L"\" needs sign-in again.\n\nOpen Settings → MCP to reauthenticate?";
+    const int go = MessageBoxW(ui->wnd, msg.c_str(), L"MCP authentication", MB_YESNO | MB_ICONWARNING);
+    if (go == IDYES) {
+        open_settings_section(ui, SettingsSection::Mcp);
+        ui->mcp_ui.select_connection(hold->connection_id, ui->mcp);
+        const int reauth =
+            MessageBoxW(ui->wnd, L"Start browser sign-in now?", L"Reauthenticate",
+                        MB_YESNO | MB_ICONQUESTION);
+        if (reauth == IDYES) {
+            const McpConnection* c = ui->mcp.by_id(hold->connection_id);
+            if (c && c->transport_kind == McpTransportKind::Http && !c->endpoint_or_cmd.empty()) {
+                MessageBoxW(ui->wnd,
+                            L"A browser window will open so you can sign in.\n\n"
+                            L"After you approve access, return here.",
+                            L"Reauthenticate", MB_OK | MB_ICONINFORMATION);
+                const McpOAuthResult auth =
+                    mcp_oauth_authorize(ui->wnd, c->endpoint_or_cmd, c->id);
+                if (auto* mut = ui->mcp.by_id(c->id)) {
+                    mut->disconnected = false;
+                }
+                ui->mcp.mark_auth(c->id, auth.state, auth.message);
+                ui->mcp.save(ui->session.paths.mcp_path);
+                ui->mcp_ui.refresh(ui->mcp);
+                if (!auth.ok) {
+                    MessageBoxW(ui->wnd,
+                                utf16(auth.message.empty() ? "Sign-in failed." : auth.message).c_str(),
+                                L"Reauthenticate", MB_OK | MB_ICONWARNING);
+                }
+            }
+        }
+    }
+    pump_mcp_auth_queue(ui);
 }
 
 void refresh_chat_tabs(Ui* ui) {
@@ -1376,6 +2625,7 @@ bool rename_chat_id(Ui* ui, const std::string& thread_id) {
         return false;
     }
     c->title = utf8(next);
+    c->title_manual = true;
     persist_store(ui);
     refresh_threads(ui);
     return true;
@@ -1443,7 +2693,11 @@ void check_external(Ui* ui) {
 void refresh_ctx(Ui* ui) {
     SendMessageW(ui->ctx, LB_RESETCONTENT, 0, 0);
     for (const auto& c : ui->session.context_chips) {
-        std::wstring row = utf16(c.label);
+        std::wstring row;
+        if (c.kind == "knowledge") {
+            row = L"[KNOWLEDGE] ";
+        }
+        row += utf16(c.label);
         if (c.unsaved) {
             row += L"  (unsaved)";
         }
@@ -1487,11 +2741,49 @@ void refresh_projects(Ui* ui) {
 
 void rebuild_tree(Ui* ui);
 
+// Switching folders leaves live shells behind, still sitting in the old project's directory with
+// the old project's environment injected. That is easy to miss, so say it out loud once and let the
+// switch be cancelled. Returns true when the caller may proceed.
+bool confirm_project_switch_with_live_terminals(Ui* ui) {
+    if (!ui || !ui->wnd) {
+        return true;
+    }
+    const auto alive = ui->terminal_sessions.alive_titles();
+    if (alive.empty()) {
+        return true;
+    }
+    std::wstring msg = alive.size() == 1 ? L"1 terminal is still running:\r\n\r\n"
+                                         : std::to_wstring(alive.size()) + L" terminals are still running:\r\n\r\n";
+    const std::size_t shown = alive.size() < 6 ? alive.size() : 6;
+    for (std::size_t i = 0; i < shown; ++i) {
+        msg += L"    • " + alive[i] + L"\r\n";
+    }
+    if (shown < alive.size()) {
+        msg += L"    • … and " + std::to_wstring(alive.size() - shown) + L" more\r\n";
+    }
+    msg += L"\r\nThey stay open in the folder and environment they were launched with — switching "
+           L"projects does not move or restart them.\r\n\r\nSwitch anyway?";
+    return MessageBoxW(ui->wnd, msg.c_str(), L"Terminals still running",
+                       MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON1) == IDOK;
+}
+
+void sync_knowledge_agent_grants(Ui* ui) {
+    const std::string pid = ui->session.store.active_project_id;
+    ui->session.set_knowledge_accessible_paths(ui->knowledge.agent_accessible_paths(pid));
+    ui->session.sync_lockdown_config();
+}
+
 void apply_project(Ui* ui, const std::string& id) {
     auto* p = ui->session.store.by_id(id);
     if (!p) {
         return;
     }
+    if (id != ui->session.store.active_project_id &&
+        !confirm_project_switch_with_live_terminals(ui)) {
+        refresh_projects(ui);  // repaint the picker: the label must go back to the current project
+        return;
+    }
+    ui->keyring_ui.on_project_switching(id, p->name);
     persist_store(ui);
     ui->session.store.active_project_id = id;
     ui->session.project_root = p->root;
@@ -1501,9 +2793,27 @@ void apply_project(Ui* ui, const std::string& id) {
     ui->session.settings.history_w = p->history_w;
     persist_store(ui);
     save_settings(ui->session.paths.settings_path, ui->session.settings);
-    ui->session.sync_lockdown_config();
+    sync_knowledge_agent_grants(ui);
     rebuild_tree(ui);
     refresh_projects(ui);
+    if (ui->content_view == ContentView::Keyring) {
+        ui->keyring_ui.ensure_app_vault_bound();
+        ui->keyring_ui.set_active_project(id, p->name);
+        ui->keyring_ui.show(true);
+        ui->keyring_ui.maybe_prompt_migration(ui->wnd);
+        layout(ui);
+        return;
+    }
+    if (ui->content_view == ContentView::Settings) {
+        // Project-scoped panels (Knowledge, Security, STRATA, MCP) show per-project rows;
+        // without this the previous project's data stayed on screen until the section was reopened.
+        if (ui->settings_section == SettingsSection::Security) {
+            ui->keyring_ui.ensure_app_vault_bound();
+            ui->keyring_ui.set_active_project(id, p->name);
+        }
+        refresh_settings_data(ui);
+        layout(ui);
+    }
 }
 
 void close_tab(Ui* ui, int i) {
@@ -1547,6 +2857,18 @@ void do_find(Ui* ui) {
     if (q.empty() || !ui->editor) {
         return;
     }
+    if (IsWindowVisible(ui->markdown_view)) {
+        CHARRANGE current{}; SendMessageW(ui->markdown_view, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&current));
+        FINDTEXTEXW find{}; find.chrg = {current.cpMax, -1}; find.lpstrText = q.c_str();
+        if (SendMessageW(ui->markdown_view, EM_FINDTEXTEXW, FR_DOWN, reinterpret_cast<LPARAM>(&find)) < 0) {
+            find.chrg = {0, -1}; SendMessageW(ui->markdown_view, EM_FINDTEXTEXW, FR_DOWN, reinterpret_cast<LPARAM>(&find));
+        }
+        if (find.chrgText.cpMax > find.chrgText.cpMin) {
+            SendMessageW(ui->markdown_view, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&find.chrgText));
+            SendMessageW(ui->markdown_view, EM_SCROLLCARET, 0, 0);
+        }
+        return;
+    }
     editor_find_next(ui->editor, q, false);
     refresh_editor_status(ui);
 }
@@ -1558,6 +2880,8 @@ void do_goto(Ui* ui) {
         SetFocus(ui->find);
         return;
     }
+    if (ui->active_doc >= 0) ui->docs[ui->active_doc].markdown_source = true;
+    layout(ui);
     editor_goto_line(ui->editor, line);
     refresh_editor_status(ui);
 }
@@ -1628,9 +2952,20 @@ void add_file_chip(Ui* ui) {
     pull_editor(ui);
     const OpenDoc& d = ui->docs[ui->active_doc];
     ContextChip c;
-    c.kind = "file";
+    c.kind = d.from_knowledge ? "knowledge" : "file";
     c.path = d.path;
-    c.label = utf8(folder_name(d.path));
+    if (d.from_knowledge) {
+        std::wstring label = L"KNOWLEDGE";
+        if (!d.knowledge_label.empty()) {
+            label += L" / ";
+            label += d.knowledge_label;
+        }
+        label += L" / ";
+        label += folder_name(d.path);
+        c.label = utf8(label);
+    } else {
+        c.label = utf8(folder_name(d.path));
+    }
     c.body = utf8(d.text);
     c.unsaved = d.dirty;
     add_chip(ui, std::move(c));
@@ -2123,6 +3458,147 @@ LRESULT CALLBACK chat_tabs_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpara
     return CallWindowProcW(ui->chat_tabs_prev, hwnd, msg, wparam, lparam);
 }
 
+// Push current model data into the active settings panel.
+//
+// This is deliberately NOT called from layout(): every reload() starts with LB_RESETCONTENT,
+// so running it per layout pass wiped the user's list selection (and, for STRATA, overwrote
+// the edit fields and spawned a bridge process on every resize frame). layout() is geometry
+// only; data lands here, on section entry / project switch / explicit refresh.
+void refresh_settings_data(Ui* ui) {
+    if (!ui || ui->content_view != ContentView::Settings) {
+        return;
+    }
+    switch (ui->settings_section) {
+        case SettingsSection::Security: {
+            std::wstring pname;
+            for (const auto& p : ui->session.store.projects) {
+                if (p.id == ui->session.store.active_project_id) {
+                    pname = p.name;
+                    break;
+                }
+            }
+            ui->keyring_ui.ensure_app_vault_bound();
+            ui->keyring_ui.set_active_project(ui->session.store.active_project_id, pname);
+            if (ui->security_subpage == SecuritySubpage::Overview) {
+                ui->security_overview.reload(ui->keyring_ui.keyring(), ui->environments,
+                                             ui->session.store.active_project_id, pname,
+                                             ui->session.settings.execution_policy);
+            } else if (ui->security_subpage == SecuritySubpage::Policy) {
+                ui->security_policy.reload(ui->session.settings.execution_policy);
+            } else if (ui->security_subpage == SecuritySubpage::Environments) {
+                ui->environment_ui.reload(ui->environments, ui->keyring_ui.keyring(),
+                                          ui->session.store.active_project_id, pname,
+                                          ui->session.paths.environments_path);
+            } else if (ui->security_subpage == SecuritySubpage::Keyring) {
+                ui->keyring_ui.refresh();
+            }
+            break;
+        }
+        case SettingsSection::Mcp:
+            ui->mcp_ui.refresh(ui->mcp);
+            break;
+        case SettingsSection::Strata: {
+            const std::string pid = ui->session.store.active_project_id;
+            const auto workspace = resolve_strata_workspace(ui->knowledge, pid, ui->session.project_root);
+            ui->strata_ui.set_workspace_path(workspace);
+            ui->strata_bridge.set_default_workspace(workspace);
+            if (!pid.empty()) {
+                if (const StrataBinding* b = ui->strata.binding_for(pid)) {
+                    ui->strata_ui.set_project_binding(
+                        utf16(b->strata_project.empty() ? b->project_id : b->strata_project));
+                } else {
+                    ui->strata_ui.set_project_binding(utf16(pid));
+                }
+            }
+            ui->strata_ui.refresh(&ui->strata_bridge, &ui->strata);
+            break;
+        }
+        case SettingsSection::Terminal:
+            if (ui->terminal_profiles.empty()) {
+                reload_terminal_profiles(ui);
+            }
+            ui->terminal_ui.reload(ui->terminal_profiles, ui->session.settings);
+            break;
+        case SettingsSection::Knowledge:
+            ui->knowledge_ui.reload(ui->knowledge, ui->session.store.active_project_id);
+            break;
+        default:
+            break;
+    }
+}
+
+// Which panel owns the keyboard right now, for Enter/Esc routing.
+// Returns 0 when the active surface has no default action for |field|.
+UINT panel_default_command(Ui* ui, HWND field) {
+    if (!ui) {
+        return 0;
+    }
+    if (ui->content_view == ContentView::Keyring) {
+        return ui->keyring_ui.default_command(field);
+    }
+    if (ui->content_view != ContentView::Settings) {
+        return 0;
+    }
+    switch (ui->settings_section) {
+        case SettingsSection::Knowledge:
+            return ui->knowledge_ui.default_command(field);
+        case SettingsSection::Mcp:
+            return ui->mcp_ui.default_command(field);
+        case SettingsSection::Strata:
+            return ui->strata_ui.default_command(field);
+        case SettingsSection::Terminal:
+            return ui->terminal_ui.default_command(field);
+        case SettingsSection::Security:
+            if (ui->security_subpage == SecuritySubpage::Environments &&
+                ui->environment_ui.owns_hwnd(field)) {
+                return ui->environment_ui.default_command(field);
+            }
+            if (ui->security_subpage == SecuritySubpage::Keyring) {
+                return ui->keyring_ui.default_command(field);
+            }
+            return 0;
+        default:
+            return 0;
+    }
+}
+
+// Cancel an open form in the active panel. Returns true when Esc was consumed.
+bool cancel_active_form(Ui* ui) {
+    if (!ui) {
+        return false;
+    }
+    UINT cmd = 0;
+    if (ui->content_view == ContentView::Keyring) {
+        cmd = ui->keyring_ui.cancel_command();
+    } else if (ui->content_view == ContentView::Settings) {
+        switch (ui->settings_section) {
+            case SettingsSection::Knowledge:
+                cmd = ui->knowledge_ui.cancel_command();
+                break;
+            case SettingsSection::Mcp:
+                cmd = ui->mcp_ui.cancel_command();
+                break;
+            case SettingsSection::Strata:
+                cmd = ui->strata_ui.cancel_command();
+                break;
+            case SettingsSection::Security:
+                if (ui->security_subpage == SecuritySubpage::Environments) {
+                    cmd = ui->environment_ui.cancel_command();
+                } else if (ui->security_subpage == SecuritySubpage::Keyring) {
+                    cmd = ui->keyring_ui.cancel_command();
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    if (!cmd) {
+        return false;
+    }
+    SendMessageW(ui->wnd, WM_COMMAND, MAKEWPARAM(cmd, BN_CLICKED), 0);
+    return true;
+}
+
 void layout(Ui* ui) {
     RECT rc{};
     GetClientRect(ui->wnd, &rc);
@@ -2133,13 +3609,15 @@ void layout(Ui* ui) {
                               ui->session.settings.history_w, ui->session.settings.focus_editor,
                               ui->session.settings.files_mode, ui->session.settings.history_mode, ui->narrow_tab);
 
-    const int bar = dip(ui->wnd, 40);
+    const bool stacked_file_tabs = dpi_w < 1100 && !ui->docs.empty();
+    const int toolbar_h = dip(ui->wnd, 40);
+    const int bar = toolbar_h + (stacked_file_tabs ? dip(ui->wnd, 34) : 0);
     const int st = dip(ui->wnd, 22);
     const int hdr = dip(ui->wnd, 34);
     const int pad = dip(ui->wnd, 12);
     const int btnw = dip(ui->wnd, 30);
     const int btnh = dip(ui->wnd, 28);
-    const int ybtn = (bar - btnh) / 2;
+    const int ybtn = (toolbar_h - btnh) / 2;
     const int filter_h = dip(ui->wnd, 28);
     const int thumb_extra = ui->images.empty() ? 0 : dip(ui->wnd, 56);
     const int composer = dip(ui->wnd, 112) + thumb_extra;
@@ -2150,19 +3628,32 @@ void layout(Ui* ui) {
 
     int x = pad;
     ShowWindow(ui->brand, SW_HIDE);
-    MoveWindow(ui->project, x, ybtn, dip(ui->wnd, 200), btnh, TRUE);
-    x += dip(ui->wnd, 208);
+    const int project_w = dip(ui->wnd, dpi_w < 900 ? (std::max)(80, dpi_w - 640) : 200);
+    MoveWindow(ui->project, x, ybtn, project_w, btnh, TRUE);
+    x += project_w + dip(ui->wnd, 8);
     MoveWindow(ui->openfolder, x, ybtn, btnh, btnh, TRUE);
     x += dip(ui->wnd, 40);
-    MoveWindow(ui->toggle_files, x, ybtn, dip(ui->wnd, 56), btnh, TRUE);
-    x += dip(ui->wnd, 60);
-    MoveWindow(ui->toggle_history, x, ybtn, dip(ui->wnd, 56), btnh, TRUE);
-    x += dip(ui->wnd, 60);
-    MoveWindow(ui->focus, x, ybtn, dip(ui->wnd, 64), btnh, TRUE);
-
-    MoveWindow(ui->settings, w - pad - btnh, ybtn, btnh, btnh, TRUE);
-    MoveWindow(ui->account, w - pad - btnh - dip(ui->wnd, 148), ybtn, dip(ui->wnd, 136), btnh, TRUE);
-    MoveWindow(ui->models, w - pad - btnh - dip(ui->wnd, 148) - dip(ui->wnd, 208), ybtn, dip(ui->wnd, 200), btnh, TRUE);
+    const int file_tabs_left = x;
+    const int account_w = dip(ui->wnd, dpi_w < 1100 ? 100 : 136);
+    const int model_w = dip(ui->wnd, dpi_w < 1100 ? 160 : 200);
+    const int gap = dip(ui->wnd, 8);
+    const int settings_x = w - pad - btnh;
+    const int account_x = settings_x - gap - account_w;
+    const int model_x = account_x - gap - model_w;
+    const int focus_x = model_x - gap - dip(ui->wnd, 64);
+    const int chats_x = focus_x - dip(ui->wnd, 60);
+    const int files_x = chats_x - dip(ui->wnd, 60);
+    MoveWindow(ui->toggle_files, files_x, ybtn, dip(ui->wnd, 56), btnh, TRUE);
+    MoveWindow(ui->toggle_history, chats_x, ybtn, dip(ui->wnd, 56), btnh, TRUE);
+    MoveWindow(ui->focus, focus_x, ybtn, dip(ui->wnd, 64), btnh, TRUE);
+    MoveWindow(ui->settings, settings_x, ybtn, btnh, btnh, TRUE);
+    MoveWindow(ui->account, account_x, ybtn, account_w, btnh, TRUE);
+    MoveWindow(ui->models, model_x, ybtn, model_w, btnh, TRUE);
+    // File tabs belong to the main chrome. A second chrome row at compact widths
+    // keeps tab overflow and the controls from occupying the same hit area.
+    MoveWindow(ui->tabs, stacked_file_tabs ? pad : file_tabs_left,
+               stacked_file_tabs ? toolbar_h : (toolbar_h - hdr),
+               stacked_file_tabs ? w - pad * 2 : (std::max)(1, files_x - gap - file_tabs_left), hdr, TRUE);
     ShowWindow(ui->models, SW_SHOW);
     ShowWindow(ui->signin, SW_HIDE);
     ShowWindow(ui->signout, SW_HIDE);
@@ -2176,11 +3667,25 @@ void layout(Ui* ui) {
         body_h = h - body_y - st;
     }
 
+    const int min_term = ui_space::kMinTerminalHDip;
+    int term_h_dip = (std::max)(min_term, ui->session.settings.terminal_h);
+    if (ui->panel_collapsed) {
+        term_h_dip = ui_space::kPanelTabHDip + 8;
+    }
+    const int term_band = ui->session.settings.terminal_visible
+        ? (std::min)(dip(ui->wnd, term_h_dip), (std::max)(0, body_h - dip(ui->wnd, 100))) : 0;
+    const int term_splitter = term_band > 0 ? dip(ui->wnd, 8) : 0;
+    if (term_band > 0) {
+        body_h = (std::max)(0, body_h - term_band - term_splitter);
+    }
+
     auto pxw = [&](int dips) { return dip(ui->wnd, dips); };
     int cx = 0;
     ui->split1 = {};
     ui->split2 = {};
     ui->split3 = {};
+    ui->split_term = {};
+    ui->split_knowledge = {};
 
     auto place_files = [&](int ww) {
         ShowWindow(ui->hdr_files, SW_HIDE);
@@ -2189,14 +3694,41 @@ void layout(Ui* ui) {
         const int breath = dip(ui->wnd, 5);
         MoveWindow(ui->filter, cx + pad, body_y + breath, ww - pad * 2, filter_h, TRUE);
         center_single_line_edit(ui->filter, ui->font);
-        MoveWindow(ui->tree, cx + breath, body_y + breath + filter_h + breath, ww - breath - breath,
-                   body_h - breath * 2 - filter_h, TRUE);
+        const int heading = dip(ui->wnd, 28);
+        const int available = (std::max)(0, body_h - breath * 2 - filter_h);
+        const int default_knowledge_h = (std::min)(dip(ui->wnd, 260), (std::max)(heading, available / 3));
+        const int max_knowledge_h = (std::max)(heading, available - dip(ui->wnd, 96) - breath);
+        const int min_knowledge_h = (std::min)(dip(ui->wnd, 80), max_knowledge_h);
+        const int knowledge_h = ui->knowledge_collapsed ? heading
+            : ui->session.settings.knowledge_h == 0 ? default_knowledge_h
+            : std::clamp(dip(ui->wnd, ui->session.settings.knowledge_h), min_knowledge_h, max_knowledge_h);
+        ui->knowledge_height = px_to_dip(ui->wnd, knowledge_h);
+        ui->knowledge_max_height = px_to_dip(ui->wnd, max_knowledge_h);
+        const int knowledge_y = body_y + body_h - knowledge_h;
+        if (!ui->knowledge_collapsed) {
+            // Existing breathing space between the trees doubles as a resize target.
+            // No child HWND covers it, so the frame owns capture just like the terminal splitter.
+            ui->split_knowledge = {cx + breath, knowledge_y - breath, cx + ww - breath, knowledge_y};
+        }
+        MoveWindow(ui->tree, cx + breath, body_y + breath + filter_h + breath, ww - breath * 2,
+                   (std::max)(0, available - knowledge_h - breath), TRUE);
+        MoveWindow(ui->knowledge_header, cx + breath, knowledge_y, (std::max)(1, ww - breath * 2 - heading), heading, TRUE);
+        MoveWindow(ui->knowledge_manage, cx + ww - breath - heading, knowledge_y, heading, heading, TRUE);
+        SetWindowTextW(ui->knowledge_header, ui->knowledge_collapsed ? L"▸ KNOWLEDGE" : L"▾ KNOWLEDGE");
+        ShowWindow(ui->knowledge_header, SW_SHOWNA);
+        ShowWindow(ui->knowledge_manage, SW_SHOWNA);
+        MoveWindow(ui->knowledge_tree, cx + breath, knowledge_y + heading, ww - breath * 2,
+                   (std::max)(0, knowledge_h - heading), TRUE);
+        ShowWindow(ui->knowledge_tree, ui->knowledge_collapsed ? SW_HIDE : SW_SHOWNA);
         cx += ww;
     };
     auto hide_files = [&]() {
         ShowWindow(ui->hdr_files, SW_HIDE);
         ShowWindow(ui->filter, SW_HIDE);
         ShowWindow(ui->tree, SW_HIDE);
+        ShowWindow(ui->knowledge_tree, SW_HIDE);
+        ShowWindow(ui->knowledge_header, SW_HIDE);
+        ShowWindow(ui->knowledge_manage, SW_HIDE);
     };
     auto place_editor = [&](int ww) {
         const bool utility = ui->content_view != ContentView::Editor;
@@ -2212,7 +3744,12 @@ void layout(Ui* ui) {
             ShowWindow(ui->gutter, SW_HIDE);
             ShowWindow(ui->editor_status, SW_HIDE);
             ShowWindow(ui->editor, SW_HIDE);
-            ShowWindow(ui->content_host, SW_SHOW);
+            ShowWindow(ui->markdown_view, SW_HIDE);
+            ShowWindow(ui->markdown_toggle, SW_HIDE);
+            // Background panel only. SW_SHOW would activate and raise it over Settings controls
+            // (owner-draw buttons/nav then look blank until hover). SW_SHOWNA keeps creation order.
+            ShowWindow(ui->content_host, SW_SHOWNA);
+            EnableWindow(ui->content_host, FALSE);
             ShowWindow(ui->content_back, SW_SHOW);
             ShowWindow(ui->content_title, SW_SHOW);
             const int hdr_h = dip(ui->wnd, 36);
@@ -2234,6 +3771,9 @@ void layout(Ui* ui) {
                 const int nav_w = dip(ui->wnd, 140);
                 ShowWindow(ui->content_nav, SW_SHOW);
                 MoveWindow(ui->content_nav, cx + pad_u, y0, nav_w, h0, TRUE);
+                InvalidateRect(ui->content_nav, nullptr, TRUE);
+                InvalidateRect(ui->content_back, nullptr, TRUE);
+                InvalidateRect(ui->content_title, nullptr, TRUE);
                 const int px = cx + pad_u + nav_w + pad_u;
                 const int pw = ww - nav_w - pad_u * 3;
                 int py = y0;
@@ -2241,6 +3781,7 @@ void layout(Ui* ui) {
                     const int hh = bh < 0 ? btnh : bh;
                     MoveWindow(h, px, py, bw, hh, TRUE);
                     ShowWindow(h, SW_SHOW);
+                    InvalidateRect(h, nullptr, TRUE);
                     py += hh + dip(ui->wnd, 8);
                 };
                 if (ui->settings_section == SettingsSection::Providers) {
@@ -2249,14 +3790,18 @@ void layout(Ui* ui) {
                     MoveWindow(ui->set_oa_signout, px + dip(ui->wnd, 168), py - btnh - dip(ui->wnd, 8), dip(ui->wnd, 100),
                                btnh, TRUE);
                     ShowWindow(ui->set_oa_signout, SW_SHOW);
+                    InvalidateRect(ui->set_oa_signout, nullptr, TRUE);
                     place_btn(ui->set_cl_status, pw, dip(ui->wnd, 48));
                     place_btn(ui->set_cl_key, dip(ui->wnd, 140));
                     MoveWindow(ui->set_cl_code, px + dip(ui->wnd, 148), py - btnh - dip(ui->wnd, 8), dip(ui->wnd, 180),
                                btnh, TRUE);
                     ShowWindow(ui->set_cl_code, SW_SHOW);
+                    InvalidateRect(ui->set_cl_code, nullptr, TRUE);
                     MoveWindow(ui->set_cl_disc, px + dip(ui->wnd, 336), py - btnh - dip(ui->wnd, 8), dip(ui->wnd, 90), btnh,
                                TRUE);
                     ShowWindow(ui->set_cl_disc, SW_SHOW);
+                    InvalidateRect(ui->set_cl_disc, nullptr, TRUE);
+                    place_btn(ui->set_cursor_status, pw, dip(ui->wnd, 64));
                     place_btn(ui->set_def_label, dip(ui->wnd, 160), dip(ui->wnd, 20));
                     place_btn(ui->set_def_combo, dip(ui->wnd, 280));
                     refresh_settings_pane(ui);
@@ -2273,12 +3818,76 @@ void layout(Ui* ui) {
                     };
                     place_opt(ui->set_wrap);
                     place_opt(ui->set_whitespace);
-                    place_opt(ui->set_enter_sends);
+                    ShowWindow(ui->set_enter_sends, SW_HIDE);
                     refresh_settings_pane(ui);
-                } else {
-                    place_btn(ui->set_codex, dip(ui->wnd, 160));
-                    place_btn(ui->set_copy_runtime, dip(ui->wnd, 160));
+                } else if (ui->settings_section == SettingsSection::Advanced) {
+                    if (ui->ui_gallery.visible()) {
+                        RECT gr{px, y0, px + (std::max)(1, pw), y0 + h0};
+                        ui->ui_gallery.layout(gr);
+                    } else {
+                        place_btn(ui->set_codex, dip(ui->wnd, 160));
+                        place_btn(ui->set_copy_runtime, dip(ui->wnd, 160));
+                        place_btn(ui->set_ui_gallery, dip(ui->wnd, 140));
+                        ShowWindow(ui->content_body, SW_SHOW);
+                        SetWindowTextW(ui->content_body,
+                                       L"Runtime paths and developer tools.\r\n\r\n"
+                                       L"Scylla Keyring lives under Settings → Security.");
+                        MoveWindow(ui->content_body, px, py + dip(ui->wnd, 8), (std::max)(1, pw),
+                                   (std::max)(1, h0 - (py - y0) - dip(ui->wnd, 8)), TRUE);
+                    }
+                } else if (ui->settings_section == SettingsSection::Security) {
+                    const int tab_h = dip(ui->wnd, 32);
+                    const int tab_gap = dip(ui->wnd, 8);
+                    const int tab_w = dip(ui->wnd, 140);
+                    // Widths differ per label; walk the strip so a new tab never overlaps.
+                    const struct {
+                        HWND tab;
+                        int w;
+                    } sec_tabs[] = {{ui->sec_tab_overview, tab_w},
+                                    {ui->sec_tab_keyring, tab_w},
+                                    {ui->sec_tab_environments, tab_w + dip(ui->wnd, 40)},
+                                    {ui->sec_tab_policy, tab_w + dip(ui->wnd, 10)}};
+                    int tab_x = px;
+                    for (const auto& t : sec_tabs) {
+                        if (t.tab) {
+                            ShowWindow(t.tab, SW_SHOW);
+                            MoveWindow(t.tab, tab_x, y0, t.w, tab_h, TRUE);
+                        }
+                        tab_x += t.w + tab_gap;
+                    }
+                    RECT body{px, y0 + tab_h + tab_gap, px + (std::max)(1, pw), y0 + h0};
+                    apply_security_subpage(ui);
+                    if (ui->security_subpage == SecuritySubpage::Overview) {
+                        ui->security_overview.layout(body);
+                    } else if (ui->security_subpage == SecuritySubpage::Environments) {
+                        ui->environment_ui.layout(body);
+                    } else if (ui->security_subpage == SecuritySubpage::Keyring) {
+                        ui->keyring_ui.layout(body);
+                    } else if (ui->security_subpage == SecuritySubpage::Policy) {
+                        ui->security_policy.layout(body);
+                    }
+                } else if (ui->settings_section == SettingsSection::Knowledge) {
+                    RECT kr{px, y0, px + (std::max)(1, pw), y0 + h0};
+                    ui->knowledge_ui.set_visible(true);
+                    ui->knowledge_ui.layout(kr);
+                } else if (ui->settings_section == SettingsSection::Mcp) {
+                    RECT mr{px, y0, px + (std::max)(1, pw), y0 + h0};
+                    ui->mcp_ui.show();
+                    ui->mcp_ui.layout(mr);
+                } else if (ui->settings_section == SettingsSection::Strata) {
+                    RECT sr{px, y0, px + (std::max)(1, pw), y0 + h0};
+                    ui->strata_ui.set_visible(true);
+                    ui->strata_ui.layout(sr);
+                } else if (ui->settings_section == SettingsSection::Terminal) {
+                    RECT tr{px, y0, px + (std::max)(1, pw), y0 + h0};
+                    ui->terminal_ui.set_visible(true);
+                    ui->terminal_ui.layout(tr);
                 }
+            } else if (ui->content_view == ContentView::Keyring) {
+                ShowWindow(ui->content_body, SW_HIDE);
+                RECT kr{cx + pad_u, y0, cx + ww - pad_u, y0 + h0};
+                ui->keyring_ui.show(true);
+                ui->keyring_ui.layout(kr);
             } else {
                 ShowWindow(ui->content_body, SW_SHOW);
                 MoveWindow(ui->content_body, cx + pad_u, y0, ww - pad_u * 2, h0 - (ui->content_view == ContentView::GettingStarted
@@ -2306,6 +3915,8 @@ void layout(Ui* ui) {
         ShowWindow(ui->gs_open_folder, SW_HIDE);
         ShowWindow(ui->gs_providers, SW_HIDE);
         const bool has_doc = !ui->docs.empty();
+        const bool markdown = has_doc && ui->active_doc >= 0 && ui->docs[ui->active_doc].language == "markdown" && !ui->docs[ui->active_doc].large_file;
+        const bool preview_md = markdown && !ui->docs[ui->active_doc].markdown_source;
         ShowWindow(ui->empty_editor, has_doc ? SW_HIDE : SW_SHOW);
         ShowWindow(ui->empty_open_file, has_doc ? SW_HIDE : SW_SHOW);
         ShowWindow(ui->empty_open_folder, has_doc ? SW_HIDE : SW_SHOW);
@@ -2316,7 +3927,10 @@ void layout(Ui* ui) {
         ShowWindow(ui->save, has_doc ? SW_SHOW : SW_HIDE);
         ShowWindow(ui->gutter, SW_HIDE);
         ShowWindow(ui->editor_status, has_doc ? SW_SHOW : SW_HIDE);
-        ShowWindow(ui->editor, has_doc ? SW_SHOW : SW_HIDE);
+        ShowWindow(ui->editor, has_doc && !preview_md ? SW_SHOW : SW_HIDE);
+        ShowWindow(ui->markdown_view, preview_md ? SW_SHOW : SW_HIDE);
+        ShowWindow(ui->markdown_toggle, markdown ? SW_SHOW : SW_HIDE);
+        SetWindowTextW(ui->markdown_toggle, preview_md ? L"Source" : L"Preview");
         if (!has_doc) {
             MoveWindow(ui->empty_editor, cx, body_y, ww, body_h, TRUE);
             // Same stack as paint_empty_editor — center in viewport on every resize.
@@ -2335,26 +3949,27 @@ void layout(Ui* ui) {
             cx += ww;
             return;
         }
-        const int tab_h = hdr;
+        const int tab_h = 0; // Tabs now occupy the main window chrome.
         const int crumb = dip(ui->wnd, 32);
         const int status_w = dip(ui->wnd, 280);
-        const int trail = btnh * 2 + 8;
-        MoveWindow(ui->tabs, cx + pad, body_y, ww - pad - trail - 4, tab_h, TRUE);
-        MoveWindow(ui->find_toggle, cx + ww - trail, body_y + (tab_h - btnh) / 2, btnh, btnh, TRUE);
-        MoveWindow(ui->save, cx + ww - btnh, body_y + (tab_h - btnh) / 2, btnh, btnh, TRUE);
+        const int trail = btnh * 2 + 8 + (markdown ? dip(ui->wnd, 80) : 0);
+        MoveWindow(ui->markdown_toggle, cx + ww - btnh * 2 - 8 - dip(ui->wnd, 80), body_y + (crumb - btnh) / 2, dip(ui->wnd, 76), btnh, TRUE);
+        MoveWindow(ui->find_toggle, cx + ww - btnh * 2 - 8, body_y + (crumb - btnh) / 2, btnh, btnh, TRUE);
+        MoveWindow(ui->save, cx + ww - btnh, body_y + (crumb - btnh) / 2, btnh, btnh, TRUE);
         if (ui->find_open) {
             const int find_w = dip(ui->wnd, 180);
-            const int crumb_w = ww - pad * 2 - find_w - status_w - 16;
+            const int crumb_w = ww - trail - pad * 2 - find_w - status_w - 16;
             MoveWindow(ui->hdr_editor, cx + pad, body_y + tab_h, (std::max)(dip(ui->wnd, 80), crumb_w), crumb, TRUE);
-            MoveWindow(ui->find, cx + ww - pad - find_w - status_w - 8, body_y + tab_h + (crumb - filter_h) / 2, find_w,
+            MoveWindow(ui->find, cx + ww - trail - pad - find_w - status_w - 8, body_y + tab_h + (crumb - filter_h) / 2, find_w,
                        filter_h, TRUE);
             center_single_line_edit(ui->find, ui->font);
-            MoveWindow(ui->editor_status, cx + ww - pad - status_w, body_y + tab_h, status_w, crumb, TRUE);
+            MoveWindow(ui->editor_status, cx + ww - trail - pad - status_w, body_y + tab_h, status_w, crumb, TRUE);
         } else {
-            MoveWindow(ui->hdr_editor, cx + pad, body_y + tab_h, ww - pad * 2 - status_w - 8, crumb, TRUE);
-            MoveWindow(ui->editor_status, cx + ww - pad - status_w, body_y + tab_h, status_w, crumb, TRUE);
+            MoveWindow(ui->hdr_editor, cx + pad, body_y + tab_h, (std::max)(dip(ui->wnd, 60), ww - trail - pad * 2 - status_w - 8), crumb, TRUE);
+            MoveWindow(ui->editor_status, cx + ww - trail - pad - status_w, body_y + tab_h, status_w, crumb, TRUE);
         }
         MoveWindow(ui->editor, cx, body_y + tab_h + crumb, ww, body_h - tab_h - crumb, TRUE);
+        MoveWindow(ui->markdown_view, cx, body_y + tab_h + crumb, ww, body_h - tab_h - crumb, TRUE);
         cx += ww;
     };
     auto hide_editor = [&]() {
@@ -2366,6 +3981,8 @@ void layout(Ui* ui) {
         ShowWindow(ui->gutter, SW_HIDE);
         ShowWindow(ui->editor_status, SW_HIDE);
         ShowWindow(ui->editor, SW_HIDE);
+        ShowWindow(ui->markdown_view, SW_HIDE);
+        ShowWindow(ui->markdown_toggle, SW_HIDE);
         ShowWindow(ui->empty_editor, SW_HIDE);
         ShowWindow(ui->empty_open_file, SW_HIDE);
         ShowWindow(ui->empty_open_folder, SW_HIDE);
@@ -2385,8 +4002,8 @@ void layout(Ui* ui) {
         ShowWindow(ui->agent_hint, SW_HIDE);
         ShowWindow(ui->ctx, ui->session.context_chips.empty() ? SW_HIDE : SW_SHOW);
         ShowWindow(ui->composer, SW_SHOW);
-        ShowWindow(ui->add_file, SW_SHOW);
-        ShowWindow(ui->add_sel, SW_SHOW);
+        ShowWindow(ui->add_file, SW_HIDE);
+        ShowWindow(ui->workflow, SW_SHOW);
         ShowWindow(ui->send, SW_SHOW);
         ShowWindow(ui->cancel, SW_HIDE);
         MoveWindow(ui->chat_tabs, cx + pad, body_y, ww - pad - btnh - 8, hdr, TRUE);
@@ -2395,7 +4012,8 @@ void layout(Ui* ui) {
         if (chip_h) {
             MoveWindow(ui->ctx, cx + pad, body_y + hdr, ww - pad * 2, chip_h, TRUE);
         }
-        const int trans_h = body_h - hdr - chip_h - composer;
+        const int activity_h = ui->session.activity.visible ? dip(ui->wnd, 96) : 0;
+        const int trans_h = body_h - hdr - chip_h - composer - activity_h;
         const int ty = body_y + hdr + chip_h;
         GETTEXTLENGTHEX gtl{};
         gtl.flags = GTL_DEFAULT;
@@ -2407,7 +4025,10 @@ void layout(Ui* ui) {
         MoveWindow(ui->transcript, cx + transcript_pad, ty + transcript_pad, ww - transcript_pad * 2,
                    std::max(dip(ui->wnd, 80), trans_h) - transcript_pad * 2, TRUE);
         MoveWindow(ui->empty_agent, cx, ty, ww, std::max(dip(ui->wnd, 80), trans_h), TRUE);
-        const int cy = ty + std::max(dip(ui->wnd, 80), trans_h);
+        const int activity_y = ty + std::max(dip(ui->wnd, 80), trans_h);
+        ShowWindow(ui->activity, activity_h ? SW_SHOW : SW_HIDE);
+        MoveWindow(ui->activity, cx + pad, activity_y, ww - pad * 2, activity_h, TRUE);
+        const int cy = activity_y + activity_h;
         const int box_pad = pad;
         ui->composer_box = {cx + box_pad, cy + 4, cx + ww - box_pad, cy + composer - 8};
         const RECT& box = ui->composer_box;
@@ -2417,7 +4038,6 @@ void layout(Ui* ui) {
         const int inner = dip(ui->wnd, 12);
         const int foot = dip(ui->wnd, 32);
         const int send_s = dip(ui->wnd, 28);
-        const int clip_s = dip(ui->wnd, 28);
         const int thumb_h = ui->images.empty() ? 0 : dip(ui->wnd, 56);
         ui->thumb_row = {box.left + inner, box.top + dip(ui->wnd, 6), box.right - inner,
                          box.top + dip(ui->wnd, 6) + (thumb_h ? dip(ui->wnd, 48) : 0)};
@@ -2426,8 +4046,7 @@ void layout(Ui* ui) {
         MoveWindow(ui->composer, box.left + inner, text_top, (box.right - box.left) - inner * 2,
                    std::max(dip(ui->wnd, 36), text_h), TRUE);
         MoveWindow(ui->composer_cue, box.left + inner + 4, text_top + 2, dip(ui->wnd, 200), dip(ui->wnd, 20), TRUE);
-        MoveWindow(ui->add_sel, box.left + inner, box.bottom - foot, dip(ui->wnd, 100), dip(ui->wnd, 26), TRUE);
-        MoveWindow(ui->add_file, box.right - inner - send_s - clip_s - 6, box.bottom - foot - 2, clip_s, clip_s, TRUE);
+        MoveWindow(ui->workflow, box.left + inner, box.bottom - foot, dip(ui->wnd, 100), dip(ui->wnd, 26), TRUE);
         MoveWindow(ui->send, box.right - inner - send_s, box.bottom - foot - 2, send_s, send_s, TRUE);
         const bool cue = get_window_text(ui->composer).empty();
         ShowWindow(ui->composer_cue, cue ? SW_SHOW : SW_HIDE);
@@ -2439,9 +4058,10 @@ void layout(Ui* ui) {
         ShowWindow(ui->neu, SW_HIDE);
         ShowWindow(ui->agent_hint, SW_HIDE);
         ShowWindow(ui->add_file, SW_HIDE);
-        ShowWindow(ui->add_sel, SW_HIDE);
+        ShowWindow(ui->workflow, SW_HIDE);
         ShowWindow(ui->ctx, SW_HIDE);
         ShowWindow(ui->transcript, SW_HIDE);
+        ShowWindow(ui->activity, SW_HIDE);
         ShowWindow(ui->composer, SW_HIDE);
         ShowWindow(ui->composer_panel, SW_HIDE);
         ShowWindow(ui->composer_cue, SW_HIDE);
@@ -2512,10 +4132,45 @@ void layout(Ui* ui) {
         hide_history();
     }
 
-    MoveWindow(ui->status, pad, h - st + 2, w - pad * 2, st - 4, TRUE);
+    if (term_band > 0) {
+        ensure_terminal_panel(ui);
+        const int term_y = h - st - term_band;
+        // This gap is outside every child HWND, so mouse input reaches the frame.
+        ui->split_term = RECT{pad, term_y - term_splitter, w - pad, term_y};
+        RECT panel_rc{pad, term_y, w - pad, h - st};
+        const RECT content = ui->workbench_panel.layout(panel_rc);
+        ui->terminal_sessions.set_panel_visible(
+            !ui->panel_collapsed && ui->workbench_panel.surface() == PanelSurface::Terminal);
+        ui->terminal_sessions.reparent_hosts(terminal_host_parent(ui));
+        const int cw = content.right - content.left;
+        const int ch = content.bottom - content.top;
+        if (cw > 0 && ch > 0) {
+            ui->terminal_sessions.layout_active(0, 0, cw, ch);
+        }
+        ui->workbench_panel.refresh_session_tabs(ui->terminal_sessions);
+    } else {
+        ui->split_term = {};
+        ui->workbench_panel.set_visible(false);
+        ui->terminal_sessions.set_panel_visible(false);
+    }
+
+    // Status strip: message text on the left, clickable Environment chip pinned right. The chip
+    // only exists while a project is open, since the environment is per project.
+    int status_w = w - pad * 2;
+    if (ui->status_env) {
+        const bool show_env = !ui->session.store.active_project_id.empty();
+        ShowWindow(ui->status_env, show_env ? SW_SHOW : SW_HIDE);
+        if (show_env) {
+            const int env_w = dip(ui->wnd, 168);
+            MoveWindow(ui->status_env, w - pad - env_w, h - st + 2, env_w, st - 4, TRUE);
+            status_w -= env_w + dip(ui->wnd, 8);
+        }
+    }
+    MoveWindow(ui->status, pad, h - st + 2, (std::max)(1, status_w), st - 4, TRUE);
     ShowWindow(ui->homehint, SW_HIDE);
-    RedrawWindow(ui->wnd, nullptr, nullptr,
-                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    // Never RDW_UPDATENOW here: sync paint while a panel BUTTON is still in BN_CLICKED (or a
+    // session-tab LBUTTONUP still on the stack) has crashed after hosts were parented under content_.
+    RedrawWindow(ui->wnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     refresh_thin_scrollbar(ui->tree);
     refresh_thin_scrollbar(ui->threads);
     refresh_thin_scrollbar(ui->ctx);
@@ -2564,6 +4219,9 @@ void open_chat_index(Ui* ui, int index) {
     if (!ui || index < 0 || index >= static_cast<int>(ui->thread_ids.size())) {
         return;
     }
+    ui->restore_chat_pending = false;
+    close_attachment_windows(ui);
+    ui->message_attachments.clear();
     const std::string tid = ui->thread_ids[index];
     if (tid == ui->session.active_thread_id) {
         SendMessageW(ui->threads, LB_SETCURSEL, index, 0);
@@ -2579,8 +4237,10 @@ void open_chat_index(Ui* ui, int index) {
     }
     ui->session.set_draft(ui->session.active_thread_id, utf8(get_window_text(ui->composer)));
     ui->session.open_thread(tid);
+    if (ui->session.transcript_replace) apply_stream(ui);
     SetWindowTextW(ui->composer, utf16(ui->session.draft_for(tid)).c_str());
     ui->shown_stream.clear();
+    ui->markdown_stream_start = -1;
     SendMessageW(ui->threads, LB_SETCURSEL, index, 0);
     if (ui->chat_tabs) {
         TabCtrl_SetCurSel(ui->chat_tabs, index);
@@ -2590,18 +4250,25 @@ void open_chat_index(Ui* ui, int index) {
 }
 
 void refresh_threads(Ui* ui) {
+    SendMessageW(ui->threads, WM_SETREDRAW, FALSE, 0);
     SendMessageW(ui->threads, LB_RESETCONTENT, 0, 0);
     ui->thread_ids.clear();
+    ui->chat_groups.clear();
     std::wstring q = get_window_text(ui->search);
     const auto vis = ui->session.store.list_visible(ui->session.account_scope(), q);
     int sel = 0;
     int shown = 0;
+    std::wstring previous_group;
     for (Conversation* c : vis) {
+        const auto group = c->pinned ? std::wstring(L"Pinned") : chat_date_group(c->updated_at);
+        ui->chat_groups.push_back(group == previous_group ? L"" : group);
+        previous_group = group;
         std::wstring name = utf16(c->title.empty() ? "New Chat" : c->title);
         if (c->pinned) {
             name = L"★ " + name;
         }
         SendMessageW(ui->threads, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
+        SendMessageW(ui->threads, LB_SETITEMHEIGHT, shown, dip(ui->wnd, ui->chat_groups.back().empty() ? 40 : 66));
         ui->thread_ids.push_back(c->thread_id);
         if (c->thread_id == ui->session.active_thread_id) {
             sel = shown;
@@ -2613,9 +4280,24 @@ void refresh_threads(Ui* ui) {
     }
     refresh_chat_tabs(ui);
     ShowWindow(ui->empty_chats, ui->thread_ids.empty() ? SW_SHOW : SW_HIDE);
+    SendMessageW(ui->threads, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(ui->threads, nullptr, FALSE);
 }
 
 void refresh_chrome(Ui* ui) {
+    const auto activity_text = utf16(ui->session.activity.summary());
+    if (activity_text != ui->activity_text) {
+        const bool visibility_changed = activity_text.empty() != ui->activity_text.empty();
+        ui->activity_text = activity_text;
+        const auto first_line = SendMessageW(ui->activity, EM_GETFIRSTVISIBLELINE, 0, 0);
+        DWORD selection_start = 0, selection_end = 0;
+        SendMessageW(ui->activity, EM_GETSEL, reinterpret_cast<WPARAM>(&selection_start),
+                     reinterpret_cast<LPARAM>(&selection_end));
+        SetWindowTextW(ui->activity, activity_text.c_str());
+        SendMessageW(ui->activity, EM_SETSEL, selection_start, selection_end);
+        SendMessageW(ui->activity, EM_LINESCROLL, 0, first_line);
+        if (visibility_changed) layout(ui);
+    }
     // Any open header popup (project / models / scope) must stay frozen — chrome refreshes
     // SetWindowText + RedrawWindow(UPDATENOW) on every Codex line and steal clicks / blink.
     if (ui->sel_list) {
@@ -2651,6 +4333,42 @@ void refresh_chrome(Ui* ui) {
     } else {
         st += L"  ·  read-only";
     }
+    {
+        const std::string pid = ui->session.store.active_project_id;
+        if (!pid.empty()) {
+            st += L"  ·  Keyring: ";
+            st += keyring_status_label(ui, pid);
+        }
+        // The environment now lives in its own clickable chip beside the Keyring text, so it is
+        // not appended to |st| — a streaming status line would otherwise keep overwriting it.
+        if (ui->status_env) {
+            std::wstring env_label = L"Env: None";
+            if (!pid.empty()) {
+                const std::string eid = ui->environments.active_environment_id(pid);
+                if (!eid.empty()) {
+                    if (const auto* env = ui->environments.find_environment(pid, eid)) {
+                        env_label = L"Env: " + utf16(env->name);
+                    }
+                }
+            }
+            SetWindowTextW(ui->status_env, env_label.c_str());
+            InvalidateRect(ui->status_env, nullptr, TRUE);
+        }
+        if (const auto* sess = ui->terminal_sessions.active_session()) {
+            if (sess->human_only) {
+                st += L"  ·  Human Only";
+            }
+        }
+        // Cached from the last Settings → Strata refresh. refresh_chrome runs on every
+        // streamed line, so it must never call the bridge itself.
+        const std::wstring& strata_seg = ui->strata_ui.chrome_summary();
+        if (!strata_seg.empty()) {
+            st += L"  ·  Strata: ";
+            st += strata_seg;
+        } else if (ui->strata_bridge.running()) {
+            st += L"  ·  Strata: Connected";
+        }
+    }
     if (!ui->session.last_error.empty() &&
         (def != ProviderId::Claude || ui->session.state == AppState::Failed)) {
         st = utf16(ui->session.last_error);
@@ -2663,7 +4381,7 @@ void refresh_chrome(Ui* ui) {
         }
     }
     SetWindowTextW(ui->status, st.c_str());
-    const bool generating = ui->session.state == AppState::Generating;
+    const bool generating = ui->session.state == AppState::Generating || ui->session.activity.busy;
     SetWindowTextW(ui->send, generating ? L"Stop" : L"Send");
     const bool provider_ready =
         (def == ProviderId::Claude && claude_is_connected()) ||
@@ -2693,8 +4411,81 @@ void refresh_chrome(Ui* ui) {
     }
 }
 
+// Status-bar Environment chip: pick the active environment for the open project, or jump to the
+// full page. Persists through the same manager as Security → Project Environments so the two
+// surfaces cannot disagree.
+void choose_status_environment(Ui* ui) {
+    if (!ui || !ui->wnd) {
+        return;
+    }
+    const std::string pid = ui->session.store.active_project_id;
+    if (pid.empty()) {
+        return;
+    }
+    const ProjectEnvironmentState* st = ui->environments.state_for(pid);
+    const std::string active = ui->environments.active_environment_id(pid);
+
+    constexpr UINT kIdNone = 1;
+    constexpr UINT kIdManage = 2;
+    constexpr UINT kIdFirstEnv = 100;
+    HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING | (active.empty() ? MF_CHECKED : 0), kIdNone, L"None");
+    if (st && !st->environments.empty()) {
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        UINT item = kIdFirstEnv;
+        for (const auto& e : st->environments) {
+            UINT flags = MF_STRING;
+            if (e.id == active) {
+                flags |= MF_CHECKED;
+            }
+            AppendMenuW(m, flags, item++, utf16(e.name).c_str());
+        }
+    }
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, kIdManage, L"Manage Environments…");
+
+    POINT p{};
+    GetCursorPos(&p);
+    const int chosen = TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY, p.x, p.y, 0,
+                                      ui->wnd, nullptr);
+    DestroyMenu(m);
+    if (chosen == 0) {
+        return;
+    }
+    if (chosen == static_cast<int>(kIdManage)) {
+        open_settings_section(ui, SettingsSection::Security);
+        set_security_subpage(ui, SecuritySubpage::Environments);
+        return;
+    }
+    std::string next;
+    if (chosen != static_cast<int>(kIdNone)) {
+        const auto idx = static_cast<std::size_t>(chosen - static_cast<int>(kIdFirstEnv));
+        if (!st || idx >= st->environments.size()) {
+            return;
+        }
+        next = st->environments[idx].id;
+    }
+    if (next == active) {
+        return;
+    }
+    if (!ui->environments.set_active(pid, next)) {
+        return;
+    }
+    if (!ui->environments.save(ui->session.paths.environments_path)) {
+        ui_kit::report_save_failure(ui->wnd, L"active environment", ui->session.paths.environments_path);
+    }
+    refresh_settings_data(ui);
+    refresh_chrome(ui);
+    layout(ui);
+}
+
 void apply_stream(Ui* ui) {
+    const auto visible_stream = visible_chat_text(ui->session.stream_buffer);
     if (ui->session.transcript_replace) {
+        ui->markdown_stream_start = -1;
+        ui->agent_heading_pending = false;
+        close_attachment_windows(ui);
+        ui->message_attachments.clear();
         SetWindowTextW(ui->transcript, L"");
         set_rich_colors(ui->transcript, kWindow, 14, L"Segoe UI");
         for (std::size_t i = 0; i < ui->session.history_messages.size(); ++i) {
@@ -2703,29 +4494,64 @@ void apply_stream(Ui* ui) {
             }
             const auto& message = ui->session.history_messages[i];
             if (message.user) {
-                append_user_message(ui->transcript, utf16(message.text));
+                const auto display = parse_user_display(message.text);
+                append_user_message(ui->transcript, utf16(display.text));
+                append_attachment_footer(ui, display.attachments);
             } else {
-                append_agent_message(ui->transcript, utf16(message.text));
+                append_agent_message(ui->transcript, utf16(message.user ? message.text : visible_chat_text(message.text)));
             }
         }
-        ui->shown_stream = ui->session.stream_buffer;
+        if (ui->session.active_thread_busy() && !visible_stream.empty()) {
+            if (!ui->session.history_messages.empty()) append_divider(ui->transcript);
+            append_rich(ui->transcript, L"Agent\r\n", kAccent, true);
+            CHARRANGE end{-1, -1};
+            SendMessageW(ui->transcript, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&end));
+            SendMessageW(ui->transcript, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&end));
+            ui->markdown_stream_start = end.cpMin;
+            ui_kit::append_markdown(ui->transcript, utf16(visible_stream));
+        }
+        ui->shown_stream = visible_stream;
         ui->session.transcript_replace = false;
+        SendMessageW(ui->transcript, EM_SETSEL, -1, -1);
+        SendMessageW(ui->transcript, EM_SCROLLCARET, 0, 0);
+        SendMessageW(ui->transcript, WM_VSCROLL, SB_BOTTOM, 0);
+        refresh_thin_scrollbar(ui->transcript);
         return;
     }
-    if (ui->session.stream_buffer.size() <= ui->shown_stream.size()) {
-        return;
+    if (visible_stream == ui->shown_stream) return;
+    bool follow = at_bottom(ui->transcript);
+    POINT scroll{}; SendMessageW(ui->transcript, EM_GETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&scroll));
+    CHARRANGE selection{}; SendMessageW(ui->transcript, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+    follow = follow && selection.cpMin == selection.cpMax;
+    const bool first_agent_content = ui->agent_heading_pending && !visible_stream.empty();
+    if (first_agent_content) {
+        append_rich(ui->transcript, L"Agent\r\n", kAccent, true);
+        ui->agent_heading_pending = false;
+        follow = true;
     }
-    if (ui->session.stream_buffer.compare(0, ui->shown_stream.size(), ui->shown_stream) != 0) {
-        SetWindowTextW(ui->transcript, utf16(ui->session.stream_buffer).c_str());
-        ui->shown_stream = ui->session.stream_buffer;
-        return;
+    if (ui->markdown_stream_start < 0) {
+        CHARRANGE end{-1, -1}; SendMessageW(ui->transcript, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&end));
+        SendMessageW(ui->transcript, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&end));
+        ui->markdown_stream_start = end.cpMin;
     }
-    const std::string delta = ui->session.stream_buffer.substr(ui->shown_stream.size());
-    append_rich(ui->transcript, utf16(delta), kAsst, false);
-    ui->shown_stream = ui->session.stream_buffer;
+    SendMessageW(ui->transcript, WM_SETREDRAW, FALSE, 0);
+    CHARRANGE tail{ui->markdown_stream_start, -1};
+    SendMessageW(ui->transcript, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&tail));
+    SendMessageW(ui->transcript, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(L""));
+    ui_kit::trim_markdown_links(ui->transcript, ui->markdown_stream_start);
+    ui_kit::append_markdown(ui->transcript, utf16(visible_stream));
+    if (!follow) {
+        SendMessageW(ui->transcript, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&selection));
+        SendMessageW(ui->transcript, EM_SETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&scroll));
+    } else SendMessageW(ui->transcript, WM_VSCROLL, SB_BOTTOM, 0);
+    SendMessageW(ui->transcript, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(ui->transcript, nullptr, TRUE);
+    ui->shown_stream = visible_stream;
 }
 
 void persist_window(Ui* ui) {
+    ui->session.settings.restore_chat_on_start = IsWindowVisible(ui->threads) != FALSE;
+    ui->session.settings.last_thread_id = ui->session.active_thread_id;
     WINDOWPLACEMENT wp{};
     wp.length = sizeof(wp);
     GetWindowPlacement(ui->wnd, &wp);
@@ -2843,6 +4669,156 @@ HBITMAP make_thumb_bitmap(Gdiplus::Bitmap& src, int size) {
 HBITMAP load_file_thumb(const std::wstring& path, int size) {
     Gdiplus::Bitmap src(path.c_str());
     return make_thumb_bitmap(src, size);
+}
+
+struct AttachmentPreviewState {
+    Ui* ui = nullptr;
+    std::vector<DisplayAttachment> attachments;
+    std::vector<HBITMAP> thumbs;
+    DisplayAttachment attachment;
+    std::wstring text;
+    std::unique_ptr<Gdiplus::Image> image;
+    bool lightbox = false;
+};
+
+void close_attachment_windows(Ui* ui) {
+    if (!ui) return;
+    if (IsWindow(ui->attachment_tray)) DestroyWindow(ui->attachment_tray);
+    if (IsWindow(ui->attachment_lightbox)) DestroyWindow(ui->attachment_lightbox);
+    ui->attachment_tray = ui->attachment_lightbox = nullptr;
+}
+
+LRESULT CALLBACK attachment_preview_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* state = reinterpret_cast<AttachmentPreviewState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_NCCREATE) {
+        state = reinterpret_cast<AttachmentPreviewState*>(reinterpret_cast<CREATESTRUCTW*>(lp)->lpCreateParams);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+    }
+    if (!state) return DefWindowProcW(hwnd, msg, wp, lp);
+    if (msg == WM_ERASEBKGND) return 1;
+    if (msg == WM_KEYDOWN && wp == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
+    if (msg == WM_KILLFOCUS && !state->lightbox) { DestroyWindow(hwnd); return 0; }
+    if (msg == WM_LBUTTONDOWN) {
+        if (state->lightbox) { DestroyWindow(hwnd); return 0; }
+        const int tile = MulDiv(72, GetDpiForWindow(hwnd), 96);
+        const int gap = MulDiv(10, GetDpiForWindow(hwnd), 96);
+        const int index = GET_X_LPARAM(lp) / (tile + gap);
+        if (index >= 0 && index < static_cast<int>(state->attachments.size())) {
+            DisplayAttachment selected = state->attachments[index];
+            auto* preview = new AttachmentPreviewState{};
+            preview->ui = state->ui; preview->attachment = selected; preview->lightbox = true;
+            const auto selected_path = utf16(selected.path);
+            bool readable = GetFileAttributesW(selected_path.c_str()) != INVALID_FILE_ATTRIBUTES;
+            if (const auto* source = state->ui->knowledge.source_for_path(selected_path, state->ui->session.store.active_project_id))
+                readable = readable && state->ui->knowledge.resolve_effective_access(source->id, selected_path).readable;
+            if (readable) {
+                preview->image = std::make_unique<Gdiplus::Image>(selected_path.c_str());
+                if (preview->image->GetLastStatus() != Gdiplus::Ok) {
+                    preview->image.reset();
+                    const auto loaded = load_text_file(selected_path, 256 * 1024);
+                    if (!loaded.binary && loaded.error.empty()) preview->text = loaded.text;
+                }
+            }
+            RECT owner{}; GetClientRect(state->ui->wnd, &owner);
+            const int inset = MulDiv(36, GetDpiForWindow(state->ui->wnd), 96);
+            POINT origin{owner.left + inset, owner.top + inset}; ClientToScreen(state->ui->wnd, &origin);
+            state->ui->attachment_lightbox = CreateWindowExW(WS_EX_TOOLWINDOW, L"ScyllaAttachmentPreview", L"Attachment preview",
+                WS_POPUP | WS_BORDER, origin.x, origin.y, owner.right - inset * 2, owner.bottom - inset * 2,
+                state->ui->wnd, nullptr, GetModuleHandleW(nullptr), preview);
+            ShowWindow(state->ui->attachment_lightbox, SW_SHOW); SetFocus(state->ui->attachment_lightbox);
+        }
+        return 0;
+    }
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps{}; HDC dc = BeginPaint(hwnd, &ps); RECT r{}; GetClientRect(hwnd, &r);
+        fill_rect(dc, r, state->lightbox ? theme().overlay : theme().surface);
+        SetBkMode(dc, TRANSPARENT); SetTextColor(dc, theme().text);
+        if (state->lightbox) {
+            RECT title{20, 12, r.right - 48, 40};
+            DrawTextW(dc, utf16(state->attachment.label).c_str(), -1, &title, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            RECT close{r.right - 42, 8, r.right - 8, 42}; DrawTextW(dc, L"×", -1, &close, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            RECT body{24, 52, r.right - 24, r.bottom - 24};
+            if (state->image) {
+                Gdiplus::Graphics g(dc); g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+                const double scale = (std::min)(static_cast<double>(body.right - body.left) / state->image->GetWidth(),
+                                                static_cast<double>(body.bottom - body.top) / state->image->GetHeight());
+                const int w = static_cast<int>(state->image->GetWidth() * scale), h = static_cast<int>(state->image->GetHeight() * scale);
+                g.DrawImage(state->image.get(), body.left + (body.right - body.left - w) / 2,
+                            body.top + (body.bottom - body.top - h) / 2, w, h);
+            } else if (!state->text.empty()) {
+                DrawTextW(dc, state->text.c_str(), static_cast<int>((std::min<std::size_t>)(state->text.size(), 12000)), &body,
+                          DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS);
+            } else {
+                DrawTextW(dc, L"Preview unavailable\n\nThe attachment may have moved or uses a binary format Scylla cannot preview.",
+                          -1, &body, DT_CENTER | DT_VCENTER | DT_WORDBREAK);
+            }
+        } else {
+            const int tile = MulDiv(72, GetDpiForWindow(hwnd), 96), gap = MulDiv(10, GetDpiForWindow(hwnd), 96);
+            for (std::size_t i = 0; i < state->attachments.size(); ++i) {
+                RECT box{static_cast<LONG>(i * (tile + gap)), 0, static_cast<LONG>(i * (tile + gap) + tile), tile};
+                fill_rect(dc, box, theme().input);
+                if (i < state->thumbs.size() && state->thumbs[i]) {
+                    HDC mem = CreateCompatibleDC(dc); auto old = SelectObject(mem, state->thumbs[i]);
+                    BITMAP bm{}; GetObject(state->thumbs[i], sizeof(bm), &bm);
+                    StretchBlt(dc, box.left + 4, box.top + 4, tile - 8, tile - 8, mem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+                    SelectObject(mem, old); DeleteDC(mem);
+                } else {
+                    RECT icon = box; icon.bottom -= 20;
+                    DrawTextW(dc, L"FILE", -1, &icon, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    RECT name = box; name.top = box.bottom - 20;
+                    DrawTextW(dc, utf16(state->attachments[i].label).c_str(), -1, &name, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                }
+            }
+        }
+        EndPaint(hwnd, &ps); return 0;
+    }
+    if (msg == WM_NCDESTROY) {
+        if (state->ui) {
+            if (state->ui->attachment_tray == hwnd) state->ui->attachment_tray = nullptr;
+            if (state->ui->attachment_lightbox == hwnd) state->ui->attachment_lightbox = nullptr;
+        }
+        for (auto bitmap : state->thumbs) if (bitmap) DeleteObject(bitmap);
+        delete state; SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0); return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+void ensure_attachment_preview_class() {
+    static bool registered = false;
+    if (registered) return;
+    WNDCLASSW wc{}; wc.lpfnWndProc = attachment_preview_proc; wc.hInstance = GetModuleHandleW(nullptr);
+    wc.hCursor = LoadCursorW(nullptr, IDC_HAND); wc.lpszClassName = L"ScyllaAttachmentPreview";
+    wc.hbrBackground = nullptr; RegisterClassW(&wc); registered = true;
+}
+
+void append_attachment_footer(Ui* ui, const std::vector<DisplayAttachment>& attachments) {
+    if (!ui || attachments.empty()) return;
+    const std::wstring key = utf16(make_uuid());
+    ui->message_attachments[key] = attachments;
+    const std::wstring label = L"(" + std::to_wstring(attachments.size()) + L") Attachments       [+]";
+    ui_kit::append_markdown(ui->transcript, L"[" + label + L"](scylla-attachments:" + key + L")\n");
+}
+
+void show_attachment_tray(Ui* ui, const std::wstring& key, HWND source, long position) {
+    const auto found = ui->message_attachments.find(key);
+    if (found == ui->message_attachments.end() || found->second.empty()) return;
+    if (IsWindow(ui->attachment_tray)) { DestroyWindow(ui->attachment_tray); return; }
+    ensure_attachment_preview_class();
+    auto* state = new AttachmentPreviewState{}; state->ui = ui; state->attachments = found->second;
+    const int tile = dip(ui->wnd, 72), gap = dip(ui->wnd, 10);
+    for (const auto& attachment : state->attachments)
+        state->thumbs.push_back(attachment.image ? load_file_thumb(utf16(attachment.path), tile - 8) : nullptr);
+    POINTL point{}; SendMessageW(source, EM_POSFROMCHAR, reinterpret_cast<WPARAM>(&point), position);
+    POINT screen{point.x, point.y + dip(ui->wnd, 24)}; ClientToScreen(source, &screen);
+    const int width = (std::min)(static_cast<int>(state->attachments.size()), 6) * (tile + gap) - gap;
+    HMONITOR monitor = MonitorFromPoint(screen, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{sizeof(info)}; GetMonitorInfoW(monitor, &info);
+    screen.x = (std::max)(info.rcWork.left, (std::min)(screen.x, info.rcWork.right - (std::max)(tile, width)));
+    screen.y = (std::max)(info.rcWork.top, (std::min)(screen.y, info.rcWork.bottom - tile));
+    ui->attachment_tray = CreateWindowExW(WS_EX_TOOLWINDOW, L"ScyllaAttachmentPreview", L"Attachments",
+        WS_POPUP | WS_BORDER, screen.x, screen.y, (std::max)(tile, width), tile,
+        ui->wnd, nullptr, GetModuleHandleW(nullptr), state);
+    ShowWindow(ui->attachment_tray, SW_SHOW); SetFocus(ui->attachment_tray);
 }
 
 bool clipboard_has_image() {
@@ -2982,6 +4958,7 @@ LRESULT CALLBACK panel_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
 }
 
 void do_send(Ui* ui) {
+    if (ui->session.active_thread_busy() || ui->session.claude_generating()) return;
     if (ui->ime_composing) {
         return;
     }
@@ -2995,12 +4972,24 @@ void do_send(Ui* ui) {
         SetWindowTextW(ui->status, L"Sign in with ChatGPT to send");
         return;
     }
+    const auto mode = static_cast<WorkflowMode>(ui_kit::select_get_data(ui->workflow));
+    const auto plan_directory = mode == WorkflowMode::Plan
+        ? workflow_plan_directory(ui->knowledge, ui->session.store.active_project_id, ui->session.project_root)
+        : std::wstring{};
+    if (mode == WorkflowMode::Plan && plan_directory.empty()) {
+        SetWindowTextW(ui->status, L"Open a project or configure a writable Knowledge folder to save a plan.");
+        return;
+    }
     std::wstring text = get_window_text(ui->composer);
     while (!text.empty() && (text.back() == L'\r' || text.back() == L'\n')) {
         text.pop_back();
     }
     if (text.empty() && ui->images.empty()) {
         return;
+    }
+    std::vector<DisplayAttachment> display_attachments;
+    for (const auto& chip : ui->session.context_chips) {
+        if (!chip.path.empty()) display_attachments.push_back({utf8(chip.path), chip.label, chip.kind == "image"});
     }
     for (const auto& img : ui->images) {
         ContextChip c;
@@ -3009,6 +4998,7 @@ void do_send(Ui* ui) {
         const auto slash = img.path.find_last_of(L"\\/");
         c.label = utf8(slash == std::wstring::npos ? img.path : img.path.substr(slash + 1));
         c.body = utf8(img.path);
+        display_attachments.push_back({utf8(img.path), c.label, true});
         add_chip(ui, std::move(c));
     }
     clear_composer_images(ui);
@@ -3021,11 +5011,21 @@ void do_send(Ui* ui) {
         append_divider(ui->transcript);
     }
     append_user_message(ui->transcript, display);
+    append_attachment_footer(ui, display_attachments);
     append_divider(ui->transcript);
-    append_rich(ui->transcript, L"Agent\r\n", kAccent, true);
+    ui->agent_heading_pending = true;
     ui->session.stream_buffer.clear();
     ui->shown_stream.clear();
-    ui->session.send_user(utf8(text.empty() ? display : text));
+    ui->markdown_stream_start = -1;
+    const auto sources = agent_file_catalog(ui->knowledge, ui->session.store.active_project_id, ui->session.project_root);
+    ui->session.chat_title_seed = utf8(display);
+    ui->restore_chat_pending = false;
+    ui->session.send_user(user_display_metadata(utf8(display), display_attachments) + workflow_source_manifest(sources, ui->session.project_root, utf8(display)) + workflow_instructions(mode, plan_directory, utf8(folder_name(ui->session.project_root))) +
+                          utf8(text.empty() ? display : text));
+    SendMessageW(ui->transcript, EM_SETSEL, -1, -1);
+    SendMessageW(ui->transcript, EM_SCROLLCARET, 0, 0);
+    SendMessageW(ui->transcript, WM_VSCROLL, SB_BOTTOM, 0);
+    refresh_thin_scrollbar(ui->transcript);
     SetWindowTextW(ui->composer, L"");
     ui->session.set_draft(ui->session.active_thread_id, "");
     refresh_chrome(ui);
@@ -3037,11 +5037,16 @@ void do_open_folder(Ui* ui) {
     if (!pick_folder(ui->wnd, folder)) {
         return;
     }
+    if (_wcsicmp(folder.c_str(), ui->session.project_root.c_str()) != 0 &&
+        !confirm_project_switch_with_live_terminals(ui)) {
+        return;
+    }
     persist_store(ui);
     auto* p = ui->session.store.open_or_create(folder);
     if (!p) {
         return;
     }
+    ui->keyring_ui.on_project_switching(p->id, p->name);
     ui->session.project_root = p->root;
     ui->session.settings.project_folder = p->root;
     persist_store(ui);
@@ -3051,6 +5056,12 @@ void do_open_folder(Ui* ui) {
     refresh_projects(ui);
     refresh_threads(ui);
     refresh_chrome(ui);
+    ui->keyring_ui.ensure_app_vault_bound();
+    ui->keyring_ui.set_active_project(p->id, p->name);
+    if (ui->content_view == ContentView::Keyring) {
+        ui->keyring_ui.show(true);
+        ui->keyring_ui.maybe_prompt_migration(ui->wnd);
+    }
     layout(ui);
 }
 
@@ -3062,6 +5073,9 @@ void toggle_mode(int& mode, bool currently_shown) {
     }
 }
 
+void apply_mcp_alias_popup(Ui* ui);
+void close_mcp_alias_popup(Ui* ui);
+void update_mcp_alias_popup(Ui* ui);
 LRESULT CALLBACK composer_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     Ui* ui = g_ui;
     if (!ui || !ui->composer_prev) {
@@ -3085,16 +5099,135 @@ LRESULT CALLBACK composer_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
             return 0;
         }
     }
-    if (msg == WM_KEYDOWN && wparam == VK_RETURN) {
+    if (msg == WM_KEYDOWN && ui->mcp_alias_popup && !ui->ime_composing) {
+        if (wparam == VK_UP || wparam == VK_DOWN) {
+            const int current = static_cast<int>(SendMessageW(ui->mcp_alias_popup, LB_GETCURSEL, 0, 0));
+            const int count = static_cast<int>(SendMessageW(ui->mcp_alias_popup, LB_GETCOUNT, 0, 0));
+            if (count > 0) SendMessageW(ui->mcp_alias_popup, LB_SETCURSEL, (current + (wparam == VK_DOWN ? 1 : count - 1)) % count, 0);
+            return 0;
+        }
+        if (wparam == VK_ESCAPE) { close_mcp_alias_popup(ui); return 0; }
+        if ((wparam == VK_RETURN || wparam == VK_TAB) && !(GetKeyState(VK_CONTROL) & 0x8000)) {
+            ui->suppress_submit_char = true;
+            apply_mcp_alias_popup(ui);
+            return 0;
+        }
+    }    if (msg == WM_KEYDOWN && wparam == VK_RETURN) {
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        const bool enter_sends = ui->session.settings.enter_sends;
-        const bool send_now = enter_sends ? !shift : shift;
+        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        const bool send_now = composer_should_submit(ctrl, shift, alt, ui->ime_composing);
         if (send_now && !ui->ime_composing) {
-            do_send(ui);
+            ui->suppress_submit_char = true;
+            if (!(lparam & (1LL << 30))) do_send(ui);
             return 0;
         }
     }
+    if (msg == WM_CHAR && (wparam == L'\r' || wparam == L'\n' || wparam == L'\t') && ui->suppress_submit_char) {
+        ui->suppress_submit_char = false;
+        return 0;
+    }
+    if (msg == WM_KEYUP && (wparam == VK_LEFT || wparam == VK_RIGHT || wparam == VK_HOME || wparam == VK_END))
+        update_mcp_alias_popup(ui);
+    if (msg == WM_KILLFOCUS && reinterpret_cast<HWND>(wparam) != ui->mcp_alias_popup)
+        close_mcp_alias_popup(ui);
+    if (msg == WM_GETDLGCODE) return DLGC_WANTALLKEYS | DLGC_WANTCHARS;
     return CallWindowProcW(ui->composer_prev, hwnd, msg, wparam, lparam);
+}
+
+void close_mcp_alias_popup(Ui* ui) {
+    if (!ui || !ui->mcp_alias_popup) {
+        return;
+    }
+    DestroyWindow(ui->mcp_alias_popup);
+    ui->mcp_alias_popup = nullptr;
+    ui->mcp_alias_completions.clear();
+}
+
+std::wstring mention_composer_text(HWND composer) {
+    const int length = GetWindowTextLengthW(composer);
+    std::wstring value(length + 1, L'\0');
+    GETTEXTEX request{static_cast<DWORD>(value.size() * sizeof(wchar_t)), GT_DEFAULT, 1200, nullptr, nullptr};
+    const auto copied = SendMessageW(composer, EM_GETTEXTEX, reinterpret_cast<WPARAM>(&request), reinterpret_cast<LPARAM>(value.data()));
+    value.resize(static_cast<std::size_t>((std::max)(LRESULT(0), copied)));
+    return value;
+}
+
+void apply_mcp_alias_popup(Ui* ui) {
+    if (!ui || !ui->mcp_alias_popup) return;
+    const int selected = static_cast<int>(SendMessageW(ui->mcp_alias_popup, LB_GETCURSEL, 0, 0));
+    if (selected < 0 || selected >= static_cast<int>(ui->mcp_alias_completions.size())) return;
+    const auto completion = utf16(ui->mcp_alias_completions[selected]);
+    const auto text = mention_composer_text(ui->composer);
+    CHARRANGE range{};
+    SendMessageW(ui->composer, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&range));
+    std::size_t start = std::min(text.size(), static_cast<std::size_t>((std::max)(0L, range.cpMin)));
+    while (start > 0 && !iswspace(text[start - 1])) --start;
+    if (start >= text.size() || text[start] != L'@') return;
+    range.cpMin = static_cast<LONG>(start);
+    // Copy completion before closing; EN_CHANGE can rebuild the suggestions synchronously.
+    close_mcp_alias_popup(ui);
+    SetFocus(ui->composer);
+    SendMessageW(ui->composer, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&range));
+    const auto replacement = completion + L" ";
+    SendMessageW(ui->composer, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(replacement.c_str()));
+}
+void update_mcp_alias_popup(Ui* ui) {
+    if (!ui || !ui->composer || !ui->wnd) {
+        return;
+    }
+    const auto text = mention_composer_text(ui->composer);
+    CHARRANGE range{};
+    SendMessageW(ui->composer, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&range));
+    if (range.cpMin != range.cpMax) { close_mcp_alias_popup(ui); return; }
+    const auto end = std::min(text.size(), static_cast<std::size_t>((std::max)(0L, range.cpMin)));
+    std::size_t i = end;
+    while (i > 0 && !iswspace(text[i - 1])) --i;
+    const auto token = text.substr(i, end - i);
+    if (token.empty() || token[0] != L'@') { close_mcp_alias_popup(ui); return; }
+    if (!ui->mcp_alias_popup) ui->mention_files = agent_file_catalog(ui->knowledge, ui->session.store.active_project_id, ui->session.project_root);
+    auto comps = ui->mcp.alias_completions(utf8(token.substr(1)));
+    for (auto& c : comps) c.first = "@" + c.first;
+    for (const auto& file : match_agent_files(ui->mention_files, token.substr(1))) {
+        // Quoted absolute references remain unambiguous for spaces and duplicate basenames.
+        comps.emplace_back("@\"" + utf8(file.path) + "\"", file.label);
+    }    if (comps.empty()) {
+        close_mcp_alias_popup(ui);
+        return;
+    }
+
+    if (!ui->mcp_alias_popup) {
+        ui->mcp_alias_popup =
+            CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"LISTBOX", L"",
+                            WS_POPUP | WS_VSCROLL | LBS_NOTIFY | LBS_HASSTRINGS | LBS_OWNERDRAWFIXED |
+                                LBS_NOINTEGRALHEIGHT,
+                            0, 0, 0, 0, ui->wnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_MCP_ALIAS_POPUP)),
+                            GetModuleHandleW(nullptr), nullptr);
+        if (!ui->mcp_alias_popup) {
+            return;
+        }
+        SendMessageW(ui->mcp_alias_popup, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font), TRUE);
+        apply_dark_child(ui->mcp_alias_popup);
+        install_thin_scrollbar(ui->mcp_alias_popup, theme().menu);
+    }
+
+    SendMessageW(ui->mcp_alias_popup, LB_RESETCONTENT, 0, 0);
+    ui->mcp_alias_completions.clear();
+    for (const auto& c : comps) {
+        std::wstring row = c.first.starts_with("@\"") ? c.second + L"  —  file"
+            : utf16(c.first) + L"  —  " + c.second;
+        SendMessageW(ui->mcp_alias_popup, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(row.c_str()));
+        ui->mcp_alias_completions.push_back(c.first);
+    }
+    SendMessageW(ui->mcp_alias_popup, LB_SETCURSEL, 0, 0);
+
+    RECT cr{};
+    GetWindowRect(ui->composer, &cr);
+    const int row_h = dip(ui->wnd, 28);
+    const int h = (std::min)(row_h * static_cast<int>(comps.size()) + 4, dip(ui->wnd, 180));
+    const int w = (std::max)(dip(ui->wnd, 280), static_cast<int>(cr.right - cr.left));
+    SetWindowPos(ui->mcp_alias_popup, HWND_TOP, cr.left, cr.top - h - 2, w, h, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+    InvalidateRect(ui->mcp_alias_popup, nullptr, TRUE);
 }
 
 HWND mk(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, int id, DWORD ex = 0) {
@@ -3123,6 +5256,12 @@ void create_controls(Ui* ui, HWND hwnd) {
     ui->filter = mk(hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL | ES_MULTILINE, ID_FILTER);
     ui->tree = mk(hwnd, WC_TREEVIEWW, L"", WS_TABSTOP | TVS_HASBUTTONS | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | TVS_TRACKSELECT,
                    ID_TREE);
+    ui->knowledge_tree = mk(hwnd, WC_TREEVIEWW, L"", WS_TABSTOP | TVS_HASBUTTONS | TVS_LINESATROOT |
+        TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | TVS_INFOTIP, ID_KNOWLEDGE_TREE);
+    ui->knowledge_header = ui_kit::create_button(hwnd, GetModuleHandleW(nullptr), ID_KNOWLEDGE_HEADER,
+        L"▾ KNOWLEDGE", ui_kit::ButtonKind::Ghost, ui->font);
+    ui->knowledge_manage = ui_kit::create_button(hwnd, GetModuleHandleW(nullptr), ID_KNOWLEDGE_MANAGE,
+        L"…", ui_kit::ButtonKind::Ghost, ui->font);
     ui->hdr_editor = mk(hwnd, L"STATIC", L"", SS_OWNERDRAW, ID_HDR_EDITOR);
     ui->tabs = mk(hwnd, WC_TABCONTROLW, L"",
                   WS_TABSTOP | TCS_SINGLELINE | TCS_FOCUSNEVER | TCS_OWNERDRAWFIXED | TCS_FIXEDWIDTH | TCS_BUTTONS |
@@ -3139,8 +5278,12 @@ void create_controls(Ui* ui, HWND hwnd) {
     ui->empty_open_file = mk(hwnd, L"BUTTON", L"Open file", btn, ID_EMPTY_OPEN_FILE);
     ui->empty_open_folder = mk(hwnd, L"BUTTON", L"Open folder", btn, ID_EMPTY_OPEN_FOLDER);
     ui->editor = editor_create(hwnd, ID_EDITOR, GetModuleHandleW(nullptr));
+    ui->markdown_view = ui_kit::create_markdown_view(hwnd, GetModuleHandleW(nullptr), ID_MARKDOWN_VIEW, ui->font);
+    ui->markdown_toggle = ui_kit::create_button(hwnd, GetModuleHandleW(nullptr), ID_MARKDOWN_TOGGLE, L"Source", ui_kit::ButtonKind::Secondary, ui->font);
 
     ui->content_host = mk(hwnd, L"STATIC", L"", 0, 0);
+    // Background-only panel — must not steal mouse from Settings controls above it.
+    EnableWindow(ui->content_host, FALSE);
     ShowWindow(ui->content_host, SW_HIDE);
     ui->content_back = mk(hwnd, L"BUTTON", L"‹ Back", btn, ID_CONTENT_BACK);
     ShowWindow(ui->content_back, SW_HIDE);
@@ -3152,14 +5295,18 @@ void create_controls(Ui* ui, HWND hwnd) {
                                       0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CONTENT_NAV)),
                                       nullptr, nullptr);
     ShowWindow(ui->content_nav, SW_HIDE);
-    ui->content_body = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+    ui->content_body = CreateWindowExW(0, L"EDIT", L"",
                                        WS_CHILD | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 0, 0,
                                        hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(ID_CONTENT_BODY)), nullptr, nullptr);
     ShowWindow(ui->content_body, SW_HIDE);
+    apply_dark_child(ui->content_body);
+    install_thin_scrollbar(ui->content_body, theme().panel);
+    install_thin_scrollbar(ui->content_nav, theme().navigation);
     ui->set_oa_status = mk(hwnd, L"STATIC", L"", 0, ID_SET_OA_STATUS);
     ui->set_oa_signin = mk(hwnd, L"BUTTON", L"Sign in with ChatGPT", btn, ID_SET_OA_SIGNIN);
     ui->set_oa_signout = mk(hwnd, L"BUTTON", L"Sign out", btn, ID_SET_OA_SIGNOUT);
     ui->set_cl_status = mk(hwnd, L"STATIC", L"", 0, ID_SET_CL_STATUS);
+    ui->set_cursor_status = ui_kit::create_static(hwnd, GetModuleHandleW(nullptr), 0, L"Cursor ACP", ui->font);
     ui->set_cl_key = mk(hwnd, L"BUTTON", L"Connect API key…", btn, ID_SET_CL_KEY);
     ui->set_cl_code = mk(hwnd, L"BUTTON", L"Sign in with Claude Code", btn, ID_SET_CL_CODE);
     ui->set_cl_disc = mk(hwnd, L"BUTTON", L"Disconnect", btn, ID_SET_CL_DISC);
@@ -3170,11 +5317,50 @@ void create_controls(Ui* ui, HWND hwnd) {
     ui->set_wrap = mk(hwnd, L"BUTTON", L"Word wrap", btn, ID_SET_WRAP);
     ui->set_whitespace = mk(hwnd, L"BUTTON", L"Show whitespace", btn, ID_SET_WHITESPACE);
     ui->set_enter_sends = mk(hwnd, L"BUTTON", L"Enter sends message", btn, ID_SET_ENTER_SENDS);
+    ui->set_ui_gallery = mk(hwnd, L"BUTTON", L"UI Gallery…", btn, ID_UI_GALLERY);
     ui->gs_open_folder = mk(hwnd, L"BUTTON", L"Open Project", btn, ID_GS_OPEN_FOLDER);
     ui->gs_providers = mk(hwnd, L"BUTTON", L"Manage Providers", btn, ID_GS_PROVIDERS);
+    ui->knowledge_ui.create(hwnd, GetModuleHandleW(nullptr), ui->font);
+    ui->mcp_ui.create(hwnd, ui->font, ID_MCP_LIST, ID_MCP_DETAIL, ID_MCP_ADD, ID_MCP_ADD_ACCOUNT, ID_MCP_MANAGE,
+                      ID_MCP_REAUTH, ID_MCP_CHECK, ID_MCP_DISABLE, ID_MCP_DISCONNECT, ID_MCP_REMOVE, ID_MCP_ADD_TEMPLATE,
+                      ID_MCP_ADD_NAME, ID_MCP_ADD_ALIAS, ID_MCP_ADD_ENDPOINT, ID_MCP_ADD_SAVE, ID_MCP_ADD_CANCEL);
+    // Project-scope picker reads the live store, so opening Manage after a new folder is opened
+    // lists it without needing a settings reload.
+    ui->mcp_ui.set_project_provider([ui]() {
+        McpSettingsUi::ProjectList out;
+        for (const auto& p : ui->session.store.projects) {
+            out.emplace_back(p.id, p.name.empty() ? p.root : p.name);
+        }
+        return out;
+    });
+    ui->strata_ui.create(hwnd, GetModuleHandleW(nullptr), ui->font);
+    ui->keyring_ui.create(hwnd, ui->font, ui->font_small, ui->font_semi);
+    ui->environment_ui.create(hwnd, GetModuleHandleW(nullptr), ui->font, ui->font_small);
+    ui->security_overview.create(hwnd, GetModuleHandleW(nullptr), ui->font, ui->font_small);
+    ui->security_policy.create(hwnd, GetModuleHandleW(nullptr), ui->font, ui->font_small);
+    ui->sec_tab_overview =
+        ui_kit::create_button(hwnd, GetModuleHandleW(nullptr), Cmd_SecTabOverview, L"Overview",
+                              ui_kit::ButtonKind::Secondary, ui->font);
+    ui->sec_tab_keyring =
+        ui_kit::create_button(hwnd, GetModuleHandleW(nullptr), Cmd_SecTabKeyring, L"Keyring",
+                              ui_kit::ButtonKind::Secondary, ui->font);
+    ui->sec_tab_environments =
+        ui_kit::create_button(hwnd, GetModuleHandleW(nullptr), Cmd_SecTabEnvironments, L"Project Environments",
+                              ui_kit::ButtonKind::Secondary, ui->font);
+    ui->sec_tab_policy =
+        ui_kit::create_button(hwnd, GetModuleHandleW(nullptr), Cmd_SecTabPolicy, L"Execution Policy",
+                              ui_kit::ButtonKind::Secondary, ui->font);
+    ShowWindow(ui->sec_tab_overview, SW_HIDE);
+    ShowWindow(ui->sec_tab_keyring, SW_HIDE);
+    ShowWindow(ui->sec_tab_environments, SW_HIDE);
+    ShowWindow(ui->sec_tab_policy, SW_HIDE);
+    ui->terminal_ui.create(hwnd, GetModuleHandleW(nullptr), ui->font);
+    ui->ui_gallery.create(hwnd, GetModuleHandleW(nullptr), ui->font);
     hide_settings_controls(ui);
     ShowWindow(ui->gs_open_folder, SW_HIDE);
     ShowWindow(ui->gs_providers, SW_HIDE);
+
+    wire_workbench_panel(ui);
 
     ui->hdr_agent = mk(hwnd, L"STATIC", L"  Agent", 0, ID_HDR_AGENT);
     ShowWindow(ui->hdr_agent, SW_HIDE);
@@ -3187,11 +5373,14 @@ void create_controls(Ui* ui, HWND hwnd) {
     ui->agent_hint = mk(hwnd, L"STATIC", L"", 0, ID_AGENT_HINT);
     ShowWindow(ui->agent_hint, SW_HIDE);
     ui->add_file = mk(hwnd, L"BUTTON", L"Attach", btn, ID_ADD_FILE);
-    ui->add_sel = mk(hwnd, L"BUTTON", L"Add selection", btn, ID_ADD_SEL);
+    ui->workflow = ui_kit::create_select(hwnd, GetModuleHandleW(nullptr), ID_WORKFLOW, ui->font);
+    ui_kit::select_set_items(ui->workflow, {{L"Execute", 0}, {L"Plan", 1}, {L"Ask", 2}});
+    ui_kit::select_set_index(ui->workflow, 0);
     ui->ctx = CreateWindowExW(0, L"LISTBOX", L"",
                               WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | WS_TABSTOP,
                               0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(ID_CTX), nullptr, nullptr);
     ui->empty_agent = mk(hwnd, L"STATIC", L"", SS_OWNERDRAW, 0);
+    ui->activity = ui_kit::create_document_view(hwnd, GetModuleHandleW(nullptr), 0, ui->font_small);
     ui->transcript = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
                                     WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 0, 0,
                                     hwnd, reinterpret_cast<HMENU>(ID_TRANSCRIPT), nullptr, nullptr);
@@ -3211,11 +5400,15 @@ void create_controls(Ui* ui, HWND hwnd) {
     ui->pin = mk(hwnd, L"BUTTON", L"Pin", btn, ID_PIN_CHAT);
     ui->archive = mk(hwnd, L"BUTTON", L"Delete", btn, ID_ARCHIVE_CHAT);
     ui->threads = CreateWindowExW(0, L"LISTBOX", L"",
-                                  WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS |
+                                  WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWVARIABLE | LBS_HASSTRINGS |
                                       WS_TABSTOP,
                                   0, 0, 0, 0, hwnd, reinterpret_cast<HMENU>(ID_THREADS), nullptr, nullptr);
+    SetWindowSubclass(ui->threads, chat_list_mouse_guard, 0x53434854, reinterpret_cast<DWORD_PTR>(&ui->chat_groups));
     ui->empty_chats = mk(hwnd, L"STATIC", L"", SS_OWNERDRAW, 0);
     ui->status = mk(hwnd, L"STATIC", L"Offline", 0, ID_STATUS);
+    ui->status_env = ui_kit::create_button(hwnd, GetModuleHandleW(nullptr), Cmd_StatusEnv, L"Env: None",
+                                           ui_kit::ButtonKind::Ghost, ui->font_small);
+    ShowWindow(ui->status_env, SW_HIDE);
     ui->homehint = mk(hwnd, L"STATIC", L"", SS_RIGHT, ID_HOMEHINT);
 
     SendMessageW(ui->transcript, EM_EXLIMITTEXT, 0, 16 * 1024 * 1024);
@@ -3239,7 +5432,15 @@ void create_controls(Ui* ui, HWND hwnd) {
     TreeView_SetItemHeight(ui->tree, dip(hwnd, 26));
     TreeView_SetIndent(ui->tree, dip(hwnd, 16));
     TreeView_SetExtendedStyle(ui->tree, 0x0004, 0x0004);
-    SetWindowTheme(ui->tree, L"", L"");
+    apply_dark_child(ui->tree);
+    TreeView_SetBkColor(ui->knowledge_tree, kFiles);
+    TreeView_SetTextColor(ui->knowledge_tree, kText);
+    TreeView_SetLineColor(ui->knowledge_tree, kBorder);
+    TreeView_SetItemHeight(ui->knowledge_tree, dip(hwnd, 26));
+    TreeView_SetIndent(ui->knowledge_tree, dip(hwnd, 16));
+    TreeView_SetExtendedStyle(ui->knowledge_tree, 0x0004, 0x0004);
+    apply_dark_child(ui->knowledge_tree);
+    install_thin_scrollbar(ui->knowledge_tree, kFiles);
     SetWindowTheme(ui->tabs, L"", L"");
     SetWindowTheme(ui->chat_tabs, L"", L"");
     SetWindowTheme(ui->filter, L"", L"");
@@ -3252,6 +5453,7 @@ void create_controls(Ui* ui, HWND hwnd) {
     install_thin_scrollbar(ui->tree, kFiles);
     install_thin_scrollbar(ui->threads, kHistory);
     install_thin_scrollbar(ui->ctx, kWindow);
+    apply_dark_child(ui->transcript);
     install_thin_scrollbar(ui->transcript, kWindow);
     install_thin_scrollbar(ui->editor, kEditor);
     install_thin_scrollbar(ui->composer, kInput);
@@ -3298,11 +5500,11 @@ void create_controls(Ui* ui, HWND hwnd) {
 void apply_fonts(Ui* ui) {
     for (HWND h : {ui->project, ui->openfolder, ui->toggle_files, ui->toggle_history, ui->focus, ui->settings, ui->signin,
                     ui->signout, ui->hdr_files, ui->hdr_editor, ui->hdr_agent, ui->hdr_history, ui->neu, ui->send, ui->cancel,
-                    ui->tab_editor, ui->tab_agent, ui->models, ui->threads, ui->filter, ui->search, ui->tree, ui->tabs,
-                    ui->chat_tabs, ui->find, ui->find_toggle, ui->save, ui->scope, ui->ctx, ui->add_file, ui->add_sel,
+                    ui->tab_editor, ui->tab_agent, ui->models, ui->threads, ui->filter, ui->search, ui->tree, ui->knowledge_tree, ui->knowledge_header, ui->knowledge_manage, ui->tabs,
+                    ui->chat_tabs, ui->find, ui->find_toggle, ui->save, ui->scope, ui->ctx, ui->add_file, ui->workflow,
                     ui->pin, ui->archive, ui->empty_open_file, ui->empty_open_folder, ui->composer_cue, ui->account,
                     ui->content_back, ui->content_title, ui->content_nav, ui->content_body, ui->set_oa_status,
-                    ui->set_oa_signin, ui->set_oa_signout, ui->set_cl_status, ui->set_cl_key, ui->set_cl_code,
+                    ui->set_oa_signin, ui->set_oa_signout, ui->set_cl_status, ui->set_cursor_status, ui->set_cl_key, ui->set_cl_code,
                     ui->set_cl_disc, ui->set_def_label, ui->set_def_combo, ui->set_codex, ui->set_copy_runtime, ui->set_wrap,
                     ui->set_whitespace, ui->set_enter_sends, ui->gs_open_folder, ui->gs_providers}) {
         if (h) {
@@ -3311,6 +5513,7 @@ void apply_fonts(Ui* ui) {
     }
     SendMessageW(ui->account, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font_small), TRUE);
     SendMessageW(ui->agent_hint, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font_small), TRUE);
+    SendMessageW(ui->activity, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font_small), TRUE);
     SendMessageW(ui->status, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font_small), TRUE);
     SendMessageW(ui->homehint, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font_small), TRUE);
     if (ui->editor_status) {
@@ -3336,7 +5539,9 @@ HBRUSH brush_for(Ui* ui, HWND child) {
         return ui->agent_br;
     }
     if (child == ui->content_host || child == ui->content_title || child == ui->content_body || child == ui->content_nav ||
-        child == ui->set_oa_status || child == ui->set_cl_status || child == ui->set_def_label) {
+        child == ui->set_oa_status || child == ui->set_cl_status || child == ui->set_def_label ||
+        ui->keyring_ui.owns_hwnd(child) || ui->environment_ui.owns_hwnd(child) ||
+        ui->security_overview.owns_hwnd(child) || ui->security_policy.owns_hwnd(child)) {
         return ui->editor_br;
     }
     return ui->bg;
@@ -3381,6 +5586,12 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             SendMessageW(ui->ctx, LB_SETITEMHEIGHT, 0, dip(hwnd, 24));
             ui->session.paths = make_paths();
             ui->session.settings = load_settings(ui->session.paths.settings_path);
+            ui->knowledge.load(ui->session.paths.knowledge_path);
+            ui->mcp.load(ui->session.paths.mcp_path);
+            ui->session.set_mcp_manager(&ui->mcp);
+            ui->strata.load(ui->session.paths.strata_path);
+            ui->environments.load(ui->session.paths.environments_path);
+            reload_terminal_profiles(ui);
             ui->session.selected_model = ui->session.settings.selected_model;
             ui->session.sync_claude_models();
             ui->claude_auth_polls = 3;  // warm Claude OAuth cache so agent menu includes Claude rows early
@@ -3389,17 +5600,36 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             apply_editor_prefs(ui);
             SetWindowTextW(ui->composer, utf16(ui->session.draft_for(ui->session.settings.last_thread_id)).c_str());
-            if (!ui->session.settings.project_folder.empty()) {
-                rebuild_tree(ui);
-            }
             std::wstring err;
             if (!ui->session.start_runtime(hwnd, WM_SCYLLA_LINE, &err)) {
                 SetWindowTextW(ui->status, err.c_str());
             }
+            // Store is loaded inside start_runtime; Knowledge was loaded above — expand
+            // Codex writableRoots so Agent chat can browse Knowledge trees (e.g. .md).
+            sync_knowledge_agent_grants(ui);
+            // Project-scoped Knowledge sources need the loaded active project id.
+            rebuild_tree(ui);
             refresh_projects(ui);
             refresh_threads(ui);
             refresh_chrome(ui);
+            if (ui->session.settings.restore_chat_on_start) {
+                const auto wanted = ui->session.settings.last_thread_id;
+                const auto* chat = ui->session.store.by_thread(wanted);
+                if (chat && chat->provider_id == "claude") {
+                    const auto it = std::find(ui->thread_ids.begin(), ui->thread_ids.end(), wanted);
+                    if (it != ui->thread_ids.end()) {
+                        open_chat_index(ui, static_cast<int>(it - ui->thread_ids.begin()));
+                        apply_stream(ui);
+                    }
+                }
+            }
+            if (ui->session.settings.terminal_visible) {
+                ensure_terminal_panel(ui);
+            }
             SetTimer(hwnd, 1, 2000, nullptr);
+            SetTimer(hwnd, 2, 180, nullptr);
+            queue_mcp_auth_checks(ui, true);
+            pump_mcp_auth_queue(ui);
             return 0;
         }
         case WM_SIZE:
@@ -3411,11 +5641,49 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_KEYDOWN:
-            if (wparam == VK_ESCAPE && ui->content_view != ContentView::Editor) {
-                go_back_content(ui);
-                return 0;
+            if (wparam == VK_ESCAPE) {
+                // Priority: cancel an open panel form → close the find bar → leave the section.
+                if (cancel_active_form(ui)) {
+                    return 0;
+                }
+                if (ui->find_open && ui->content_view == ContentView::Editor) {
+                    ui->find_open = false;
+                    layout(ui);
+                    if (ui->editor) {
+                        SetFocus(ui->editor);
+                    }
+                    return 0;
+                }
+                if (ui->content_view != ContentView::Editor) {
+                    go_back_content(ui);
+                    return 0;
+                }
             }
             break;
+        case ui_kit::WM_SK_FIELD_SUBMIT: {
+            // Enter inside a kit field fires the owning panel's default action.
+            HWND field = reinterpret_cast<HWND>(lparam);
+            const UINT cmd = panel_default_command(ui, field);
+            if (cmd) {
+                SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(cmd, BN_CLICKED), 0);
+            }
+            return 0;
+        }
+        case ui_kit::WM_SK_FIELD_CANCEL: {
+            // Esc inside a kit field: cancel the form, else clear the field, else leave section.
+            HWND field = reinterpret_cast<HWND>(lparam);
+            if (cancel_active_form(ui)) {
+                return 0;
+            }
+            if (field && GetWindowTextLengthW(field) > 0) {
+                SetWindowTextW(field, L"");
+                return 0;
+            }
+            if (ui->content_view != ContentView::Editor) {
+                go_back_content(ui);
+            }
+            return 0;
+        }
         case WM_PAINT: {
             PAINTSTRUCT ps{};
             HDC dc = BeginPaint(hwnd, &ps);
@@ -3435,6 +5703,16 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             line(ui->split1);
             line(ui->split2);
             line(ui->split3);
+            if (ui->split_term.bottom > ui->split_term.top) {
+                const int y = (ui->split_term.top + ui->split_term.bottom) / 2;
+                MoveToEx(dc, ui->split_term.left, y, nullptr);
+                LineTo(dc, ui->split_term.right, y);
+            }
+            if (ui->split_knowledge.bottom > ui->split_knowledge.top) {
+                const int y = (ui->split_knowledge.top + ui->split_knowledge.bottom) / 2;
+                MoveToEx(dc, ui->split_knowledge.left, y, nullptr);
+                LineTo(dc, ui->split_knowledge.right, y);
+            }
             SelectObject(dc, old);
             DeleteObject(pen);
             EndPaint(hwnd, &ps);
@@ -3445,6 +5723,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 POINT p{};
                 GetCursorPos(&p);
                 ScreenToClient(hwnd, &p);
+                if (pt_in(ui->split_term, p.x, p.y) || pt_in(ui->split_knowledge, p.x, p.y)) {
+                    SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+                    return TRUE;
+                }
                 if (pt_in(ui->split1, p.x, p.y) || pt_in(ui->split2, p.x, p.y) || pt_in(ui->split3, p.x, p.y)) {
                     SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
                     return TRUE;
@@ -3453,9 +5735,24 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             break;
         }
         case WM_LBUTTONDOWN: {
+            ui_kit::select_close_all();
             const int x = GET_X_LPARAM(lparam);
             const int y = GET_Y_LPARAM(lparam);
             ui->drag = 0;
+            if (pt_in(ui->split_knowledge, x, y)) {
+                ui->drag = 5;
+                ui->drag_origin = y;
+                ui->knowledge_h0 = ui->knowledge_height;
+                SetCapture(hwnd);
+                return 0;
+            }
+            if (pt_in(ui->split_term, x, y)) {
+                ui->drag = 4;
+                ui->drag_origin = y;
+                ui->terminal_h0 = ui->session.settings.terminal_h;
+                SetCapture(hwnd);
+                return 0;
+            }
             if (pt_in(ui->split1, x, y)) {
                 ui->drag = 1;
             } else if (pt_in(ui->split2, x, y)) {
@@ -3475,6 +5772,32 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         case WM_MOUSEMOVE:
             if (ui->drag && (wparam & MK_LBUTTON)) {
+                if (ui->drag == 5) {
+                    const int dy = px_to_dip(hwnd, ui->drag_origin - GET_Y_LPARAM(lparam));
+                    const int max_h = (std::max)(28, ui->knowledge_max_height);
+                    ui->session.settings.knowledge_h = std::clamp(ui->knowledge_h0 + dy, (std::min)(80, max_h), max_h);
+                    layout(ui);
+                    return 0;
+                }
+                if (ui->drag == 4) {
+                    const int y = GET_Y_LPARAM(lparam);
+                    const int dy = px_to_dip(hwnd, ui->drag_origin - y);
+                    RECT crc{};
+                    GetClientRect(hwnd, &crc);
+                    const int client_h_dip = px_to_dip(hwnd, crc.bottom - crc.top);
+                    const int max_term =
+                        (std::max)(ui_space::kMinTerminalHDip,
+                                   client_h_dip - 40 - 22 - 180);  // header + status + min body
+                    ui->session.settings.terminal_h =
+                        std::clamp(ui->terminal_h0 + dy, ui_space::kMinTerminalHDip, max_term);
+                    if (ui->workbench_panel.maximized()) {
+                        ui->workbench_panel.set_maximized(false);
+                    }
+                    ui->panel_collapsed = false;
+                    ui->workbench_panel.set_collapsed(false);
+                    layout(ui);
+                    return 0;
+                }
                 const int x = GET_X_LPARAM(lparam);
                 const int dx = px_to_dip(hwnd, x - ui->drag_origin);
                 if (ui->drag == 1) {
@@ -3487,6 +5810,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 layout(ui);
                 return 0;
             }
+            break;
+        case WM_CAPTURECHANGED:
+            ui->drag = 0;
             break;
         case WM_LBUTTONUP:
             if (ui->drag) {
@@ -3503,6 +5829,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_CTLCOLORBTN: {
             HDC dc = reinterpret_cast<HDC>(wparam);
             HWND child = reinterpret_cast<HWND>(lparam);
+            // Kit labels: no fill box — transparent over content_host.
+            if (msg == WM_CTLCOLORSTATIC &&
+                (GetPropW(child, L"ScyllaStatic") || GetPropW(child, L"ScyllaMuted"))) {
+                const bool muted = GetPropW(child, L"ScyllaMuted") != nullptr;
+                SetTextColor(dc, muted ? kMuted : kText);
+                SetBkMode(dc, TRANSPARENT);
+                return reinterpret_cast<LRESULT>(GetStockObject(NULL_BRUSH));
+            }
             SetTextColor(dc, kText);
             if (child == ui->agent_hint || child == ui->status || child == ui->homehint || child == ui->account ||
                 child == ui->composer_cue) {
@@ -3538,12 +5872,18 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_MEASUREITEM: {
             auto* mi = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
             if (mi->CtlType == ODT_LISTBOX) {
+                if (ui->mcp_ui.measure_item(mi) || ui->terminal_ui.measure_item(mi) ||
+                    ui->knowledge_ui.measure_item(mi) || ui->environment_ui.measure_item(mi)) {
+                    return TRUE;
+                }
                 if (mi->CtlID == ID_THREADS) {
                     mi->itemHeight = dip(hwnd, 48);
                 } else if (mi->CtlID == ID_CTX) {
                     mi->itemHeight = dip(hwnd, 24);
                 } else if (mi->CtlID == ID_CONTENT_NAV) {
                     mi->itemHeight = dip(hwnd, 32);
+                } else if (mi->CtlID == ID_MCP_ALIAS_POPUP) {
+                    mi->itemHeight = dip(hwnd, 28);
                 } else {
                     mi->itemHeight = dip(hwnd, 28);
                 }
@@ -3554,6 +5894,14 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         case WM_DRAWITEM: {
             auto* di = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
+            if (ui_kit::draw_kit_item(di, ui->font)) {
+                return TRUE;
+            }
+            if (ui->terminal_ui.draw_item(di, ui->font) || ui->knowledge_ui.draw_item(di, ui->font) ||
+                ui->mcp_ui.draw_item(di, ui->font) || ui->environment_ui.draw_item(di, ui->font) ||
+                ui->ui_gallery.draw_item(di, ui->font)) {
+                return TRUE;
+            }
             if (di->CtlType == ODT_BUTTON) {
                 BtnVisual vis = BtnVisual::Secondary;
                 bool tog = false;
@@ -3589,6 +5937,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 } else if (di->hwndItem == ui->set_enter_sends) {
                     vis = BtnVisual::Option;
                     tog = ui->session.settings.enter_sends;
+                } else if (di->hwndItem == ui->set_ui_gallery) {
+                    vis = BtnVisual::Secondary;
                 }
                 draw_themed_button(di, ui->font, vis, tog, ui->session.state == AppState::Generating && di->CtlID == ID_SEND);
                 return TRUE;
@@ -3617,15 +5967,39 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 wchar_t buf[256]{};
                 SendMessageW(di->hwndItem, LB_GETTEXT, di->itemID, reinterpret_cast<LPARAM>(buf));
                 const bool sel = (di->itemState & ODS_SELECTED) != 0;
-                if (di->hwndItem == ui->content_nav) {
-                    const Theme& t = theme();
-                    fill_rect(di->hDC, di->rcItem, sel ? t.amber : t.editor);
-                    RECT tr = di->rcItem;
-                    tr.left += 12;
-                    SetBkMode(di->hDC, TRANSPARENT);
-                    SetTextColor(di->hDC, sel ? RGB(0xFF, 0xFF, 0xFF) : t.text);
-                    SelectObject(di->hDC, ui->font);
-                    DrawTextW(di->hDC, buf, -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                if (di->hwndItem == ui->threads && di->itemID < ui->chat_groups.size()) {
+                    RECT row = di->rcItem;
+                    const auto& heading = ui->chat_groups[di->itemID];
+                    if (!heading.empty()) {
+                        RECT label = row;
+                        label.bottom = label.top + dip(hwnd, 26);
+                        fill_rect(di->hDC, label, theme().navigation);
+                        label.left += dip(hwnd, 10);
+                        SetTextColor(di->hDC, theme().muted);
+                        SetBkMode(di->hDC, TRANSPARENT);
+                        auto old = SelectObject(di->hDC, ui->font_small);
+                        DrawTextW(di->hDC, heading.c_str(), -1, &label, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+                        SelectObject(di->hDC, old);
+                        row.top = label.bottom;
+                    }
+                    draw_list_row(di->hDC, row, ui->font, buf, sel, false);
+                    if (di->itemID < ui->thread_ids.size() && ui->session.thread_busy(ui->thread_ids[di->itemID])) {
+                        const int cy = (row.top + row.bottom) / 2;
+                        const int gap = dip(hwnd, 5), radius = dip(hwnd, 2);
+                        const int right = row.right - dip(hwnd, 12);
+                        for (int dot = 0; dot < 3; ++dot) {
+                            HBRUSH brush = CreateSolidBrush(
+                                dot == static_cast<int>(ui->chat_busy_frame % 3) ? theme().amber : theme().muted);
+                            HBRUSH old = static_cast<HBRUSH>(SelectObject(di->hDC, brush));
+                            SelectObject(di->hDC, GetStockObject(NULL_PEN));
+                            const int cx = right - (2 - dot) * gap;
+                            Ellipse(di->hDC, cx - radius, cy - radius, cx + radius + 1, cy + radius + 1);
+                            SelectObject(di->hDC, old);
+                            DeleteObject(brush);
+                        }
+                    }
+                } else if (di->hwndItem == ui->content_nav) {
+                    ui_kit::paint_nav_row(di->hDC, di->rcItem, ui->font, buf, sel, false);
                 } else {
                     draw_list_row(di->hDC, di->rcItem, ui->font, buf, sel, false);
                 }
@@ -3696,17 +6070,35 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         case WM_CONTEXTMENU: {
             HWND from = reinterpret_cast<HWND>(wparam);
+            if (from == ui->knowledge_tree) {
+                POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+                if (point.x == -1 && point.y == -1) {
+                    RECT rect{};
+                    GetWindowRect(from, &rect);
+                    point = {rect.left + dip(hwnd, 16), rect.top + dip(hwnd, 16)};
+                }
+                HMENU menu = CreatePopupMenu();
+                AppendMenuW(menu, MF_STRING, 1, L"Manage knowledge folders…");
+                AppendMenuW(menu, MF_STRING, 2, L"Refresh folders");
+                const int action = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                                                   point.x, point.y, 0, hwnd, nullptr);
+                DestroyMenu(menu);
+                if (action == 1) open_settings_section(ui, SettingsSection::Knowledge);
+                if (action == 2) rebuild_tree(ui);
+                return 0;
+            }
             if (from == ui->threads && !ui->thread_ids.empty()) {
                 POINT p{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
                 if (p.x == -1 && p.y == -1) {
-                    GetCursorPos(&p);
-                }
-                POINT client = p;
-                ScreenToClient(ui->threads, &client);
-                const int hit = static_cast<int>(SendMessageW(ui->threads, LB_ITEMFROMPOINT, 0,
-                                                              MAKELPARAM(client.x, client.y)));
-                if (HIWORD(hit) == 0 && LOWORD(hit) < ui->thread_ids.size()) {
-                    SendMessageW(ui->threads, LB_SETCURSEL, LOWORD(hit), 0);
+                    const int selected = static_cast<int>(SendMessageW(ui->threads, LB_GETCURSEL, 0, 0));
+                    RECT row{};
+                    if (selected < 0 || SendMessageW(ui->threads, LB_GETITEMRECT, selected, reinterpret_cast<LPARAM>(&row)) == LB_ERR) return 0;
+                    p = {row.left, row.bottom}; ClientToScreen(ui->threads, &p);
+                } else {
+                    POINT client = p; ScreenToClient(ui->threads, &client);
+                    const int hit = chat_row_at_point(ui->threads, client, ui->chat_groups);
+                    if (hit < 0) return 0;
+                    SendMessageW(ui->threads, LB_SETCURSEL, hit, 0);
                 }
                 HMENU m = CreatePopupMenu();
                 AppendMenuW(m, MF_STRING, ID_RENAME_CHAT, L"Rename");
@@ -3716,11 +6108,108 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 DestroyMenu(m);
                 return 0;
             }
+            if (from == ui->tree && !ui->session.store.active_project_id.empty()) {
+                POINT p{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+                if (p.x == -1 && p.y == -1) {
+                    HTREEITEM selected = TreeView_GetSelection(ui->tree);
+                    RECT rect{};
+                    if (selected && TreeView_GetItemRect(ui->tree, selected, &rect, TRUE)) {
+                        p = {rect.left, rect.bottom};
+                        ClientToScreen(ui->tree, &p);
+                    } else {
+                        GetWindowRect(ui->tree, &rect);
+                        p = {rect.left + dip(hwnd, 16), rect.top + dip(hwnd, 16)};
+                    }
+                }
+                // Security entry points belong to the project root, not to arbitrary files or the
+                // KNOWLEDGE section.
+                TVHITTESTINFO ht{};
+                ht.pt = p;
+                ScreenToClient(ui->tree, &ht.pt);
+                HTREEITEM hit = TreeView_HitTest(ui->tree, &ht);
+                bool project_root = false;
+                if (hit) {
+                    TreeView_SelectItem(ui->tree, hit);
+                    TVITEMW it{};
+                    it.mask = TVIF_PARAM;
+                    it.hItem = hit;
+                    if (TreeView_GetItem(ui->tree, &it)) {
+                        const auto* node = reinterpret_cast<TreeNode*>(it.lParam);
+                        project_root = !TreeView_GetParent(ui->tree, hit) && node && node->kind == TreeNode::Kind::Project;
+                    }
+                }
+                HMENU m = CreatePopupMenu();
+                AppendMenuW(m, MF_STRING, ID_REFRESH_FILES, L"Refresh");
+                if (project_root) {
+                    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(m, MF_STRING, Cmd_TreeProjectEnv, L"Project Environment…");
+                    AppendMenuW(m, MF_STRING, Cmd_TreeProjectSecrets, L"Project Secrets…");
+                    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(m, MF_STRING, Cmd_TreeProjectSecurity, L"Security…");
+                }
+                TrackPopupMenu(m, TPM_RIGHTBUTTON, p.x, p.y, 0, hwnd, nullptr);
+                DestroyMenu(m);
+                return 0;
+            }
             break;
         }
         case WM_NOTIFY: {
             auto* hdr = reinterpret_cast<NMHDR*>(lparam);
-            if (hdr->hwndFrom == ui->tree && hdr->code == NM_CUSTOMDRAW) {
+            if (hdr->code == EN_LINK) {
+                const auto* link = reinterpret_cast<ENLINK*>(lparam);
+                if (link->msg != WM_LBUTTONUP) return 0;
+                auto target = ui_kit::markdown_link_at(hdr->hwndFrom, link->chrg.cpMin);
+                if (target.empty()) return 0;
+                const auto key = file_search_key(target);
+                const std::wstring attachment_scheme = L"scylla-attachments:";
+                if (key.starts_with(attachment_scheme)) {
+                    show_attachment_tray(ui, target.substr(attachment_scheme.size()), hdr->hwndFrom, link->chrg.cpMin);
+                    return 0;
+                }
+                if (key.starts_with(L"https://") || key.starts_with(L"http://")) {
+                    ShellExecuteW(hwnd, L"open", target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    return 0;
+                }
+                if (key.starts_with(L"file:///")) target = target.substr(8);
+                // Decode percent-encoded UTF-8 paths (including spaces).
+                const auto encoded = utf8(target); std::string decoded;
+                auto hex = [](char c) -> int { if (c >= '0' && c <= '9') return c - '0'; if (c >= 'a' && c <= 'f') return c - 'a' + 10; if (c >= 'A' && c <= 'F') return c - 'A' + 10; return -1; };
+                for (std::size_t i = 0; i < encoded.size(); ++i) {
+                    if (encoded[i] == '%' && i + 2 < encoded.size() && hex(encoded[i + 1]) >= 0 && hex(encoded[i + 2]) >= 0) {
+                        decoded += static_cast<char>(hex(encoded[i + 1]) * 16 + hex(encoded[i + 2])); i += 2;
+                    } else decoded += encoded[i];
+                }
+                target = utf16(decoded);
+                if (target.size() > 3 && target[0] == L'/' && target[2] == L':') target.erase(0, 1);
+                int line = 0;
+                const auto colon = target.find_last_of(L':');
+                if (colon != std::wstring::npos && colon > 1 && colon + 1 < target.size() &&
+                    target.find_first_not_of(L"0123456789", colon + 1) == std::wstring::npos) {
+                    line = _wtoi(target.c_str() + colon + 1); target.resize(colon);
+                }
+                // Never dispatch arbitrary URI schemes or executable files to the OS.
+                const auto scheme = target.find(L':');
+                if (scheme != std::wstring::npos && scheme != 1) return 0;
+                std::filesystem::path path(target);
+                if (path.is_relative()) {
+                    const auto base = hdr->hwndFrom == ui->markdown_view && ui->active_doc >= 0
+                        ? std::filesystem::path(ui->docs[ui->active_doc].path).parent_path() : std::filesystem::path(ui->session.project_root);
+                    path = base / path;
+                }
+                if (open_document(ui, path.wstring(), true)) {
+                    show_editor_content(ui);
+                    if (line > 0) { ui->docs[ui->active_doc].markdown_source = true; editor_goto_line(ui->editor, line); }
+                    layout(ui);
+                }
+                return 0;
+            }
+            if (hdr->hwndFrom == ui->knowledge_tree && hdr->code == TVN_GETINFOTIPW) {
+                auto* tip = reinterpret_cast<NMTVGETINFOTIPW*>(lparam);
+                const auto* node = reinterpret_cast<TreeNode*>(tip->lParam);
+                if (node && !node->path.empty()) wcsncpy_s(tip->pszText, tip->cchTextMax, node->path.c_str(), _TRUNCATE);
+                return 0;
+            }
+            if ((hdr->hwndFrom == ui->tree || hdr->hwndFrom == ui->knowledge_tree) && hdr->code == NM_CUSTOMDRAW) {
                 auto* cd = reinterpret_cast<NMTVCUSTOMDRAW*>(lparam);
                 if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) {
                     return CDRF_NOTIFYITEMDRAW;
@@ -3740,32 +6229,40 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     return CDRF_DODEFAULT;
                 }
             }
-            if (hdr->hwndFrom == ui->tree && hdr->code == TVN_DELETEITEMW) {
+            if ((hdr->hwndFrom == ui->tree || hdr->hwndFrom == ui->knowledge_tree) && hdr->code == TVN_DELETEITEMW) {
                 auto* nmtv = reinterpret_cast<NMTREEVIEWW*>(lparam);
                 delete reinterpret_cast<TreeNode*>(nmtv->itemOld.lParam);
             }
-            if (hdr->hwndFrom == ui->tree && hdr->code == TVN_ITEMEXPANDINGW) {
+            if ((hdr->hwndFrom == ui->tree || hdr->hwndFrom == ui->knowledge_tree) && hdr->code == TVN_ITEMEXPANDINGW) {
                 auto* nmtv = reinterpret_cast<NMTREEVIEWW*>(lparam);
                 auto* node = reinterpret_cast<TreeNode*>(nmtv->itemNew.lParam);
                 if (node && node->dir && !node->loaded && (nmtv->action & TVE_EXPAND)) {
                     node->loaded = true;
-                    fill_dir(ui->tree, nmtv->itemNew.hItem, node->path, L"");
+                    if (node->kind == TreeNode::Kind::KnowledgeSource ||
+                        node->kind == TreeNode::Kind::KnowledgeEntry) {
+                        // Top-level (or nested) listing under a knowledge source — one level.
+                        // Cascade: skip No Access (and other !readable) children.
+                        fill_dir(hdr->hwndFrom, nmtv->itemNew.hItem, node->path, L"", TreeNode::Kind::KnowledgeEntry,
+                                 node->source_id, &ui->knowledge);
+                    } else if (node->kind != TreeNode::Kind::KnowledgeHeader) {
+                        fill_dir(hdr->hwndFrom, nmtv->itemNew.hItem, node->path, L"");
+                    }
                 }
             }
-            if (hdr->hwndFrom == ui->tree && hdr->code == TVN_SELCHANGEDW) {
+            if ((hdr->hwndFrom == ui->tree || hdr->hwndFrom == ui->knowledge_tree) && hdr->code == TVN_SELCHANGEDW) {
                 auto* nmtv = reinterpret_cast<NMTREEVIEWW*>(lparam);
                 auto* node = reinterpret_cast<TreeNode*>(nmtv->itemNew.lParam);
                 if (node && !node->dir && !node->path.empty()) {
                     open_document(ui, node->path, false);
                 }
             }
-            if (hdr->hwndFrom == ui->tree && hdr->code == NM_DBLCLK) {
-                HTREEITEM sel = TreeView_GetSelection(ui->tree);
+            if ((hdr->hwndFrom == ui->tree || hdr->hwndFrom == ui->knowledge_tree) && hdr->code == NM_DBLCLK) {
+                HTREEITEM sel = TreeView_GetSelection(hdr->hwndFrom);
                 if (sel) {
                     TVITEMW it{};
                     it.mask = TVIF_PARAM;
                     it.hItem = sel;
-                    if (TreeView_GetItem(ui->tree, &it)) {
+                    if (TreeView_GetItem(hdr->hwndFrom, &it)) {
                         auto* node = reinterpret_cast<TreeNode*>(it.lParam);
                         if (node && !node->dir && !node->path.empty()) {
                             open_document(ui, node->path, true);
@@ -3814,20 +6311,32 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_COMMAND: {
             const int id = LOWORD(wparam);
             const int code = HIWORD(wparam);
-            if (id == ID_SIGNIN) {
+            if (id == ID_WORKFLOW) {
+                ui_kit::select_handle_command(ui->workflow, static_cast<WORD>(code));
+            } else if (id == ID_KNOWLEDGE_HEADER) {
+                ui->knowledge_collapsed = !ui->knowledge_collapsed;
+                layout(ui);
+            } else if (id == ID_KNOWLEDGE_MANAGE) {
+                open_settings_section(ui, SettingsSection::Knowledge);
+            } else if (id == ID_SIGNIN) {
                 ui->session.login_chatgpt();
                 refresh_chrome(ui);
             } else if (id == ID_SIGNOUT) {
                 ui->session.logout();
             } else if (id == ID_NEW) {
+                ui->restore_chat_pending = false;
                 ui->session.set_draft(ui->session.active_thread_id, utf8(get_window_text(ui->composer)));
                 ui->session.new_conversation();
+                close_attachment_windows(ui);
+                ui->message_attachments.clear();
                 SetWindowTextW(ui->composer, L"");
                 SetWindowTextW(ui->transcript, L"");
                 ui->shown_stream.clear();
+                ui->markdown_stream_start = -1;
+                ui->agent_heading_pending = false;
                 ui->session.stream_buffer.clear();
             } else if (id == ID_SEND) {
-                if (ui->session.state == AppState::Generating) {
+                if (ui->session.active_thread_busy() || ui->session.claude_generating()) {
                     ui->session.cancel_turn();
                     refresh_chrome(ui);
                 } else {
@@ -3868,10 +6377,23 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 PostMessageW(hwnd, WM_SCYLLA_OPEN_SEL, ID_SCOPE, reinterpret_cast<LPARAM>(ui->scope));
             } else if (id == ID_COMPOSER && code == EN_CHANGE) {
                 ShowWindow(ui->composer_cue, get_window_text(ui->composer).empty() ? SW_SHOW : SW_HIDE);
+                update_mcp_alias_popup(ui);
+            } else if (id == ID_MCP_ALIAS_POPUP && (code == LBN_SELCHANGE || code == LBN_DBLCLK)) {
+                apply_mcp_alias_popup(ui);
             } else if (reinterpret_cast<HWND>(lparam) == ui->composer_cue && code == STN_CLICKED) {
                 SetFocus(ui->composer);
             } else if (id == ID_SAVE) {
                 save_active(ui);
+            } else if (id == ID_REFRESH_FILES) {
+                rebuild_tree(ui);
+                layout(ui);
+            } else if (id == ID_MARKDOWN_TOGGLE && ui->active_doc >= 0) {
+                pull_editor(ui);
+                auto& doc = ui->docs[ui->active_doc];
+                doc.markdown_source = !doc.markdown_source;
+                if (!doc.markdown_source) ui_kit::set_markdown(ui->markdown_view, doc.text);
+                layout(ui);
+                SetFocus(doc.markdown_source ? ui->editor : ui->markdown_view);
             } else if (id == ID_CLOSE_TAB) {
                 close_tab(ui, ui->active_doc);
             } else if (id == ID_TOGGLE_FIND && code == BN_CLICKED) {
@@ -3923,10 +6445,22 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 ui->session.settings.show_whitespace = !ui->session.settings.show_whitespace;
                 apply_editor_prefs(ui);
                 save_settings(ui->session.paths.settings_path, ui->session.settings);
+            } else if (id == ID_TOGGLE_TERMINAL) {
+                toggle_terminal(ui);
+            } else if (id == ID_NEW_TERMINAL) {
+                request_new_terminal(ui);
+            } else if (id == ID_PANEL_PROBLEMS) {
+                show_panel_surface(ui, PanelSurface::Problems);
+            } else if (id == ID_PANEL_OUTPUT) {
+                show_panel_surface(ui, PanelSurface::Output);
+            } else if (id == ID_PANEL_PORTS) {
+                show_panel_surface(ui, PanelSurface::Ports);
             } else if (id == ID_ACCESS_SHOW || id == ID_PERM_INFO) {
                 show_content_view(ui, ContentView::Access);
             } else if (id == ID_ACCESS_FOLDERS) {
                 do_open_folder(ui);
+            } else if (id == ID_ACCESS_KEYRING) {
+                show_content_view(ui, ContentView::Keyring);
             } else if (id == ID_HELP_ABOUT) {
                 show_about(hwnd);
             } else if (id == ID_HELP_SHORTCUTS) {
@@ -3939,13 +6473,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 go_back_content(ui);
             } else if (id == ID_CONTENT_NAV && code == LBN_SELCHANGE) {
                 const int sel = static_cast<int>(SendMessageW(ui->content_nav, LB_GETCURSEL, 0, 0));
-                SettingsSection sec = SettingsSection::Providers;
-                if (sel == 1) {
-                    sec = SettingsSection::Editor;
-                } else if (sel == 2) {
-                    sec = SettingsSection::Advanced;
-                }
-                show_content_view(ui, ContentView::Settings, sec);
+                show_content_view(ui, ContentView::Settings, settings_section_from_nav(sel));
             } else if (id == ID_SET_OA_SIGNIN) {
                 ui->session.login_chatgpt();
                 refresh_settings_pane(ui);
@@ -4008,6 +6536,25 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 browse_codex(ui);
             } else if (id == ID_SET_COPY_RUNTIME) {
                 PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(ID_COPY_RUNTIME, 0), 0);
+            } else if (id == ID_UI_GALLERY ||
+                       (ui->ui_gallery.visible() &&
+                        ui->ui_gallery.handle_command(static_cast<WORD>(id), code))) {
+                if (id == ID_UI_GALLERY) {
+                    ui->ui_gallery.show(true);
+                    if (ui->set_codex) {
+                        ShowWindow(ui->set_codex, SW_HIDE);
+                    }
+                    if (ui->set_copy_runtime) {
+                        ShowWindow(ui->set_copy_runtime, SW_HIDE);
+                    }
+                    if (ui->set_ui_gallery) {
+                        ShowWindow(ui->set_ui_gallery, SW_HIDE);
+                    }
+                    if (ui->content_body) {
+                        ShowWindow(ui->content_body, SW_HIDE);
+                    }
+                }
+                layout(ui);
             } else if (id == ID_SET_WRAP) {
                 ui->session.settings.word_wrap = !ui->session.settings.word_wrap;
                 apply_editor_prefs(ui);
@@ -4026,6 +6573,75 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 do_open_folder(ui);
             } else if (id == ID_GS_PROVIDERS) {
                 open_settings_section(ui, SettingsSection::Providers);
+            } else if (id == Cmd_SecTabOverview) {
+                set_security_subpage(ui, SecuritySubpage::Overview);
+            } else if (id == Cmd_SecTabKeyring) {
+                set_security_subpage(ui, SecuritySubpage::Keyring);
+            } else if (id == Cmd_SecTabEnvironments) {
+                set_security_subpage(ui, SecuritySubpage::Environments);
+            } else if (id == Cmd_SecTabPolicy) {
+                set_security_subpage(ui, SecuritySubpage::Policy);
+            } else if (const auto sec_act = ui->security_overview.on_command(static_cast<WORD>(id), code);
+                       sec_act != SecurityOverviewAction::None) {
+                if (sec_act == SecurityOverviewAction::GotoKeyring) {
+                    set_security_subpage(ui, SecuritySubpage::Keyring);
+                } else if (sec_act == SecurityOverviewAction::GotoEnvironments) {
+                    set_security_subpage(ui, SecuritySubpage::Environments);
+                } else if (sec_act == SecurityOverviewAction::GotoPolicy) {
+                    set_security_subpage(ui, SecuritySubpage::Policy);
+                } else if (sec_act == SecurityOverviewAction::LockKeyring) {
+                    ui->keyring_ui.lock_now();
+                    refresh_settings_data(ui);
+                    refresh_chrome(ui);
+                    layout(ui);
+                }
+            } else if (ui->security_policy.on_command(static_cast<WORD>(id), code, hwnd, ui->session.settings,
+                                                      ui->session.paths.settings_path)) {
+                // Policy edits change how a protected terminal launch behaves, so the Overview
+                // summary and any open status text refresh with it.
+                layout(ui);
+            } else if (id == Cmd_StatusEnv && code == BN_CLICKED) {
+                choose_status_environment(ui);
+            } else if (id == Cmd_TreeProjectEnv) {
+                open_settings_section(ui, SettingsSection::Security);
+                set_security_subpage(ui, SecuritySubpage::Environments);
+            } else if (id == Cmd_TreeProjectSecrets) {
+                open_settings_section(ui, SettingsSection::Security);
+                set_security_subpage(ui, SecuritySubpage::Keyring);
+            } else if (id == Cmd_TreeProjectSecurity) {
+                open_settings_section(ui, SettingsSection::Security);
+                set_security_subpage(ui, SecuritySubpage::Overview);
+            } else if (ui->terminal_ui.on_command(static_cast<WORD>(id), code, hwnd, ui->terminal_profiles,
+                                                  ui->session.settings, ui->session.paths.settings_path,
+                                                  ui->session.paths.terminals_path)) {
+                ui->workbench_panel.set_enabled_profiles(enabled_terminal_profiles(ui->terminal_profiles));
+                layout(ui);
+            } else if (ui->knowledge_ui.on_command(static_cast<WORD>(id), code, hwnd, ui->knowledge,
+                                                   ui->session.paths.knowledge_path,
+                                                   ui->session.store.active_project_id)) {
+                sync_knowledge_agent_grants(ui);
+                rebuild_tree(ui);
+                layout(ui);
+            } else if (ui->keyring_ui.handle_command(static_cast<int>(id), hwnd, code)) {
+                layout(ui);
+                refresh_chrome(ui);
+            } else if (ui->environment_ui.on_command(static_cast<WORD>(id), code, hwnd, ui->environments,
+                                                     ui->keyring_ui.keyring(),
+                                                     ui->session.store.active_project_id,
+                                                     ui->session.paths.environments_path)) {
+                if (ui->environment_ui.take_nav_request() == EnvUiNavRequest::OpenKeyring) {
+                    set_security_subpage(ui, SecuritySubpage::Keyring);
+                } else {
+                    layout(ui);
+                    refresh_chrome(ui);
+                }
+            } else if (ui->mcp_ui.handle_command(static_cast<int>(id), code, ui->mcp, ui->session.paths.mcp_path,
+                                                 hwnd)) {
+                layout(ui);
+            } else if (ui->strata_ui.handle_command(id, code, &ui->strata_bridge, &ui->strata,
+                                                    ui->session.store.active_project_id,
+                                                    ui->session.paths.strata_path, hwnd)) {
+                // Status / search / binding updated in-place; no relayout needed.
             } else if (id == ID_CTX && code == LBN_DBLCLK) {
                 const int sel = static_cast<int>(SendMessageW(ui->ctx, LB_GETCURSEL, 0, 0));
                 if (sel >= 0 && sel < static_cast<int>(ui->session.context_chips.size())) {
@@ -4052,11 +6668,15 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     const std::string tid = ui->thread_ids[sel];
                     if (ui->session.store.remove_thread(tid)) {
                         if (ui->session.active_thread_id == tid) {
+                            close_attachment_windows(ui);
+                            ui->message_attachments.clear();
                             ui->session.active_thread_id.clear();
                             ui->session.settings.last_thread_id.clear();
                             SetWindowTextW(ui->transcript, L"");
                             SetWindowTextW(ui->composer, L"");
                             ui->shown_stream.clear();
+                            ui->markdown_stream_start = -1;
+                            ui->agent_heading_pending = false;
                             ui->session.stream_buffer.clear();
                         }
                         persist_store(ui);
@@ -4154,14 +6774,45 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             // Open popup stays frozen (no refill).
             return 0;
         }
+        case WM_SCYLLA_TERMINAL_OUT:
+            poll_terminal(ui);
+            return 0;
+        case WM_SCYLLA_MCP_AUTH:
+            handle_mcp_auth_result(ui, reinterpret_cast<McpAuthPosted*>(lparam));
+            return 0;
+        case WM_SCYLLA_RELAYOUT: {
+            if (wparam == kRelayoutEnsurePanel) {
+                ensure_terminal_panel(ui);
+            }
+            layout(ui);
+            if (lparam != 0) {
+                ui->terminal_sessions.focus_active();
+                refresh_chrome(ui);
+            }
+            return 0;
+        }
         case WM_SCYLLA_LINE: {
             auto* line = reinterpret_cast<std::string*>(lparam);
             if (line) {
                 const int model_epoch = ui->session.models_epoch;
+                const int chats_epoch = ui->session.chats_epoch;
                 const std::size_t thread_n = ui->session.threads.size();
                 const std::size_t conv_n = ui->session.store.conversations.size();
                 const std::string active_before = ui->session.active_thread_id;
+                const auto state_before = ui->session.state;
+                const auto activity_before = ui->session.activity.summary();
+                const auto stream_before = ui->session.stream_buffer;
                 ui->session.handle_line(*line);
+                if (ui->session.chats_epoch != chats_epoch) refresh_threads(ui);
+                if (ui->restore_chat_pending && ui->session.account.signed_in && ui->session.state == AppState::Ready) {
+                    ui->restore_chat_pending = false;
+                    if (ui->session.settings.restore_chat_on_start) {
+                        const auto wanted = ui->session.settings.last_thread_id;
+                        refresh_threads(ui);
+                        const auto found = std::find(ui->thread_ids.begin(), ui->thread_ids.end(), wanted);
+                        if (found != ui->thread_ids.end()) open_chat_index(ui, static_cast<int>(found - ui->thread_ids.begin()));
+                    }
+                }
                 delete line;
                 apply_stream(ui);
                 if (ui->session.models_epoch != model_epoch) {
@@ -4175,7 +6826,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                         layout(ui);
                     }
                 }
-                if (!ui->sel_list) {
+                if (!ui->sel_list && (ui->session.state != state_before ||
+                    ui->session.activity.summary() != activity_before || ui->session.stream_buffer != stream_before)) {
                     refresh_chrome(ui);
                 }
             }
@@ -4184,16 +6836,48 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_DPICHANGED: {
             RECT* r = reinterpret_cast<RECT*>(lparam);
             SetWindowPos(hwnd, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
-            DeleteObject(ui->font);
-            DeleteObject(ui->font_small);
-            DeleteObject(ui->font_semi);
-            DeleteObject(ui->font_title);
-            DeleteObject(ui->font_mono);
+            // Remap every descendant off the old handles before destroying them. apply_fonts()
+            // only covers shell controls, so panel / keyring / environment children used to keep
+            // pointing at deleted HFONTs after a monitor change.
+            const HFONT old_fonts[] = {ui->font, ui->font_small, ui->font_semi, ui->font_title, ui->font_mono};
             ui->font = make_font_dip(hwnd, 13, false, L"Segoe UI Variable");
             ui->font_small = make_font_dip(hwnd, 12, false, L"Segoe UI");
             ui->font_semi = make_font_dip(hwnd, 14, true, L"Segoe UI Variable");
             ui->font_title = make_font_dip(hwnd, 18, true, L"Segoe UI Variable");
             ui->font_mono = make_font_dip(hwnd, 14, false, L"Cascadia Mono");
+            const HFONT new_fonts[] = {ui->font, ui->font_small, ui->font_semi, ui->font_title, ui->font_mono};
+            struct FontRemap {
+                const HFONT* old_list;
+                const HFONT* new_list;
+                int count;
+            } remap{old_fonts, new_fonts, 5};
+            EnumChildWindows(
+                hwnd,
+                [](HWND child, LPARAM param) -> BOOL {
+                    auto* rm = reinterpret_cast<FontRemap*>(param);
+                    const HFONT cur = reinterpret_cast<HFONT>(SendMessageW(child, WM_GETFONT, 0, 0));
+                    for (int i = 0; i < rm->count; ++i) {
+                        if (cur == rm->old_list[i]) {
+                            SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(rm->new_list[i]), TRUE);
+                            break;
+                        }
+                    }
+                    return TRUE;
+                },
+                reinterpret_cast<LPARAM>(&remap));
+            // Panels cache fonts for owner-draw painting and for controls created later.
+            ui->workbench_panel.set_fonts(ui->font, ui->font_small);
+            ui->keyring_ui.set_fonts(ui->font, ui->font_small, ui->font_semi);
+            ui->environment_ui.set_fonts(ui->font, ui->font_small);
+            ui->security_overview.set_fonts(ui->font, ui->font_small);
+            ui->security_policy.set_fonts(ui->font, ui->font_small);
+            ui->knowledge_ui.set_fonts(ui->font);
+            ui->mcp_ui.set_fonts(ui->font);
+            ui->strata_ui.set_fonts(ui->font);
+            ui->terminal_ui.set_fonts(ui->font);
+            for (HFONT f : old_fonts) {
+                DeleteObject(f);
+            }
             apply_fonts(ui);
             if (ui->editor && ui->active_doc >= 0) {
                 editor_apply_chrome(ui->editor, ui->font_mono, 13, static_cast<int>(GetDpiForWindow(hwnd)));
@@ -4202,9 +6886,37 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_TIMER:
+            if (wparam == 2) {
+                ++ui->chat_busy_frame;
+                if (ui->threads) for (std::size_t i = 0; i < ui->thread_ids.size(); ++i) {
+                    if (!ui->session.thread_busy(ui->thread_ids[i])) continue;
+                    RECT row{};
+                    if (SendMessageW(ui->threads, LB_GETITEMRECT, i, reinterpret_cast<LPARAM>(&row)) != LB_ERR)
+                        InvalidateRect(ui->threads, &row, FALSE);
+                }
+                return 0;
+            }
+            ui->strata_ui.poll();
+            if (ui->session.activity.busy) refresh_chrome(ui);
             if (wparam == 1) {
                 check_external(ui);
                 write_recovery(ui);
+                poll_terminal(ui);
+                {
+                    // The status bar carries a global "Keyring: Unlocked / Locked" segment, so an
+                    // auto-lock has to refresh chrome from any view — not only the Keyring page.
+                    const bool was_unlocked = ui->keyring_ui.keyring().is_unlocked();
+                    ui->keyring_ui.tick_autolock(15ull * 60ull * 1000ull);
+                    const bool locked_now = was_unlocked && !ui->keyring_ui.keyring().is_unlocked();
+                    if (locked_now) {
+                        refresh_chrome(ui);
+                        if (ui->content_view == ContentView::Keyring ||
+                            (ui->content_view == ContentView::Settings &&
+                             ui->settings_section == SettingsSection::Security)) {
+                            layout(ui);
+                        }
+                    }
+                }
                 if (ui->claude_auth_polls > 0) {
                     --ui->claude_auth_polls;
                     if (ui->sel_list) {
@@ -4235,17 +6947,26 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                         refresh_chrome(ui);
                     }
                 }
+                // MCP: one silent freshness check at a time; re-queue enabled HTTP connections ~5 min.
+                pump_mcp_auth_queue(ui);
+                if ((++ui->mcp_auth_tick % 150) == 0) {
+                    queue_mcp_auth_checks(ui, false);
+                }
             }
             return 0;
         case WM_CLOSE: {
             pull_editor(ui);
             write_recovery(ui);
+            // Ask about unsaved work BEFORE tearing anything down: this prompt can be cancelled,
+            // and killing the shells / locking the vault first left a running app with dead
+            // terminals and a locked Keyring after the user chose Cancel.
             for (int i = 0; i < static_cast<int>(ui->docs.size()); ++i) {
                 if (!ui->docs[i].dirty) {
                     continue;
                 }
                 std::wstring msg = L"Save " + folder_name(ui->docs[i].path) + L" before closing?";
-                const int choice = MessageBoxW(hwnd, msg.c_str(), L"Scylla", MB_YESNOCANCEL | MB_ICONWARNING);
+                const int choice =
+                    MessageBoxW(hwnd, msg.c_str(), L"Scylla Workbench", MB_YESNOCANCEL | MB_ICONWARNING);
                 if (choice == IDCANCEL) {
                     return 0;
                 }
@@ -4257,6 +6978,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     }
                 }
             }
+            // Past the point of no return — now shut down sessions and secrets.
+            ui->terminal_sessions.destroy_all();
+            close_attachment_windows(ui);
+            ui->keyring_ui.lock_now();
             persist_window(ui);
             ui->session.stop_runtime();
             clear_composer_images(ui);
@@ -4264,6 +6989,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             return 0;
         }
         case WM_DESTROY:
+            close_mcp_alias_popup(ui);
+            ui->terminal_sessions.destroy_all();
+            ui->workbench_panel.destroy();
             clear_composer_images(ui);
             PostQuitMessage(0);
             return 0;
@@ -4271,7 +6999,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
-}  // namespace
+}  // namespace  (keep splash helpers in scyllagpt; use theme() for colors)
 
 struct SplashState {
     Gdiplus::Image* logo = nullptr;
@@ -4297,7 +7025,8 @@ void render_splash_cache(SplashState* st, int w, int h) {
     HBITMAP bmp = CreateCompatibleBitmap(screen, w, h);
     HGDIOBJ old = SelectObject(mem, bmp);
     RECT rc{0, 0, w, h};
-    fill_rect(mem, rc, kWindow);
+    const Theme& th = theme();
+    fill_rect(mem, rc, th.shell);
     if (st->logo && st->logo->GetLastStatus() == Gdiplus::Ok) {
         const int iw = static_cast<int>(st->logo->GetWidth());
         const int ih = static_cast<int>(st->logo->GetHeight());
@@ -4369,7 +7098,7 @@ LRESULT CALLBACK splash_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) 
                 SelectObject(mem, old);
                 DeleteDC(mem);
             } else {
-                fill_rect(dc, rc, kWindow);
+                fill_rect(dc, rc, theme().shell);
             }
             EndPaint(hwnd, &ps);
             return 0;
@@ -4518,12 +7247,15 @@ int run_ui(HINSTANCE inst, int show) {
         {FVIRTKEY | FCONTROL, 'F', ID_FIND},
         {FVIRTKEY | FCONTROL, 'H', ID_REPLACE},
         {FVIRTKEY | FCONTROL, 'G', ID_GOTO},
+        {FVIRTKEY | FCONTROL, VK_OEM_3, ID_TOGGLE_TERMINAL},  // Ctrl+`
         {FVIRTKEY | FCONTROL | FALT, 'A', ID_FOCUS_COMPOSER},
         {FVIRTKEY | FCONTROL | FALT, 'H', ID_TOGGLE_HISTORY},
         {FVIRTKEY | FCONTROL | FALT, 'E', ID_TOGGLE_FILES},
         {FVIRTKEY | FCONTROL | FALT, VK_RETURN, ID_FOCUS},
         {FVIRTKEY | FCONTROL | FALT, 'N', ID_NEW},
-        {FVIRTKEY, VK_ESCAPE, ID_CONTENT_BACK},
+        // No bare Esc accelerator: it outranked every focused control, so pressing Esc inside a
+        // form discarded the input and exited the section. Esc is routed contextually in
+        // WM_KEYDOWN / WM_SK_FIELD_CANCEL instead.
     };
     HACCEL accel = CreateAcceleratorTableW(acc, static_cast<int>(sizeof(acc) / sizeof(acc[0])));
 
@@ -4557,7 +7289,10 @@ HWND hwnd = CreateWindowExW(WS_EX_APPWINDOW, L"ScyllaGPTWindow", L"Scylla", WS_O
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        if (!TranslateAcceleratorW(hwnd, accel, &msg) && !IsDialogMessageW(hwnd, &msg)) {
+        const auto* terminal = ui.terminal_sessions.active_session();
+        const bool terminal_input = terminal && terminal->host && msg.hwnd == terminal->host->hwnd()
+            && msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST;
+        if (terminal_input || (!TranslateAcceleratorW(hwnd, accel, &msg) && !IsDialogMessageW(hwnd, &msg))) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }

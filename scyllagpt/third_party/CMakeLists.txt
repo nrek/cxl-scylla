@@ -52,3 +52,23 @@ if(MSVC)
     target_compile_options(lexilla_static PRIVATE /W3 /wd4244 /wd4267 /wd4996 /utf-8)
 endif()
 target_link_libraries(lexilla_static PUBLIC scintilla_static)
+
+# PHC Argon2 reference (CC0 / Apache-2.0) — used by Scylla app Keyring (Argon2id).
+set(ARGON2_DIR "${CMAKE_CURRENT_SOURCE_DIR}/argon2")
+add_library(argon2_static STATIC
+    "${ARGON2_DIR}/argon2.c"
+    "${ARGON2_DIR}/core.c"
+    "${ARGON2_DIR}/encoding.c"
+    "${ARGON2_DIR}/thread.c"
+    "${ARGON2_DIR}/ref.c"
+    "${ARGON2_DIR}/blake2/blake2b.c"
+)
+target_include_directories(argon2_static PUBLIC "${ARGON2_DIR}")
+target_compile_definitions(argon2_static PRIVATE ARGON2_NO_THREADS)
+if(MSVC)
+    target_compile_options(argon2_static PRIVATE /W3 /wd4996)
+endif()
+set_target_properties(argon2_static PROPERTIES
+    C_STANDARD 99
+    C_STANDARD_REQUIRED ON
+)

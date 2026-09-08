@@ -14,6 +14,10 @@ Scylla Workbench is a native Windows coding workspace for Codex and Claude Code.
 - Claude model selection and chat through an authenticated Claude Code CLI;
 - local project and conversation metadata;
 - explicit project-level browse/edit grants;
+- integrated terminal (ConPTY; View → Terminal / Ctrl+`);
+- Workbench Knowledge / MCP / Strata settings surfaces (first-pass);
+- passphrase project Keyring core (values never exposed to the model API);
+- Project Security summary under Access;
 - dark native Windows interface with keyboard navigation.
 
 ## How providers work
@@ -40,7 +44,7 @@ The legacy directory name is retained for compatibility. Workbench rewrites its 
 
 With no active project, Codex starts read-only with shell access disabled. Selecting a project sets the thread working directory and enables workspace-scoped editing. See [docs/lockdown.md](docs/lockdown.md) for the exact controls and limitations.
 
-Workbench itself is not an AppContainer. The separate Scylla Cage application at the repository root implements OS-level AppContainer launch.
+Workbench itself is not an OS AppContainer. Isolation is Codex policy, Job Object, and an isolated Codex home — see [docs/lockdown.md](docs/lockdown.md).
 
 ## Requirements
 

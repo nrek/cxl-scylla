@@ -1,8 +1,8 @@
 # Scylla Workbench security controls
 
-Scylla Workbench is a native Codex and Claude Code client. It is **not** the Scylla AppContainer cage. These controls limit unrequested folder traversal and disable helper features that are outside Workbench's intended scope.
+Scylla Workbench is a native Codex and Claude Code client. These controls limit unrequested folder traversal and disable helper features that are outside Workbench's intended scope.
 
-Restricted-user / Isolated User launch remains a later option. Do not treat this file as an OS sandbox.
+Do not treat this file as an OS AppContainer or isolated-user sandbox. The former Scylla Cage CLI is archived and is not part of this product.
 
 ## Project dropdown = agent browse/edit grant
 
@@ -47,9 +47,9 @@ CreateProcess cwd stays `%LOCALAPPDATA%\ScyllaGPT\workspace` (process hygiene). 
 
 ## Residual risk (honest)
 
-- Codex still runs as the **signed-in Windows user**. Policy + sandbox, not AppContainer. Shell under grant can run commands; the Codex sandbox is the primary filesystem bound, not an OS cage.
+- Codex still runs as the **signed-in Windows user**. Policy + sandbox, not an OS AppContainer. Shell under grant can run commands; the Codex sandbox is the primary filesystem bound.
 - ChatGPT OAuth opens the system browser as the signed-in Windows user.
-- Writable/browse root is the selected project folder. Do not treat this as Scylla AppContainer isolation.
+- Writable/browse roots are the selected project folder plus Knowledge sources granted to the agent. Do not treat these as OS-level isolation.
 
 ## Operator check after launch
 

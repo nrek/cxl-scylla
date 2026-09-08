@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -23,6 +25,9 @@ public:
 
     bool start(const std::wstring& exe, const std::wstring& codex_home, const std::wstring& workspace,
                const std::wstring& stderr_log, HWND notify, UINT msg, bool allow_shell, std::wstring* error);
+    bool start(const std::wstring& exe, const std::wstring& codex_home, const std::wstring& workspace,
+               const std::wstring& stderr_log, HWND notify, UINT msg, bool allow_shell,
+               const std::vector<std::pair<std::wstring, std::wstring>>& environment, std::wstring* error);
     void stop();
     bool write_line(const std::string& jsonl);
     bool running() const { return process_ != nullptr; }

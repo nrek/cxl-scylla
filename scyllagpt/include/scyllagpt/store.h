@@ -32,6 +32,10 @@ struct Conversation {
     std::string thread_id;
     std::string title;
     std::string preview;
+    std::int64_t updated_at = 0;
+    bool title_manual = false;
+    bool title_generated = false;
+    Json local_messages; // Claude print-mode history; Codex history remains provider-owned.
     bool pinned = false;
     bool archived = false;
     bool resumable = true;

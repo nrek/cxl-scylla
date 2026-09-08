@@ -48,6 +48,10 @@ bool claude_api_key_present();
 // Discover claude.exe / claude.cmd on PATH (Claude Code CLI).
 std::wstring discover_claude_cli();
 
+// Discovery only: presence does not establish authentication or ACP support.
+// Deliberately excludes the Cursor desktop launcher and current-directory lookup.
+std::wstring discover_cursor_agent_cli();
+
 // Launch `claude auth login`. Returns false if CLI missing.
 bool claude_code_login_launch(std::wstring* error);
 

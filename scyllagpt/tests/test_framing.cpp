@@ -200,11 +200,28 @@ int main() {
     }
     {
         const auto& t = scyllagpt::theme();
-        expect(t.shell == RGB(0x14, 0x16, 0x18), "shell charcoal");
+        expect(t.shell == RGB(0x0C, 0x0F, 0x12), "shell app_bg");
+        expect(t.app_bg == t.shell, "app_bg aliases shell");
         expect(t.work == t.editor && t.work == t.agent, "editor and agent share work surface");
         expect(t.gutter == t.work, "gutter matches editor canvas");
         expect(t.amber == RGB(0xE6, 0x94, 0x05), "amber identity");
+        expect(t.border_subtle == RGB(0x26, 0x2C, 0x33), "subtle border token");
     }
+    extern int run_keyring_tests();
+    g_fail += run_keyring_tests();
+    extern int run_project_environment_tests();
+    g_fail += run_project_environment_tests();
+    extern int run_terminal_screen_tests();
+    g_fail += run_terminal_screen_tests();
+    extern int run_terminal_profile_tests();
+    g_fail += run_terminal_profile_tests();
+    extern int run_workbench_domain_tests();
+    g_fail += run_workbench_domain_tests();
+    extern int run_mcp_oauth_tests();
+    g_fail += run_mcp_oauth_tests();
+    extern int run_settings_policy_tests();
+    g_fail += run_settings_policy_tests();
+
     if (g_fail) {
         std::cerr << g_fail << " failed\n";
         return 1;

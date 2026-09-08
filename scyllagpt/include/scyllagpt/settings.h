@@ -2,9 +2,33 @@
 
 #include "scyllagpt/json.h"
 
+#include <map>
 #include <string>
+#include <string_view>
 
 namespace scyllagpt {
+
+// How a protected (Keyring-backed) value may reach a consumer.
+enum class PolicyMode {
+    Allow = 0,
+    Ask,
+    Block,
+};
+
+// Execution Policy for protected values (Settings → Security → Execution Policy).
+// Strict is the shipped default: humans may use protected values, agent terminals never do,
+// and approved recipes confirm each time.
+struct ExecutionPolicy {
+    PolicyMode human_terminals = PolicyMode::Allow;
+    PolicyMode agent_terminals = PolicyMode::Block;
+    PolicyMode approved_recipes = PolicyMode::Ask;
+};
+
+PolicyMode parse_policy_mode(std::string_view raw, PolicyMode fallback);
+const char* policy_mode_string(PolicyMode mode);
+const wchar_t* policy_mode_label(PolicyMode mode);
+ExecutionPolicy strict_execution_policy();
+bool execution_policy_is_strict(const ExecutionPolicy& policy);
 
 struct WindowPlacement {
     int x = 80;
@@ -19,9 +43,11 @@ struct Settings {
     WindowPlacement window;
     bool enter_sends = true;
     std::string last_thread_id;
+    bool restore_chat_on_start = true;
     Json drafts;  // object: threadId -> draft text
     std::wstring project_folder;
     int files_w = 220;
+    int knowledge_h = 0;  // DIPs; zero keeps the original automatic height until dragged.
     int agent_w = 400;
     int history_w = 232;
     int files_mode = 0;    // 0 auto, 1 on, 2 off
@@ -31,6 +57,19 @@ struct Settings {
     std::string selected_model;               // last model id (OpenAI or Claude)
     bool word_wrap = false;
     bool show_whitespace = false;
+    int terminal_h = 220;
+    bool terminal_visible = false;
+    // Human terminal is always free; agent-driven shell uses this policy.
+    // "ask" | "allow" | "block" — default ask.
+    std::string agent_terminal_policy = "ask";
+    std::string default_terminal_profile_id;
+    std::string panel_surface = "terminal";  // terminal|problems|output|ports
+    // Protected-value rules surfaced by Settings → Security → Execution Policy.
+    ExecutionPolicy execution_policy;
+    // Profile id → enabled override (missing = leave discovered default).
+    std::map<std::string, bool> terminal_profile_enabled;
+    // Knowledge / Strata / MCP / custom terminals persist under Paths::*_path
+    // (%LOCALAPPDATA%\ScyllaGPT\*.json) — not embedded in settings.json.
 };
 
 Settings load_settings(const std::wstring& path);

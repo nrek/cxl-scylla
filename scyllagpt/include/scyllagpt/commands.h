@@ -12,12 +12,26 @@ enum class ContentView {
     Diagnostics,
     Shortcuts,
     GettingStarted,
+    Keyring,
 };
 
 enum class SettingsSection {
     Providers,
     Editor,
+    Terminal,
+    Knowledge,
+    Mcp,
+    Strata,
+    Security,
     Advanced,
+};
+
+// Settings → Security horizontal subpages (Slice A hierarchy).
+enum class SecuritySubpage {
+    Overview,
+    Keyring,
+    Environments,
+    Policy,
 };
 
 // Shared command / control IDs (menu, accelerators, toolbar, center-pane).
@@ -84,9 +98,12 @@ enum CmdId : int {
     Cmd_EditSelectAll,
     Cmd_ViewWrap,
     Cmd_ViewWhitespace,
+    Cmd_ToggleTerminal,
+    Cmd_NewTerminal,
     Cmd_ClearCtx,
     Cmd_AccessShow,
     Cmd_AccessFolders,
+    Cmd_AccessKeyring,
     Cmd_HelpAbout,
     Cmd_HelpShortcuts,
     Cmd_HelpDiag,
@@ -112,6 +129,139 @@ enum CmdId : int {
     Cmd_SetEnterSends,
     Cmd_GsOpenFolder,
     Cmd_GsProviders,
+    Cmd_Terminal,
+    Cmd_PanelShowProblems,
+    Cmd_PanelShowOutput,
+    Cmd_PanelShowPorts,
+
+    // Settings → MCP (2600+; Knowledge Settings uses 2401–2418, Terminal 2500+)
+    Cmd_McpList = 2600,
+    Cmd_McpDetail,
+    Cmd_McpAdd,
+    Cmd_McpAddAccount,
+    Cmd_McpManage,
+    Cmd_McpReauth,
+    Cmd_McpCheck,
+    Cmd_McpDisable,
+    Cmd_McpDisconnect,
+    Cmd_McpRemove,
+    Cmd_McpAddTemplate,
+    Cmd_McpAddName,
+    Cmd_McpAddAlias,
+    Cmd_McpAddEndpoint,
+    Cmd_McpAddSave,
+    Cmd_McpAddCancel,
+    Cmd_McpAliasPopup,
+    // Add-form transport picker + browse-mode probe (2617, 2618).
+    Cmd_McpAddTransport,
+    Cmd_McpTest,
+    // Manage (edit) form (2619+). Stays below the Security block at 2800.
+    Cmd_McpEditName,
+    Cmd_McpEditAlias,
+    Cmd_McpEditTransport,
+    Cmd_McpEditEndpoint,
+    Cmd_McpEditEnabled,
+    Cmd_McpEditScopeAll,
+    Cmd_McpEditScopeList,
+    Cmd_McpEditSave,
+    Cmd_McpEditCancel,
+
+    // Settings → Terminal (2500+)
+    Cmd_SetTermProfiles = 2500,
+    Cmd_SetTermDefault,
+    Cmd_SetTermPolicy,
+    Cmd_SetTermRefresh,
+    Cmd_SetTermCustomName,
+    Cmd_SetTermCustomExe,
+    Cmd_SetTermCustomBrowse,
+    Cmd_SetTermCustomArgs,
+    Cmd_SetTermAddCustom,
+    Cmd_SetTermToggleEnable,
+    Cmd_SetTermCwdMode,
+    Cmd_SetTermCwdPath,
+    Cmd_SetTermCwdBrowse,
+    Cmd_SetTermEditCustom,
+    Cmd_SetTermDupCustom,
+    Cmd_SetTermCancelEdit,
+
+    // Settings → Security sub-tabs (2800+)
+    Cmd_SecTabOverview = 2800,
+    Cmd_SecTabKeyring,
+    Cmd_SecTabEnvironments,
+
+    // Security Overview
+    Cmd_SecOvKeyringStatus,
+    Cmd_SecOvKeyringPrimary,   // Create / Unlock / Lock context
+    Cmd_SecOvKeyringManage,
+    Cmd_SecOvProjectStatus,
+    Cmd_SecOvManageEnv,
+    Cmd_SecOvManageSecrets,
+    Cmd_SecOvPolicyStatus,
+    Cmd_SecOvManagePolicy,
+
+    // Project Environments (rewritten)
+    Cmd_EnvTitle,
+    Cmd_EnvDesc,
+    Cmd_EnvProject,
+    Cmd_EnvActiveLbl,
+    Cmd_EnvActive,
+    Cmd_EnvList,
+    Cmd_EnvAdd,
+    Cmd_EnvManage,
+    Cmd_EnvSetActive,
+    Cmd_EnvDup,
+    Cmd_EnvDelete,
+    Cmd_EnvBack,
+    Cmd_EnvDetailName,
+    Cmd_EnvInheritLbl,
+    Cmd_EnvInherit,
+    Cmd_EnvVars,
+    Cmd_EnvAddVar,
+    Cmd_EnvEditVar,
+    Cmd_EnvRemoveVar,
+    Cmd_EnvDetailDup,
+    Cmd_EnvDetailDelete,
+    Cmd_EnvAddEnvName,
+    Cmd_EnvAddEnvInherit,
+    Cmd_EnvAddEnvSave,
+    Cmd_EnvAddEnvCancel,
+    Cmd_EnvVarFormName,
+    Cmd_EnvVarPlain,
+    Cmd_EnvVarProtected,
+    Cmd_EnvVarValue,
+    Cmd_EnvVarSecret,
+    Cmd_EnvVarUnlock,
+    Cmd_EnvVarAvailHuman,
+    Cmd_EnvVarAvailAgent,
+    Cmd_EnvVarAvailRecipes,
+    Cmd_EnvVarSave,
+    Cmd_EnvVarCancel,
+
+    // Settings → Security → Execution Policy
+    Cmd_SecTabPolicy,
+    Cmd_SecPolStatus,
+    Cmd_SecPolHumanLbl,
+    Cmd_SecPolHuman,
+    Cmd_SecPolHumanHint,
+    Cmd_SecPolAgentLbl,
+    Cmd_SecPolAgent,
+    Cmd_SecPolAgentHint,
+    Cmd_SecPolRecipesLbl,
+    Cmd_SecPolRecipes,
+    Cmd_SecPolRecipesHint,
+    Cmd_SecPolStrict,
+    Cmd_SecPolReset,
+
+    // Status bar segments
+    Cmd_StatusEnv,
+
+    // Project tree context menu (project root)
+    Cmd_TreeProjectEnv,
+    Cmd_TreeProjectSecrets,
+    Cmd_TreeProjectSecurity,
+
+    // Settings → Advanced / UI Gallery
+    Cmd_UiGallery = 3900,
 };
 
 struct CommandUiState {
@@ -123,6 +273,7 @@ struct CommandUiState {
     bool files_visible = false;
     bool history_visible = false;
     bool focus_editor = false;
+    bool terminal_visible = false;
     bool has_selection_context = false;
     bool has_context_chips = false;
 };

@@ -16,28 +16,48 @@ void close_handle(HANDLE& h) {
     }
 }
 
-std::wstring env_block_with_codex_home(const std::wstring& codex_home) {
+std::wstring env_block_with_codex_home(
+    const std::wstring& codex_home,
+    const std::vector<std::pair<std::wstring, std::wstring>>& overrides) {
     LPWCH env = GetEnvironmentStringsW();
     if (!env) {
         return L"";
     }
     std::wstring out;
-    bool replaced = false;
+    std::vector<bool> replaced(overrides.size(), false);
+    bool codex_replaced = false;
     for (wchar_t* p = env; *p;) {
         std::wstring entry = p;
         p += entry.size() + 1;
-        if (entry.rfind(L"CODEX_HOME=", 0) == 0) {
+        if (_wcsnicmp(entry.c_str(), L"CODEX_HOME=", 11) == 0) {
             out += L"CODEX_HOME=" + codex_home;
             out.push_back(L'\0');
-            replaced = true;
+            codex_replaced = true;
         } else {
+            bool overridden = false;
+            const auto eq = entry.find(L'=');
+            const std::wstring name = eq == std::wstring::npos ? entry : entry.substr(0, eq);
+            for (std::size_t i = 0; i < overrides.size(); ++i) {
+                if (_wcsicmp(name.c_str(), overrides[i].first.c_str()) == 0) {
+                    out += overrides[i].first + L"=" + overrides[i].second;
+                    out.push_back(L'\0');
+                    replaced[i] = true;
+                    overridden = true;
+                    break;
+                }
+            }
+            if (overridden) continue;
             out += entry;
             out.push_back(L'\0');
         }
     }
     FreeEnvironmentStringsW(env);
-    if (!replaced) {
+    if (!codex_replaced) {
         out += L"CODEX_HOME=" + codex_home;
+        out.push_back(L'\0');
+    }
+    for (std::size_t i = 0; i < overrides.size(); ++i) if (!replaced[i]) {
+        out += overrides[i].first + L"=" + overrides[i].second;
         out.push_back(L'\0');
     }
     out.push_back(L'\0');
@@ -57,6 +77,12 @@ Runtime::~Runtime() {
 
 bool Runtime::start(const std::wstring& exe, const std::wstring& codex_home, const std::wstring& workspace,
                     const std::wstring& stderr_log, HWND notify, UINT msg, bool allow_shell, std::wstring* error) {
+    return start(exe, codex_home, workspace, stderr_log, notify, msg, allow_shell, {}, error);
+}
+
+bool Runtime::start(const std::wstring& exe, const std::wstring& codex_home, const std::wstring& workspace,
+                    const std::wstring& stderr_log, HWND notify, UINT msg, bool allow_shell,
+                    const std::vector<std::pair<std::wstring, std::wstring>>& environment, std::wstring* error) {
     stop();
     notify_ = notify;
     notify_msg_ = msg;
@@ -172,7 +198,7 @@ bool Runtime::start(const std::wstring& exe, const std::wstring& codex_home, con
     std::vector<wchar_t> cmd_buf(cmd.begin(), cmd.end());
     cmd_buf.push_back(0);
 
-    std::wstring env = env_block_with_codex_home(codex_home);
+    std::wstring env = env_block_with_codex_home(codex_home, environment);
 
     STARTUPINFOEXW siex{};
     siex.StartupInfo.cb = sizeof(siex);
@@ -281,6 +307,11 @@ void Runtime::reader_loop() {
                 delete heap;
             }
         }
+    }
+    if (!stop_ && notify_) {
+        auto* closed = new std::string("{\"method\":\"scylla/runtimeClosed\",\"params\":{\"pid\":" +
+                                      std::to_string(pid_) + "}}");
+        if (!PostMessageW(notify_, notify_msg_, 0, reinterpret_cast<LPARAM>(closed))) delete closed;
     }
 }
 

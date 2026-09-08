@@ -401,15 +401,17 @@ void apply_dark_child(HWND hwnd) {
 namespace {
 
 constexpr UINT_PTR kThinSbSubclassId = 0x5342594C;  // 'SBYL'
-constexpr COLORREF kThumb = RGB(0x3E, 0x3E, 0x3E);
-constexpr COLORREF kThumbHot = RGB(0x52, 0x52, 0x52);
+constexpr UINT_PTR kThinSbTrackTimerId = 0x53425452;  // 'SBTR'
+constexpr wchar_t kThinSbTrackingProp[] = L"ScyllaThinScrollbarTracking";
+constexpr wchar_t kThinSbHoverProp[] = L"ScyllaThinScrollbarHover";
+constexpr UINT kThinSbDeferredPaint = WM_APP + 0x31A;
 
 int sb_thumb_width(HWND hwnd) {
     const int dpi = static_cast<int>(GetDpiForWindow(hwnd));
     return (std::max)(6, MulDiv(8, dpi, 96));
 }
 
-bool paint_thin_vscrollbar(HWND hwnd, COLORREF track, bool hot) {
+bool paint_thin_vscrollbar(HWND hwnd, COLORREF track, bool active) {
     if (!hwnd || high_contrast_on()) {
         return false;
     }
@@ -480,12 +482,12 @@ bool paint_thin_vscrollbar(HWND hwnd, COLORREF track, bool hot) {
         thumb.right = sb_right - 1;
         thumb.left = thumb.right - tw;
     }
-    fill_rect(dc, thumb, hot ? kThumbHot : kThumb);
+    fill_rect(dc, thumb, active ? theme().scroll_thumb_active : theme().scroll_thumb);
     ReleaseDC(hwnd, dc);
     return true;
 }
 
-bool paint_thin_hscrollbar(HWND hwnd, COLORREF track, bool hot) {
+bool paint_thin_hscrollbar(HWND hwnd, COLORREF track, bool active) {
     if (!hwnd || high_contrast_on()) {
         return false;
     }
@@ -548,36 +550,101 @@ bool paint_thin_hscrollbar(HWND hwnd, COLORREF track, bool hot) {
     const int th = sb_thumb_width(hwnd);
     const int mid = (sb_top + sb_bottom) / 2;
     RECT thumb{thumb_x, mid - th / 2, thumb_x + thumb_w, mid + (th + 1) / 2};
-    fill_rect(dc, thumb, hot ? kThumbHot : kThumb);
+    fill_rect(dc, thumb, active ? theme().scroll_thumb_active : theme().scroll_thumb);
     ReleaseDC(hwnd, dc);
     return true;
 }
 
-void paint_thin_scrollbars(HWND hwnd, COLORREF track) {
-    paint_thin_vscrollbar(hwnd, track, false);
-    paint_thin_hscrollbar(hwnd, track, false);
+void paint_thin_scrollbars(HWND hwnd, COLORREF track, bool active = false) {
+    paint_thin_vscrollbar(hwnd, track, active);
+    paint_thin_hscrollbar(hwnd, track, active);
 }
 
 LRESULT CALLBACK thin_sb_subclass(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR ref) {
     const COLORREF track = static_cast<COLORREF>(ref);
     switch (msg) {
+        case WM_NCLBUTTONDOWN:
+            if (wparam == HTVSCROLL || wparam == HTHSCROLL) {
+                SetPropW(hwnd, kThinSbTrackingProp, reinterpret_cast<HANDLE>(1));
+                // DefSubclassProc enters Windows' nested scrollbar tracking loop.
+                // Its stock NC painter can run after ours, so repaint from a timer
+                // that the nested loop continues to dispatch until mouse release.
+                SetTimer(hwnd, kThinSbTrackTimerId, 15, nullptr);
+                paint_thin_scrollbars(hwnd, track, true);
+                const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
+                RemovePropW(hwnd, kThinSbTrackingProp);
+                if (GetPropW(hwnd, kThinSbHoverProp)) SetTimer(hwnd, kThinSbTrackTimerId, 15, nullptr);
+                else KillTimer(hwnd, kThinSbTrackTimerId);
+                paint_thin_scrollbars(hwnd, track, GetPropW(hwnd, kThinSbHoverProp) != nullptr);
+                return r;
+            }
+            break;
+        case WM_TIMER:
+            if (wparam == kThinSbTrackTimerId &&
+                (GetPropW(hwnd, kThinSbTrackingProp) || GetPropW(hwnd, kThinSbHoverProp))) {
+                paint_thin_scrollbars(hwnd, track, true);
+                return 0;
+            }
+            break;
+        case kThinSbDeferredPaint:
+            paint_thin_scrollbars(hwnd, track, GetPropW(hwnd, kThinSbTrackingProp) != nullptr);
+            return 0;
+        case WM_CAPTURECHANGED:
+        case WM_CANCELMODE: {
+            const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
+            if (GetPropW(hwnd, kThinSbTrackingProp)) {
+                RemovePropW(hwnd, kThinSbTrackingProp);
+                if (GetPropW(hwnd, kThinSbHoverProp)) SetTimer(hwnd, kThinSbTrackTimerId, 15, nullptr);
+                else KillTimer(hwnd, kThinSbTrackTimerId);
+                paint_thin_scrollbars(hwnd, track);
+            }
+            return r;
+        }
         case WM_NCPAINT:
         case WM_PAINT:
         case WM_NCCALCSIZE:
+        case WM_SETTEXT:
+        case WM_SETFONT:
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+        case WM_ENABLE:
+        case WM_SHOWWINDOW:
         case WM_VSCROLL:
         case WM_HSCROLL:
         case WM_MOUSEWHEEL:
         case WM_MOUSEHWHEEL: {
             const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
             paint_thin_scrollbars(hwnd, track);
+            PostMessageW(hwnd, kThinSbDeferredPaint, 0, 0);
+            return r;
+        }
+        case WM_NCLBUTTONUP:
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP:
+        case WM_SETCURSOR: {
+            const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
+            paint_thin_scrollbars(hwnd, track, GetPropW(hwnd, kThinSbTrackingProp) != nullptr);
+            PostMessageW(hwnd, kThinSbDeferredPaint, 0, 0);
             return r;
         }
         case WM_NCMOUSEMOVE:
+            if (wparam == HTVSCROLL || wparam == HTHSCROLL) {
+                SetPropW(hwnd, kThinSbHoverProp, reinterpret_cast<HANDLE>(1));
+                TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE | TME_NONCLIENT, hwnd, 0};
+                TrackMouseEvent(&tme);
+                SetTimer(hwnd, kThinSbTrackTimerId, 15, nullptr);
+            }
+            [[fallthrough]];
         case WM_MOUSEMOVE: {
             const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
-            paint_thin_scrollbars(hwnd, track);
+            paint_thin_scrollbars(hwnd, track, GetPropW(hwnd, kThinSbHoverProp) != nullptr);
             return r;
         }
+        case WM_NCMOUSELEAVE:
+            RemovePropW(hwnd, kThinSbHoverProp);
+            if (!GetPropW(hwnd, kThinSbTrackingProp)) KillTimer(hwnd, kThinSbTrackTimerId);
+            paint_thin_scrollbars(hwnd, track);
+            return DefSubclassProc(hwnd, msg, wparam, lparam);
         case WM_SIZE:
         case WM_STYLECHANGED: {
             const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
@@ -586,6 +653,12 @@ LRESULT CALLBACK thin_sb_subclass(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
         }
         default:
             break;
+    }
+    if (msg == WM_NCDESTROY) {
+        KillTimer(hwnd, kThinSbTrackTimerId);
+        RemovePropW(hwnd, kThinSbTrackingProp);
+        RemovePropW(hwnd, kThinSbHoverProp);
+        RemoveWindowSubclass(hwnd, thin_sb_subclass, id);
     }
     return DefSubclassProc(hwnd, msg, wparam, lparam);
 }
@@ -596,8 +669,10 @@ void install_thin_scrollbar(HWND hwnd, COLORREF track) {
     if (!hwnd || high_contrast_on()) {
         return;
     }
-    // Strip themed arrows so our flat overlay covers a plain bar.
-    SetWindowTheme(hwnd, L"", L"");
+    // Preserve the caller's control theme. ui_kit scroll hosts already use
+    // DarkMode_Explorer, which provides a dark native fallback if Windows
+    // repaints between overlay frames. Specialized hosts may deliberately
+    // choose an empty theme before installing the overlay.
     RemoveWindowSubclass(hwnd, thin_sb_subclass, kThinSbSubclassId);
     SetWindowSubclass(hwnd, thin_sb_subclass, kThinSbSubclassId, static_cast<DWORD_PTR>(track));
     refresh_thin_scrollbar(hwnd);
@@ -704,24 +779,44 @@ void draw_themed_button(const DRAWITEMSTRUCT* di, HFONT font, BtnVisual vis, boo
         fg = disabled ? t.muted : t.text;
         edge = t.edge;
         backdrop = t.shell;
-    } else if (vis == BtnVisual::Quiet) {
-        fill = down ? t.selected : (hot ? t.hover : t.input);
-        fg = disabled ? t.muted : t.secondary;
-        edge = fill;
-        backdrop = t.input;
+    } else if (vis == BtnVisual::Quiet || vis == BtnVisual::Ghost) {
+        fill = down ? t.surface_active : (hot ? t.surface_hover : t.surface);
+        fg = disabled ? t.disabled_text : t.secondary;
+        edge = hot || down || focus ? t.border_default : t.border_subtle;
+        backdrop = t.panel;
+    } else if (vis == BtnVisual::Danger) {
+        if (disabled) {
+            fill = t.input_bg;
+            fg = t.disabled_text;
+            edge = t.border_subtle;
+        } else if (down) {
+            fill = RGB(0xB0, 0x4E, 0x54);
+            fg = RGB(0xFF, 0xFF, 0xFF);
+            edge = fill;
+        } else if (hot) {
+            fill = RGB(0xE0, 0x7A, 0x80);
+            fg = RGB(0xFF, 0xFF, 0xFF);
+            edge = fill;
+        } else {
+            fill = t.danger;
+            fg = RGB(0xFF, 0xFF, 0xFF);
+            edge = fill;
+        }
+        backdrop = t.panel;
     } else {
-        fill = down ? t.selected : (hot ? t.hover : t.raised);
-        fg = disabled ? t.muted : t.text;
+        fill = down ? t.surface_active : (hot ? t.surface_hover : t.raised);
+        fg = disabled ? t.disabled_text : t.text;
+        edge = hot || down || focus ? t.border_default : t.border_subtle;
         backdrop = t.work;
     }
     fill_rect(di->hDC, r, backdrop);
     const int rad = vis == BtnVisual::Primary ? (r.right - r.left) : 6;
     RECT inner = r;
     InflateRect(&inner, -1, -1);
-    if (vis != BtnVisual::Quiet || hot || down || focus) {
+    if (!(vis == BtnVisual::Quiet || vis == BtnVisual::Ghost) || hot || down || focus) {
         round_fill(di->hDC, inner, rad, fill, edge);
-    } else if (vis == BtnVisual::Quiet) {
-        fill_rect(di->hDC, r, t.input);
+    } else {
+        fill_rect(di->hDC, r, t.surface);
     }
     wchar_t text[128]{};
     GetWindowTextW(di->hwndItem, text, 128);

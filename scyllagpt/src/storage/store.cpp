@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <ctime>
 
 #pragma comment(lib, "rpcrt4.lib")
 
@@ -213,6 +214,7 @@ Conversation* WorkspaceStore::upsert_thread(const std::string& project_id, const
     c.thread_id = thread_id;
     c.title = title.empty() ? thread_id : title;
     c.preview = preview;
+    c.updated_at = std::time(nullptr);
     conversations.push_back(std::move(c));
     return &conversations.back();
 }
@@ -243,7 +245,8 @@ std::vector<Conversation*> WorkspaceStore::list_visible(const std::string& accou
         if (a->pinned != b->pinned) {
             return a->pinned && !b->pinned;
         }
-        return a->title < b->title;
+        if (a->updated_at != b->updated_at) return a->updated_at > b->updated_at;
+        return a->thread_id < b->thread_id;
     });
     return out;
 }
@@ -291,6 +294,10 @@ bool WorkspaceStore::load(const std::wstring& path) {
             c.provider_id = it.at("provider_id").as_string("openai");
             c.thread_id = it.at("thread_id").as_string();
             c.title = it.at("title").as_string();
+            c.updated_at = it.at("updated_at").as_int(0);
+            c.title_manual = it.at("title_manual").as_bool(!c.title.empty() && c.title != "New Chat");
+            c.title_generated = it.at("title_generated").as_bool(false);
+            c.local_messages = it.at("local_messages");
             c.preview = it.at("preview").as_string("");
             c.pinned = it.at("pinned").as_bool(false);
             c.archived = it.at("archived").as_bool(false);
@@ -332,6 +339,10 @@ bool WorkspaceStore::save(const std::wstring& path) const {
         o["thread_id"] = Json::string(c.thread_id);
         o["title"] = Json::string(c.title);
         o["preview"] = Json::string(c.preview);
+        o["updated_at"] = Json::number(c.updated_at);
+        o["title_manual"] = Json::boolean(c.title_manual);
+        o["title_generated"] = Json::boolean(c.title_generated);
+        o["local_messages"] = c.local_messages;
         o["pinned"] = Json::boolean(c.pinned);
         o["archived"] = Json::boolean(c.archived);
         o["resumable"] = Json::boolean(c.resumable);

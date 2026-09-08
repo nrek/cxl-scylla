@@ -59,7 +59,7 @@ std::string detect_language_id(const std::wstring& path) {
     if (e == L".css" || e == L".scss" || e == L".less") {
         return "css";
     }
-    if (e == L".md" || e == L".mdx" || e == L".markdown") {
+    if (e == L".md" || e == L".mdx" || e == L".markdown" || e == L".mdc") {
         return "markdown";
     }
     if (e == L".ps1" || e == L".psm1" || e == L".psd1") {

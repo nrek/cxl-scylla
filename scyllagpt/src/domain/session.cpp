@@ -1,6 +1,8 @@
 #include "scyllagpt/session.h"
+#include "scyllagpt/chat_history.h"
 
 #include "scyllagpt/lockdown.h"
+#include "scyllagpt/mcp_oauth.h"
 #include "scyllagpt/provider.h"
 #include "scyllagpt/utf.h"
 
@@ -9,6 +11,8 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cwctype>
 #include <sstream>
 #include <thread>
 
@@ -49,6 +53,63 @@ std::string thread_label(const Json& t) {
     return name;
 }
 
+std::string normalized_item_type(std::string type) {
+    std::string normalized;
+    for (const unsigned char ch : type) {
+        if (std::isalnum(ch)) normalized.push_back(static_cast<char>(std::tolower(ch)));
+    }
+    return normalized;
+}
+
+void save_local_history(WorkspaceStore& store, const std::wstring& store_path,
+                        const std::string& thread_id,
+                        const std::vector<Session::HistoryMessage>& messages) {
+    auto* chat = store.by_thread(thread_id);
+    if (!chat) return;
+    chat->local_messages = Json::array();
+    for (const auto& message : messages) {
+        Json item = Json::object();
+        item["user"] = Json::boolean(message.user);
+        item["text"] = Json::string(message.text);
+        chat->local_messages.push(std::move(item));
+    }
+    store.save(store_path);
+}
+
+struct McpRuntimeConfig {
+    std::vector<CodexMcpServer> servers;
+    std::vector<std::pair<std::wstring, std::wstring>> environment;
+};
+
+McpRuntimeConfig collect_mcp_runtime(const McpManager* manager, const std::string& project_id) {
+    McpRuntimeConfig result;
+    if (!manager) return result;
+    for (const auto* connection : manager->list_for_project(project_id)) {
+        if (!connection || !connection->enabled || connection->disconnected || connection->endpoint_or_cmd.empty()) continue;
+        std::string name = connection->agent_alias.empty()
+            ? connection->service_id + "-" + connection->id.substr(0, 8)
+            : connection->agent_alias;
+        for (auto& ch : name) if (!(std::isalnum(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_')) ch = '-';
+        if (connection->transport_kind == McpTransportKind::Stdio) {
+            CodexMcpServer server;
+            server.name = std::move(name);
+            server.stdio = true;
+            server.command = connection->endpoint_or_cmd;
+            server.arguments = connection->arguments;
+            server.environment = connection->environment;
+            result.servers.push_back(std::move(server));
+            continue;
+        }
+        McpOAuthTokens tokens;
+        if (!mcp_oauth_cred_load(connection->id, &tokens) || tokens.access_token.empty()) continue;
+        std::wstring env = L"SCYLLA_MCP_TOKEN_";
+        for (const unsigned char ch : connection->id) env.push_back(std::isalnum(ch) ? std::towupper(ch) : L'_');
+        result.servers.push_back({name, connection->endpoint_or_cmd, env, false, {}, {}, {}});
+        result.environment.emplace_back(std::move(env), utf16(tokens.access_token));
+    }
+    return result;
+}
+
 }  // namespace
 
 const wchar_t* state_label(AppState s) {
@@ -81,7 +142,11 @@ std::int64_t Session::send_req(const char* method, Json params) {
     if (!params.is_null()) {
         msg["params"] = std::move(params);
     }
-    runtime_.write_line(msg.dump());
+    if (!runtime_.write_line(msg.dump())) {
+        last_error = "Runtime connection closed";
+        set_state(AppState::Failed, L"Runtime connection closed");
+        return -1;
+    }
     return id;
 }
 
@@ -102,6 +167,13 @@ void Session::send_result(const Json& id, Json result) {
 void Session::set_state(AppState s, const std::wstring& text) {
     state = s;
     status_text = text;
+    if (activity.busy) {
+        if (s == AppState::Ready) activity.finish("Completed");
+        else if (s == AppState::Failed) activity.finish("Failed");
+        else if (s == AppState::Offline) activity.finish("Disconnected");
+        else if (s == AppState::AwaitingAction) activity.phase = "Waiting for approval";
+        else if (s == AppState::Generating) activity.phase = "Working";
+    }
 }
 
 bool Session::start_runtime(HWND hwnd, UINT line_msg, std::wstring* error) {
@@ -117,7 +189,8 @@ bool Session::start_runtime(HWND hwnd, UINT line_msg, std::wstring* error) {
         settings.history_w = p->history_w;
     }
     const bool allow_shell = has_project_grant();
-    if (!write_isolated_codex_config(paths, allow_shell)) {
+    const auto mcp_runtime = collect_mcp_runtime(mcp_manager_, store.active_project_id);
+    if (!write_isolated_codex_config(paths, allow_shell, knowledge_accessible_paths_, mcp_runtime.servers)) {
         if (error) {
             *error = L"Failed to write isolated Codex lockdown config";
         }
@@ -129,6 +202,10 @@ bool Session::start_runtime(HWND hwnd, UINT line_msg, std::wstring* error) {
                          L"  (sign-out here does not log out ChatGPT desktop / Cursor)";
     if (allow_shell) {
         isolated_home_note += L"  Grant browse/edit: " + conversation_cwd();
+        if (!knowledge_accessible_paths_.empty()) {
+            isolated_home_note +=
+                L" + " + std::to_wstring(knowledge_accessible_paths_.size()) + L" knowledge root(s)";
+        }
     } else {
         isolated_home_note += L"  No project grant (agent read-only)";
     }
@@ -151,7 +228,7 @@ bool Session::start_runtime(HWND hwnd, UINT line_msg, std::wstring* error) {
     runtime_version = file_version(settings.codex_path);
     set_state(AppState::Connecting, L"Starting Codex app-server");
     if (!runtime_.start(settings.codex_path, paths.codex_home, paths.workspace, paths.stderr_log, hwnd, line_msg,
-                        allow_shell, error)) {
+                        allow_shell, mcp_runtime.environment, error)) {
         set_state(AppState::Failed, error ? *error : L"Runtime start failed");
         return false;
     }
@@ -497,7 +574,30 @@ std::wstring Session::grant_label() const {
     if (!has_project_grant()) {
         return L"No project — agent read-only";
     }
-    return L"Grant: " + conversation_cwd() + L" (browse / edit)";
+    std::wstring label = L"Grant: " + conversation_cwd() + L" (browse / edit)";
+    if (!knowledge_accessible_paths_.empty()) {
+        label += L" + " + std::to_wstring(knowledge_accessible_paths_.size()) + L" knowledge";
+    }
+    return label;
+}
+
+void Session::set_knowledge_accessible_paths(std::vector<std::wstring> paths) {
+    knowledge_accessible_paths_ = std::move(paths);
+}
+
+std::string Session::knowledge_grant_preamble() const {
+    if (knowledge_accessible_paths_.empty()) {
+        return {};
+    }
+    std::ostringstream oss;
+    oss << "Knowledge folders granted for this turn (absolute paths; not limited to the project cwd):\n";
+    for (const auto& p : knowledge_accessible_paths_) {
+        oss << "- " << utf8(p) << "\n";
+    }
+    oss << "Under a .md root, handoffs are in handoff/ (singular) and blueprints in blueprints/. "
+           "workspace_index.sqlite is a binary SQLite index — do not treat it as empty markdown; "
+           "read the .md files under those folders (or use STRATA if available).\n";
+    return oss.str();
 }
 
 bool Session::sync_lockdown_config() {
@@ -505,12 +605,22 @@ bool Session::sync_lockdown_config() {
         paths = make_paths();
     }
     const bool allow_shell = has_project_grant();
-    const bool ok = write_isolated_codex_config(paths, allow_shell);
+    const auto mcp_runtime = collect_mcp_runtime(mcp_manager_, store.active_project_id);
+    const bool ok = write_isolated_codex_config(paths, allow_shell, knowledge_accessible_paths_, mcp_runtime.servers);
     if (ok) {
         isolated_home_note = L"CODEX_HOME is isolated: " + paths.codex_home +
                              L"  CreateProcess cwd=" + paths.workspace;
         if (allow_shell) {
             isolated_home_note += L"  Grant browse/edit: " + conversation_cwd();
+            if (!knowledge_accessible_paths_.empty()) {
+                isolated_home_note += L" + knowledge roots: ";
+                for (size_t i = 0; i < knowledge_accessible_paths_.size(); ++i) {
+                    if (i != 0) {
+                        isolated_home_note += L"; ";
+                    }
+                    isolated_home_note += knowledge_accessible_paths_[i];
+                }
+            }
         } else {
             isolated_home_note += L"  No project grant (agent read-only)";
         }
@@ -523,7 +633,7 @@ bool Session::sync_lockdown_config() {
         set_state(AppState::Connecting, L"Restarting Codex for project grant…");
         std::wstring err;
         if (!runtime_.start(settings.codex_path, paths.codex_home, paths.workspace, paths.stderr_log, hwnd_, line_msg_,
-                            allow_shell, &err)) {
+                            allow_shell, mcp_runtime.environment, &err)) {
             set_state(AppState::Failed, err.empty() ? L"Runtime restart failed" : err);
             return false;
         }
@@ -547,6 +657,13 @@ std::string Session::account_scope() const {
 }
 
 void Session::new_conversation() {
+    activity = {};
+    active_thread_id.clear();
+    active_turn_id.clear();
+    stream_buffer.clear();
+    history_messages.clear();
+    if (account.signed_in) set_state(AppState::Ready, L"Ready");
+    if (thread_start_id_ >= 0) return;
     Json p = Json::object();
     if (!selected_model.empty()) {
         p["model"] = Json::string(selected_model);
@@ -561,18 +678,46 @@ void Session::new_conversation() {
 
 void Session::send_user(const std::string& text) {
     if (settings.default_provider == "claude") {
+        activity.begin();
         send_claude_user(text);
         return;
     }
     if (active_thread_id.empty()) {
-        settings.drafts["_pending_send"] = Json::string(text);
-        new_conversation();
+        if (thread_start_id_ < 0) new_conversation();
+        if (thread_start_id_ >= 0) {
+            pending_thread_prompts_[thread_start_id_] = text;
+            activity.begin();
+            activity.phase = "Starting conversation";
+        }
         return;
     }
+    send_user_to_thread(text, active_thread_id, true);
+}
+
+void Session::send_user_to_thread(const std::string& text, const std::string& thread_id, bool foreground) {
     std::string payload = text;
+    auto* naming_chat = store.by_thread(thread_id);
+    if (naming_chat) {
+        naming_chat->updated_at = std::time(nullptr);
+        if (!naming_chat->title_manual && !naming_chat->title_generated &&
+            (naming_chat->title.empty() || naming_chat->title == "New Chat"))
+            naming_chat->title = short_chat_title(chat_title_seed);
+        store.save(paths.store_path);
+    }
+    const std::string grant = knowledge_grant_preamble() + chat_title_request(naming_chat);
     const std::string ctx = snapshot_context(context_chips);
-    if (!ctx.empty()) {
-        payload = ctx + "\n---\n" + text;
+    if (!grant.empty() || !ctx.empty()) {
+        std::string head;
+        if (!grant.empty()) {
+            head = grant;
+        }
+        if (!ctx.empty()) {
+            if (!head.empty()) {
+                head += "\n";
+            }
+            head += ctx;
+        }
+        payload = head + "\n---\n" + text;
     }
     Json input = Json::array();
     Json item = Json::object();
@@ -580,7 +725,7 @@ void Session::send_user(const std::string& text) {
     item["text"] = Json::string(payload);
     input.push(std::move(item));
     Json p = Json::object();
-    p["threadId"] = Json::string(active_thread_id);
+    p["threadId"] = Json::string(thread_id);
     p["input"] = std::move(input);
     const std::wstring cwd = conversation_cwd();
     p["cwd"] = Json::string(utf8(cwd));
@@ -591,6 +736,17 @@ void Session::send_user(const std::string& text) {
         sand["networkAccess"] = Json::boolean(false);
         Json roots = Json::array();
         roots.push(Json::string(utf8(cwd)));
+        // Knowledge sources (e.g. D:\projects\.md) sit outside the project folder;
+        // without these roots the agent cannot list handoff/blueprints under the grant.
+        for (const auto& kpath : knowledge_accessible_paths_) {
+            if (kpath.empty()) {
+                continue;
+            }
+            if (_wcsicmp(kpath.c_str(), cwd.c_str()) == 0) {
+                continue;
+            }
+            roots.push(Json::string(utf8(kpath)));
+        }
         sand["writableRoots"] = std::move(roots);
     } else {
         sand["type"] = Json::string("readOnly");
@@ -601,8 +757,25 @@ void Session::send_user(const std::string& text) {
         p["model"] = Json::string(selected_model);
     }
     turn_start_id_ = send_req("turn/start", std::move(p));
-    stream_buffer.clear();
-    set_state(AppState::Generating, L"Generating");
+    if (turn_start_id_ < 0) return;
+    turn_start_threads_[turn_start_id_] = thread_id;
+    auto& running = thread_runtime_[thread_id];
+    running.activity.begin();
+    running.stream.clear();
+    if (naming_chat) {
+        if (!naming_chat->local_messages.is_array()) naming_chat->local_messages = Json::array();
+        Json message = Json::object();
+        message["user"] = Json::boolean(true);
+        message["text"] = Json::string(text);
+        naming_chat->local_messages.push(std::move(message));
+        store.save(paths.store_path);
+    }
+    if (foreground) {
+        activity = running.activity;
+        history_messages.push_back({true, text});
+        stream_buffer.clear();
+        set_state(AppState::Generating, L"Generating");
+    }
 }
 
 void Session::ensure_claude_thread() {
@@ -639,9 +812,28 @@ void Session::send_claude_user(const std::string& text) {
     }
     ensure_claude_thread();
     std::string payload = text;
+    auto* naming_chat = store.by_thread(active_thread_id);
+    if (naming_chat) {
+        naming_chat->updated_at = std::time(nullptr);
+        if (!naming_chat->title_manual && !naming_chat->title_generated &&
+            (naming_chat->title.empty() || naming_chat->title == "New Chat"))
+            naming_chat->title = short_chat_title(chat_title_seed);
+        store.save(paths.store_path);
+    }
+    const std::string grant = knowledge_grant_preamble() + chat_title_request(naming_chat);
     const std::string ctx = snapshot_context(context_chips);
-    if (!ctx.empty()) {
-        payload = ctx + "\n---\n" + text;
+    if (!grant.empty() || !ctx.empty()) {
+        std::string head;
+        if (!grant.empty()) {
+            head = grant;
+        }
+        if (!ctx.empty()) {
+            if (!head.empty()) {
+                head += "\n";
+            }
+            head += ctx;
+        }
+        payload = head + "\n---\n" + text;
     }
     if (!history_messages.empty()) {
         std::ostringstream oss;
@@ -654,6 +846,16 @@ void Session::send_claude_user(const std::string& text) {
         payload = oss.str();
     }
     history_messages.push_back({true, text});
+    if (auto* chat = store.by_thread(active_thread_id)) {
+        chat->local_messages = Json::array();
+        for (const auto& message : history_messages) {
+            Json item = Json::object();
+            item["user"] = Json::boolean(message.user);
+            item["text"] = Json::string(message.text);
+            chat->local_messages.push(std::move(item));
+        }
+        store.save(paths.store_path);
+    }
     stream_buffer.clear();
     claude_busy_ = true;
     claude_cancel_ = false;
@@ -685,6 +887,11 @@ void Session::send_claude_user(const std::string& text) {
 
 void Session::complete_claude_print(bool ok, const std::string& text, const std::wstring& error) {
     claude_busy_ = false;
+    if (claude_cancel_) {
+        activity.finish("Interrupted");
+        set_state(AppState::Interrupted, L"Interrupted");
+        return;
+    }
     if (!ok) {
         last_error = error.empty() ? "Claude print failed" : utf8(error);
         set_state(AppState::Failed, error.empty() ? L"Claude failed" : error);
@@ -693,9 +900,15 @@ void Session::complete_claude_print(bool ok, const std::string& text, const std:
     stream_buffer = text;
     history_messages.push_back({false, text});
     if (auto* conv = store.by_thread(active_thread_id)) {
-        if (conv->title == "New Chat" || conv->title.empty()) {
-            conv->title = text.size() > 48 ? text.substr(0, 48) + "…" : text;
+        conv->local_messages = Json::array();
+        for (const auto& message : history_messages) {
+            Json item = Json::object();
+            item["user"] = Json::boolean(message.user);
+            item["text"] = Json::string(message.text);
+            conv->local_messages.push(std::move(item));
         }
+        conv->updated_at = std::time(nullptr);
+        accept_chat_title(*conv, text);
         conv->preview = text.size() > 120 ? text.substr(0, 120) + "…" : text;
         store.save(paths.store_path);
     }
@@ -704,13 +917,28 @@ void Session::complete_claude_print(bool ok, const std::string& text, const std:
 
 void Session::open_thread(const std::string& id) {
     active_thread_id = id;
+    select_thread_runtime(id);
     settings.last_thread_id = id;
     if (auto* c = store.by_thread(id)) {
         if (auto* p = store.by_id(c->project_id)) {
             project_root = p->root;
             settings.project_folder = p->root;
         }
+        history_messages.clear();
+        if (c->local_messages.is_array()) for (const auto& message : c->local_messages.array_items())
+            history_messages.push_back({message.at("user").as_bool(false), message.at("text").as_string()});
+        transcript_replace = true;
     }
+    if (auto* c = store.by_thread(id); c && c->provider_id == "claude") {
+        settings.default_provider = "claude";
+        history_messages.clear();
+        if (c->local_messages.is_array()) for (const auto& message : c->local_messages.array_items())
+            history_messages.push_back({message.at("user").as_bool(false), message.at("text").as_string()});
+        stream_buffer.clear();
+        transcript_replace = true;
+        return;
+    }
+    settings.default_provider = "openai";
     sync_lockdown_config();
     Json p = Json::object();
     p["threadId"] = Json::string(id);
@@ -719,22 +947,46 @@ void Session::open_thread(const std::string& id) {
     r["threadId"] = Json::string(id);
     r["includeTurns"] = Json::boolean(true);
     thread_read_id_ = send_req("thread/read", std::move(r));
+    if (thread_read_id_ >= 0) thread_read_threads_[thread_read_id_] = id;
 }
 
 void Session::cancel_turn() {
+    if (activity.busy) activity.phase = "Cancelling";
     if (claude_busy_) {
         claude_cancel_ = true;
         set_state(AppState::Interrupted, L"Cancelling Claude…");
         return;
     }
-    if (active_thread_id.empty() || active_turn_id.empty()) {
+    const auto running = thread_runtime_.find(active_thread_id);
+    if (active_thread_id.empty() || running == thread_runtime_.end() || running->second.turn_id.empty()) {
         return;
     }
     Json p = Json::object();
     p["threadId"] = Json::string(active_thread_id);
-    p["turnId"] = Json::string(active_turn_id);
+    p["turnId"] = Json::string(running->second.turn_id);
     turn_interrupt_id_ = send_req("turn/interrupt", std::move(p));
     set_state(AppState::Interrupted, L"Cancelling…");
+}
+
+bool Session::thread_busy(const std::string& thread_id) const {
+    const auto found = thread_runtime_.find(thread_id);
+    return found != thread_runtime_.end() && found->second.activity.busy;
+}
+
+void Session::select_thread_runtime(const std::string& thread_id) {
+    const auto found = thread_runtime_.find(thread_id);
+    if (found == thread_runtime_.end()) {
+        activity = {};
+        active_turn_id.clear();
+        stream_buffer.clear();
+        if (account.signed_in) set_state(AppState::Ready, L"Ready");
+        return;
+    }
+    activity = found->second.activity;
+    active_turn_id = found->second.turn_id;
+    stream_buffer = found->second.stream;
+    if (account.signed_in) set_state(activity.busy ? AppState::Generating : AppState::Ready,
+                                     activity.busy ? L"Generating" : L"Ready");
 }
 
 void Session::refresh_threads() {
@@ -767,41 +1019,58 @@ void Session::apply_account(const Json& acc) {
     }
 }
 
-void Session::extract_history(const Json& thread) {
+void Session::extract_history(const Json& thread, const std::string& thread_id) {
+    if (thread_id != active_thread_id) return;
     history_messages.clear();
-    // Walk turns/items if present; UI reads stream_buffer as a one-shot dump via last_error? 
-    // Store reconstructed transcript in stream_buffer with a sentinel prefix.
-    std::ostringstream oss;
     const Json& turns = thread.at("turns");
-    if (!turns.is_array()) {
-        return;
-    }
-    for (const auto& turn : turns.array_items()) {
+    if (turns.is_array()) for (const auto& turn : turns.array_items()) {
         const Json& items = turn.at("items");
         const Json* list = &items;
         if (!items.is_array()) {
             continue;
         }
         for (const auto& item : list->array_items()) {
-            const std::string type = item.at("type").as_string();
+            const std::string type = normalized_item_type(item.at("type").as_string());
             const std::string text = item_text(item);
-            if (type == "userMessage" || type == "user") {
+            if (type == "usermessage" || type == "user" || type == "inputmessage") {
                 history_messages.push_back({true, text});
-                oss << "You\n" << text << "\n\n";
-            } else if (type == "agentMessage" || type == "assistant") {
+            } else if (type == "agentmessage" || type == "assistantmessage" || type == "assistant") {
                 history_messages.push_back({false, text});
-                oss << "Agent\n" << text << "\n\n";
             }
         }
     }
-    stream_buffer = oss.str();
+    const bool provider_has_user = std::any_of(history_messages.begin(), history_messages.end(),
+                                               [](const HistoryMessage& m) { return m.user; });
+    if (!provider_has_user) {
+        if (auto* chat = store.by_thread(active_thread_id); chat && chat->local_messages.is_array()) {
+            std::vector<HistoryMessage> local;
+            for (const auto& message : chat->local_messages.array_items()) {
+                local.push_back({message.at("user").as_bool(false), message.at("text").as_string()});
+            }
+            const auto local_agents = std::count_if(local.begin(), local.end(),
+                                                    [](const HistoryMessage& m) { return !m.user; });
+            std::size_t seen_agents = 0;
+            for (const auto& message : history_messages) {
+                if (!message.user && seen_agents++ >= local_agents) local.push_back(message);
+            }
+            if (!local.empty()) history_messages = std::move(local);
+        }
+    }
+    save_local_history(store, paths.store_path, active_thread_id, history_messages);
+    if (const auto live = thread_runtime_.find(thread_id); live != thread_runtime_.end()) {
+        stream_buffer = live->second.stream;
+    } else {
+        stream_buffer.clear();
+    }
     transcript_replace = true;
 }
 
 void Session::handle_server_request(const Json& msg) {
     const std::string method = msg.at("method").as_string();
     const Json& id = msg.at("id");
-    set_state(AppState::AwaitingAction, utf16("Approval: " + method));
+    const std::string request_thread = msg.at("params").at("threadId").as_string();
+    const bool foreground = request_thread.empty() || request_thread == active_thread_id;
+    if (foreground) set_state(AppState::AwaitingAction, utf16("Approval: " + method));
 
     // Under a project grant: accept file/patch and sandboxed shell so the agent can
     // browse, search, and edit inside writableRoots. Apps/hooks/network stay off.
@@ -811,12 +1080,14 @@ void Session::handle_server_request(const Json& msg) {
         if (has_project_grant()) {
             result["decision"] = Json::string("accept");
             send_result(id, std::move(result));
-            set_state(AppState::Generating, utf16("Approved: " + method));
-            last_error.clear();
+            if (foreground) {
+                set_state(AppState::Generating, utf16("Approved: " + method));
+                last_error.clear();
+            }
         } else {
             result["decision"] = Json::string("decline");
             send_result(id, std::move(result));
-            last_error = "Declined " + method + " (no project grant — agent is read-only).";
+            if (foreground) last_error = "Declined " + method + " (no project grant — agent is read-only).";
         }
         return;
     }
@@ -846,6 +1117,21 @@ void Session::handle_server_request(const Json& msg) {
 void Session::handle_notification(const Json& msg) {
     const std::string method = msg.at("method").as_string();
     const Json& p = msg.at("params");
+    if (method == "scylla/runtimeClosed") {
+        if (p.at("pid").as_int() == runtime_.pid() && settings.default_provider != "claude")
+            set_state(AppState::Failed, L"Runtime disconnected");
+        return;
+    }
+    std::string thread_id = p.at("threadId").as_string();
+    const std::string event_turn_id = p.at("turnId").as_string(p.at("turn").at("id").as_string().c_str());
+    if (thread_id.empty() && !event_turn_id.empty()) {
+        if (const auto found = turn_threads_.find(event_turn_id); found != turn_threads_.end()) thread_id = found->second;
+    }
+    ThreadRuntime* running = thread_id.empty() ? nullptr : &thread_runtime_[thread_id];
+    if (running) {
+        running->activity.codex(method, p);
+        if (thread_id == active_thread_id) activity = running->activity;
+    }
     if (method == "account/login/completed") {
         const bool ok = p.at("success").as_bool(false);
         if (ok) {
@@ -865,18 +1151,51 @@ void Session::handle_notification(const Json& msg) {
         return;
     }
     if (method == "item/agentMessage/delta") {
-        if (p.at("threadId").as_string() == active_thread_id) {
-            stream_buffer += p.at("delta").as_string();
-        }
+        if (!running) return;
+        running->stream += p.at("delta").as_string();
+        if (thread_id == active_thread_id) stream_buffer = running->stream;
         return;
     }
     if (method == "turn/started") {
-        active_turn_id = p.at("turn").at("id").as_string();
-        set_state(AppState::Generating, L"Generating");
+        if (thread_id.empty()) return;
+        auto& turn = thread_runtime_[thread_id];
+        turn.turn_id = p.at("turn").at("id").as_string();
+        if (!turn.turn_id.empty()) turn_threads_[turn.turn_id] = thread_id;
+        if (!turn.activity.busy) turn.activity.begin();
+        if (thread_id == active_thread_id) {
+            active_turn_id = turn.turn_id;
+            activity = turn.activity;
+            set_state(AppState::Generating, L"Generating");
+        }
         return;
     }
     if (method == "turn/completed") {
+        if (thread_id.empty()) return;
+        auto& turn = thread_runtime_[thread_id];
+        if (auto* chat = store.by_thread(thread_id)) {
+            if (!turn.stream.empty()) {
+                if (!chat->local_messages.is_array()) chat->local_messages = Json::array();
+                Json message = Json::object();
+                message["user"] = Json::boolean(false);
+                message["text"] = Json::string(turn.stream);
+                chat->local_messages.push(std::move(message));
+            }
+            chat->updated_at = std::time(nullptr);
+            accept_chat_title(*chat, turn.stream);
+            store.save(paths.store_path);
+        }
         const std::string st = p.at("turn").at("status").as_string();
+        turn.activity.finish(st == "interrupted" ? "Interrupted" : st == "failed" ? "Failed" : "Completed");
+        if (!turn.turn_id.empty()) turn_threads_.erase(turn.turn_id);
+        turn.turn_id.clear();
+        ++chats_epoch;
+        if (thread_id != active_thread_id) return;
+        if (!turn.stream.empty() &&
+            (history_messages.empty() || history_messages.back().user || history_messages.back().text != turn.stream))
+            history_messages.push_back({false, turn.stream});
+        stream_buffer = turn.stream;
+        activity = turn.activity;
+        active_turn_id.clear();
         if (st == "interrupted") {
             set_state(AppState::Interrupted, L"Interrupted — partial output kept");
         } else if (st == "failed") {
@@ -892,6 +1211,10 @@ void Session::handle_notification(const Json& msg) {
         const std::string info = p.at("error").at("codexErrorInfo").as_string("");
         if (info == "Unauthorized" || last_error.find("auth") != std::string::npos) {
             set_state(AppState::Failed, L"Login expired");
+        } else if (p.at("willRetry").as_bool(false)) {
+            if (activity.busy) activity.phase = "Retrying";
+        } else {
+            set_state(AppState::Failed, L"Turn failed");
         }
         return;
     }
@@ -901,8 +1224,22 @@ void Session::handle_response(const Json& msg) {
     const std::int64_t id = msg.at("id").as_int(-1);
     if (msg.has("error")) {
         last_error = msg.at("error").at("message").as_string("request error");
+        if (const auto pending = pending_thread_prompts_.find(id); pending != pending_thread_prompts_.end()) {
+            pending_thread_prompts_.erase(pending);
+            if (id == thread_start_id_) thread_start_id_ = -1;
+        }
+        if (const auto started = turn_start_threads_.find(id); started != turn_start_threads_.end()) {
+            auto& running = thread_runtime_[started->second];
+            running.activity.finish("Failed");
+            if (started->second == active_thread_id) activity = running.activity;
+            turn_start_threads_.erase(started);
+        }
         if (id == initialize_id_) {
             set_state(AppState::Failed, L"Initialize failed");
+        } else if (id == turn_start_id_ || id == thread_start_id_) {
+            set_state(AppState::Failed, L"Turn could not start");
+        } else if (id == turn_interrupt_id_) {
+            set_state(AppState::Generating, L"Cancellation failed — still working");
         }
         return;
     }
@@ -960,29 +1297,38 @@ void Session::handle_response(const Json& msg) {
                 s.id = t.at("id").as_string();
                 s.name = thread_label(t);
                 s.preview = t.at("preview").as_string("");
+                if (auto* c = store.by_thread(s.id)) {
+                    c->updated_at = (std::max)(c->updated_at, t.at("updatedAt").as_int(0));
+                }
                 if (!s.id.empty()) {
                     threads.push_back(s);
                 }
             }
         }
         website_history_seen = false;  // Codex rollouts only unless a documented web id appears
+        store.save(paths.store_path);
+        ++chats_epoch;
         return;
     }
     if (id == thread_start_id_) {
-        active_thread_id = result.at("thread").at("id").as_string();
-        settings.last_thread_id = active_thread_id;
-        if (auto* pr = store.active()) {
-            pr->last_thread_id = active_thread_id;
+        thread_start_id_ = -1;
+        const std::string created_thread_id = result.at("thread").at("id").as_string();
+        const bool foreground = active_thread_id.empty();
+        if (foreground) {
+            active_thread_id = created_thread_id;
+            settings.last_thread_id = created_thread_id;
+            if (auto* pr = store.active()) pr->last_thread_id = created_thread_id;
         }
-        store.upsert_thread(store.active_project_id, account_scope(), active_thread_id, "New Chat", "");
-        if (auto* conv = store.by_thread(active_thread_id)) {
+        store.upsert_thread(store.active_project_id, account_scope(), created_thread_id, "New Chat", "");
+        if (auto* conv = store.by_thread(created_thread_id)) {
             conv->provider_id = settings.default_provider.empty() ? "openai" : settings.default_provider;
         }
         store.save(paths.store_path);
-        const std::string pending = settings.drafts.at("_pending_send").as_string("");
+        const auto pending_it = pending_thread_prompts_.find(id);
+        const std::string pending = pending_it == pending_thread_prompts_.end() ? std::string{} : pending_it->second;
+        if (pending_it != pending_thread_prompts_.end()) pending_thread_prompts_.erase(pending_it);
         if (!pending.empty()) {
-            settings.drafts["_pending_send"] = Json::string("");
-            send_user(pending);
+            send_user_to_thread(pending, created_thread_id, foreground);
         }
         refresh_threads();
         return;
@@ -991,12 +1337,19 @@ void Session::handle_response(const Json& msg) {
         active_thread_id = result.at("thread").at("id").as_string();
         return;
     }
-    if (id == thread_read_id_) {
-        extract_history(result.at("thread"));
+    if (const auto read = thread_read_threads_.find(id); read != thread_read_threads_.end()) {
+        const std::string thread_id = read->second;
+        thread_read_threads_.erase(read);
+        extract_history(result.at("thread"), thread_id);
         return;
     }
-    if (id == turn_start_id_) {
-        active_turn_id = result.at("turn").at("id").as_string();
+    if (const auto started = turn_start_threads_.find(id); started != turn_start_threads_.end()) {
+        const std::string thread_id = started->second;
+        turn_start_threads_.erase(started);
+        auto& running = thread_runtime_[thread_id];
+        running.turn_id = result.at("turn").at("id").as_string();
+        if (!running.turn_id.empty()) turn_threads_[running.turn_id] = thread_id;
+        if (thread_id == active_thread_id) active_turn_id = running.turn_id;
         return;
     }
 }
