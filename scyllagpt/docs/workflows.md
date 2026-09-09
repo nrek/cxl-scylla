@@ -40,6 +40,68 @@ subfolders alongside MCP aliases. Up/Down selects, Enter/Tab inserts, Escape clo
 Ctrl+Enter submits. File choices insert @"absolute path", preserving spaces and
 avoiding basename ambiguity. References remain visible in the composer and message.
 
+## `/scylla-query` (brokered SQL)
+
+Prefix a message with `/scylla-query` to inject the brokered-SQL skill. The slash token is
+stripped from the visible transcript.
+
+Execution runs through a real agent-callable tool, not a text handoff:
+
+```text
+agent → scylla_query (MCP, stdio helper) → named pipe → Workbench
+      → resolve alias → classify SQL → approve if required → authorize Keyring refs
+      → ssh → mysql → bounded rows → agent
+```
+
+The helper is `scylla-workbench.exe --mcp-query-broker`, registered automatically as
+`[mcp_servers.scylla-query]` in the isolated Codex home. It is **secret-free**: it receives only a
+per-launch session token, derives the pipe name from it, and never holds a Keyring. Credentials are
+resolved inside the Workbench process and authorized for exactly one operation.
+
+The agent supplies only `connection_alias` and `sql`. The **saved connection** owns the credential
+mapping — SSH key reference, database username and password references, pinned host key, query
+policy, and result limits. The agent cannot pass a host, credential, or Keyring name, and the tool
+schema exposes no field for one.
+
+Routing detail is Keyring-held too. Every SSH and database host, port, and username accepts either a
+literal value or a `*Ref` naming a Keyring secret, and the reference wins when both are present, so a
+connection file can describe a route without naming a single host. References are authorized for one
+operation alongside the credentials, and an unresolvable reference fails the query rather than
+falling back to the literal field. Resolved hosts and database names are interpolated into a remote
+shell command, so both are character-restricted and a value carrying metacharacters is refused.
+
+### Passphrase-protected SSH keys
+
+An encrypted key is leased into the Windows OpenSSH agent for the length of one query. The passphrase
+reaches `ssh-add` through `SSH_ASKPASS` pointing back at `scylla-workbench.exe`, which prints the
+value from its own environment in askpass mode — nothing is written to disk and nothing appears in
+argv. `ssh` itself still runs with `BatchMode=yes`, so it can never prompt.
+
+Two Windows constraints shape this. The agent is a single system-wide service, so there is no scoped
+per-operation agent; and it refuses `ssh-add -t` lifetime constraints, so a key cannot be given an
+expiry. Eviction is therefore unconditional: one teardown guard evicts the key and shreds the staged
+files on every exit path, and each operation evicts any stale copy of the same public key before
+adding, in case an earlier run died. `ssh-add` matches on the key rather than the filename, which is
+what makes that pre-emptive purge work across differently-named temp files.
+
+Unencrypted keys do not involve the agent at all; they authenticate from the staged file with
+`IdentitiesOnly=yes`, so no unrelated agent identity is offered.
+
+The skill text keys every claim off whether the tool is actually registered. When it is not, the
+agent is told plainly that Scylla cannot execute, and is forbidden from emitting an executable-looking
+block or reporting the request as submitted. Earlier revisions asked for a fenced `scylla-query`
+block that nothing consumed, which produced answers presented as completed queries when no query had
+run.
+
+### Current limits
+
+- MySQL only, over `ConnectionRouteType::RemoteExecution` (`ssh` running `mysql` on the bastion).
+- SSH key authentication only; SSH password authentication is refused.
+- A connection with no pinned host public key cannot execute.
+- A passphrase-protected key requires the **OpenSSH Authentication Agent** service to be running.
+- Connections are created by editing `%LOCALAPPDATA%\ScyllaGPT\connections.json`; there is no editor
+  UI yet.
+
 Catalog scans skip reparse points and common generated directories (.git, build,
 node_modules, vendor, third_party, .venv, __pycache__), cap traversal at 20,000 entries
 per source and show at most 40 file matches. Workflow selection is capped at 12

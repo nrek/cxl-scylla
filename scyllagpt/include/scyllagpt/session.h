@@ -32,7 +32,8 @@ enum class AppState {
 struct ModelChoice {
     std::string id;
     std::string display;
-    std::string provider_id = "openai";  // openai | claude
+    std::string provider_id = "openai";  // openai | openai-api | claude | claude-api
+    bool hidden = false;  // Hidden by the provider's default picker; still manageable in Settings.
 };
 
 struct ThreadSummary {
@@ -106,7 +107,7 @@ public:
     std::string chat_title_seed;
     int chats_epoch = 0;
     void send_user(const std::string& text);
-    // Called on UI thread when a Claude -p worker finishes (ok + text or error).
+    // Called on UI thread when a local print/API worker finishes (ok + text or error).
     void complete_claude_print(bool ok, const std::string& text, const std::wstring& error);
     bool claude_generating() const { return claude_busy_; }
     std::wstring conversation_cwd() const;
@@ -116,6 +117,10 @@ public:
     // Knowledge source roots the agent may browse (enabled + agent_available).
     void set_knowledge_accessible_paths(std::vector<std::wstring> paths);
     void set_mcp_manager(const McpManager* manager) { mcp_manager_ = manager; }
+    // Registers Scylla's own query-broker helper as an MCP stdio server for the agent runtime. An
+    // empty `name` disables it, which is what keeps the tool absent until the broker is running.
+    void set_broker_mcp_server(CodexMcpServer server) { broker_mcp_server_ = std::move(server); }
+    bool broker_mcp_server_registered() const { return !broker_mcp_server_.name.empty(); }
     const std::vector<std::wstring>& knowledge_accessible_paths() const {
         return knowledge_accessible_paths_;
     }
@@ -125,12 +130,21 @@ public:
     void cancel_turn();
     void refresh_threads();
     void refresh_models();
-    // Merge/strip curated Claude models based on auth; bump models_epoch.
+    // Merge/strip account + API catalogs based on auth; bump models_epoch.
     void sync_claude_models();
     // Switch active provider without losing the other catalog; picks a model for that provider.
     void set_default_provider(const std::string& provider);
-    // Refresh Claude model list from CLI (background-safe to call with force on timer).
+    // Refresh Claude Code curated catalog (account).
     void refresh_claude_model_catalog(bool force_cli);
+    // Refresh OpenAI/Claude API model lists when keys present.
+    void refresh_openai_api_models();
+    void refresh_claude_api_models();
+
+    bool is_model_enabled(const std::string& provider_id, const std::string& model_id) const;
+    void set_model_enabled(const std::string& provider_id, const std::string& model_id, bool enabled);
+    std::vector<ModelChoice> models_for_provider(const std::string& provider_id, bool enabled_only) const;
+    std::string provider_default_model_id(const std::string& provider_id) const;
+    void set_provider_default_model(const std::string& provider_id, const std::string& model_id);
 
     std::string draft_for(const std::string& thread_id) const;
     void set_draft(const std::string& thread_id, const std::string& text);
@@ -167,11 +181,15 @@ private:
     void request_models(const std::string& cursor);
     void ingest_models(const Json& result, bool replace);
     void merge_claude_models();
+    void merge_http_provider_models(const std::string& provider_id,
+                                    const std::vector<std::pair<std::string, std::string>>& rows);
     void clamp_models_per_provider(std::size_t max_per);
     void finalize_model_catalog();
     void ensure_selected_model();
     void ensure_claude_thread();
+    void ensure_api_thread(const std::string& provider_id, const char* backend);
     void send_claude_user(const std::string& text);
+    void send_api_user(const std::string& provider_id, const std::string& text);
     void send_user_to_thread(const std::string& text, const std::string& thread_id, bool foreground);
     static int model_sort_rank(const std::string& id, const std::string& provider_id);
     void handle_response(const Json& msg);
@@ -180,6 +198,11 @@ private:
     void apply_account(const Json& account);
     void extract_history(const Json& thread, const std::string& thread_id);
     void select_thread_runtime(const std::string& thread_id);
+    // Interrupt a Codex turn; used by Cancel and to clear orphaned inProgress turns after relaunch.
+    void interrupt_thread_turn(const std::string& thread_id, const std::string& turn_id);
+    // When thread/read shows inProgress but this process has no busy activity, the prior session
+    // died mid-turn — interrupt so turn/start can succeed again.
+    void clear_orphaned_in_progress_turn(const std::string& thread_id, const Json& thread);
 
     struct ThreadRuntime {
         AgentActivity activity;
@@ -197,6 +220,7 @@ private:
 
     std::vector<std::wstring> knowledge_accessible_paths_;
     const McpManager* mcp_manager_ = nullptr;
+    CodexMcpServer broker_mcp_server_;
 };
 
 const wchar_t* state_label(AppState s);

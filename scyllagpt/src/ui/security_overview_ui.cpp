@@ -35,7 +35,8 @@ bool SecurityOverviewUi::create(HWND parent, HINSTANCE inst, HFONT font, HFONT f
     font_ = font;
     font_small_ = font_small ? font_small : font;
 
-    title_ = ui_kit::create_static(parent_, inst_, 0, L"Security", font_, false);
+    title_ = ui_kit::create_static(parent_, inst_, 0, L"Security · credentials and execution",
+                                   font_, false);
     kr_heading_ = ui_kit::create_static(parent_, inst_, 0, L"SCYLLA KEYRING", font_small_, true);
     kr_status_ = ui_kit::create_static(parent_, inst_, Cmd_SecOvKeyringStatus, L"", font_small_, true);
     kr_primary_ = ui_kit::create_button(parent_, inst_, Cmd_SecOvKeyringPrimary, L"Create Keyring",
@@ -113,7 +114,9 @@ void SecurityOverviewUi::layout(const RECT& area) {
     const int row = m.row_h;
     const int gap = m.pad_tight;
     const int section = m.pad_section;
-    const int desc_h = ui_space::dip(parent_, 48);
+    // Security explanations intentionally spell out capability boundaries; reserve enough height
+    // for three to four wrapped lines instead of clipping them like status-only copy.
+    const int desc_h = ui_space::dip(parent_, 72);
 
     MoveWindow(title_, x, y, w, row, TRUE);
     y += row + gap;
@@ -150,8 +153,8 @@ void SecurityOverviewUi::reload(Keyring& keyring, ProjectEnvironmentManager& env
 
     std::wstring kr;
     if (!vault_exists_) {
-        kr = L"Not configured\r\n\r\nCreate an encrypted application-level Keyring to store "
-             L"protected credentials for your projects.";
+        kr = L"Not configured\r\n\r\nCreate an encrypted Keyring to store secret values. "
+             L"Keyring storage alone does not create an SSH or database connection.";
         SetWindowTextW(kr_primary_, L"Create Keyring");
         ShowWindow(kr_primary_, SW_SHOW);
         EnableWindow(kr_primary_, TRUE);
@@ -160,7 +163,8 @@ void SecurityOverviewUi::reload(Keyring& keyring, ProjectEnvironmentManager& env
         if (keyring.is_unlocked()) {
             n = keyring.list_refs().size();
         }
-        kr = L"Locked\r\n\r\nUnlock to use protected environment values and manage secrets.";
+        kr = L"Locked\r\n\r\nUnlock to manage secrets or let an approved Scylla workflow "
+             L"use their references. Secret values are never returned to the agent.";
         SetWindowTextW(kr_primary_, L"Unlock Keyring");
         ShowWindow(kr_primary_, SW_SHOW);
         EnableWindow(kr_primary_, TRUE);
@@ -169,7 +173,8 @@ void SecurityOverviewUi::reload(Keyring& keyring, ProjectEnvironmentManager& env
         const auto refs = keyring.list_refs();
         kr = L"Unlocked\r\n";
         kr += std::to_wstring(refs.size());
-        kr += L" secrets";
+        kr += L" stored secrets. Approved workflows and connection routes reference them "
+              L"directly; secret values remain inside Scylla.";
         SetWindowTextW(kr_primary_, L"Lock");
         ShowWindow(kr_primary_, SW_SHOW);
         EnableWindow(kr_primary_, TRUE);
@@ -178,7 +183,8 @@ void SecurityOverviewUi::reload(Keyring& keyring, ProjectEnvironmentManager& env
 
     std::wstring proj;
     if (project_id.empty()) {
-        proj = L"No project open.\r\n\r\nOpen a folder to configure project environments.";
+        proj = L"No project open.\r\n\r\nOpen a folder to establish project scope for environments "
+               L"and brokered connections.";
         EnableWindow(proj_env_btn_, FALSE);
         EnableWindow(proj_secrets_btn_, FALSE);
     } else {
@@ -214,6 +220,9 @@ void SecurityOverviewUi::reload(Keyring& keyring, ProjectEnvironmentManager& env
         }
         if (!vault_exists_) {
             proj += L"\r\nProtected variables unavailable until Keyring is created.";
+        } else {
+            proj += L"\r\nOptional: environments apply variables to launched processes. Brokered "
+                    L"connections bind Keyring references directly and do not require one.";
         }
         EnableWindow(proj_env_btn_, TRUE);
         EnableWindow(proj_secrets_btn_, vault_exists_ ? TRUE : FALSE);

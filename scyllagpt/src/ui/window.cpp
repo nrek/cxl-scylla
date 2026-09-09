@@ -1,13 +1,22 @@
 #include "scyllagpt/window.h"
 #include "scyllagpt/workflow.h"
+#include "scyllagpt/scylla_query_skill.h"
+#include "scyllagpt/composer_tokens.h"
+#include "scyllagpt/composer_metrics.h"
 #include "scyllagpt/chat_history.h"
+#include "scyllagpt/chat_log_view.h"
 #include "scyllagpt/chat_list.h"
 #include "scyllagpt/agent_files.h"
 #include "scyllagpt/resource.h"
 
+#include "scyllagpt/broker_mcp.h"
+#include "scyllagpt/broker_service.h"
+#include "scyllagpt/connection_broker.h"
 #include "scyllagpt/document.h"
 #include "scyllagpt/editor_host.h"
 #include "scyllagpt/commands.h"
+#include "scyllagpt/ssh_query_executor.h"
+#include "scyllagpt/connections_settings_ui.h"
 #include "scyllagpt/environment_settings_ui.h"
 #include "scyllagpt/keyring.h"
 #include "scyllagpt/keyring_ui.h"
@@ -17,8 +26,10 @@
 #include "scyllagpt/mcp_manager.h"
 #include "scyllagpt/mcp_oauth.h"
 #include "scyllagpt/mcp_settings_ui.h"
+#include "scyllagpt/providers_settings_ui.h"
 #include "scyllagpt/paths.h"
 #include "scyllagpt/project_environment.h"
+#include "scyllagpt/project_connection.h"
 #include "scyllagpt/security_overview_ui.h"
 #include "scyllagpt/security_policy_ui.h"
 #include "scyllagpt/ui_space.h"
@@ -57,6 +68,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -81,6 +93,11 @@ constexpr UINT WM_SCYLLA_MCP_AUTH = WM_APP + 47;
 // Defer panel chrome layout off BN_CLICKED / LBUTTONDOWN — SetWindowPos/RedrawWindow on the
 // control still inside its notify handler crashes (surface tabs after hosts parented under content_).
 constexpr UINT WM_SCYLLA_RELAYOUT = WM_APP + 48;
+// Sent (never posted) by a broker pipe worker so the Keyring-touching half of a query runs on the
+// UI thread. SendMessage blocks the worker, which is exactly the handoff we want.
+constexpr UINT WM_SCYLLA_BROKER_PREPARE = WM_APP + 49;
+// Posted by the connection-test worker with an owned result string once the SSH round trip returns.
+constexpr UINT WM_SCYLLA_TEST_RESULT = WM_APP + 50;
 constexpr WPARAM kRelayoutEnsurePanel = 1;
 constexpr wchar_t kSelectorClass[] = L"ScyllaGPTSelectorPopup";
 
@@ -182,15 +199,6 @@ enum {
     ID_CONTENT_BACK = Cmd_ContentBack,
     ID_CONTENT_NAV = Cmd_ContentNav,
     ID_CONTENT_BODY = Cmd_ContentBody,
-    ID_SET_OA_STATUS = Cmd_SetOaStatus,
-    ID_SET_OA_SIGNIN = Cmd_SetOaSignIn,
-    ID_SET_OA_SIGNOUT = Cmd_SetOaSignOut,
-    ID_SET_CL_STATUS = Cmd_SetClStatus,
-    ID_SET_CL_KEY = Cmd_SetClKey,
-    ID_SET_CL_CODE = Cmd_SetClCode,
-    ID_SET_CL_DISC = Cmd_SetClDisc,
-    ID_SET_DEF_LABEL = Cmd_SetDefLabel,
-    ID_SET_DEF_COMBO = Cmd_SetDefCombo,
     ID_SET_CODEX = Cmd_SetCodex,
     ID_SET_COPY_RUNTIME = Cmd_SetCopyRuntime,
     ID_SET_WRAP = Cmd_SetWrap,
@@ -302,9 +310,11 @@ struct Ui {
     HWND neu = nullptr;
     HWND agent_hint = nullptr;
     HWND transcript = nullptr;
+    HWND chat_log = nullptr;
     HWND activity = nullptr;
     std::wstring activity_text;
     HWND composer = nullptr;
+    int composer_lines = kComposerMinLines;  // visible text lines; grows with the draft
     HWND send = nullptr;
     HWND cancel = nullptr;
     HWND hdr_history = nullptr;
@@ -354,6 +364,8 @@ struct Ui {
     HBRUSH history_br = nullptr;
     HBRUSH input_br = nullptr;
     std::string shown_stream;
+    // -1 until the first chrome refresh; avoids repainting the empty-state pane on every delta.
+    int chat_empty_state = -1;
     bool ime_composing = false;
     WNDPROC composer_prev = nullptr;
     WNDPROC filter_prev = nullptr;
@@ -394,16 +406,7 @@ struct Ui {
     HWND content_title = nullptr;
     HWND content_nav = nullptr;
     HWND content_body = nullptr;
-    HWND set_oa_status = nullptr;
-    HWND set_oa_signin = nullptr;
-    HWND set_oa_signout = nullptr;
-    HWND set_cl_status = nullptr;
-    HWND set_cursor_status = nullptr;
-    HWND set_cl_key = nullptr;
-    HWND set_cl_code = nullptr;
-    HWND set_cl_disc = nullptr;
-    HWND set_def_label = nullptr;
-    HWND set_def_combo = nullptr;
+    ProvidersSettingsUi providers_ui;
     HWND set_codex = nullptr;
     HWND set_copy_runtime = nullptr;
     HWND set_wrap = nullptr;
@@ -440,12 +443,24 @@ struct Ui {
     StrataSettingsUi strata_ui;
     KeyringUi keyring_ui;
     ProjectEnvironmentManager environments;
+    ProjectConnectionManager connections;
+    // Trusted query broker. The executor and broker hold references, so they are constructed once
+    // the Keyring and connection manager exist rather than inline with the struct.
+    std::unique_ptr<SshQueryExecutor> query_executor;
+    std::unique_ptr<ConnectionBroker> query_broker;
+    BrokerPipeService broker_service;
+    // Connections → Test connection runs off-thread. Held (not detached) so shutdown can join before
+    // the broker it borrows is destroyed.
+    std::thread connection_test;
+    bool connection_test_running = false;
     EnvironmentSettingsUi environment_ui;
+    ConnectionsSettingsUi connections_ui;
     SecurityOverviewUi security_overview;
     SecurityPolicyUi security_policy;
     HWND sec_tab_overview = nullptr;
     HWND sec_tab_keyring = nullptr;
     HWND sec_tab_environments = nullptr;
+    HWND sec_tab_connections = nullptr;
     HWND sec_tab_policy = nullptr;
     // Status-bar chip for the active project's environment (click = pick / manage).
     HWND status_env = nullptr;
@@ -469,8 +484,214 @@ int dip(HWND hwnd, int v) {
     return MulDiv(v, static_cast<int>(GetDpiForWindow(hwnd)), 96);
 }
 
+// Whether the agent can actually call scylla_query this session. The /scylla-query skill keys every
+// claim it makes off this one answer, so it must reflect the live service rather than intent.
+bool broker_query_tool_available(Ui* ui) {
+    return ui && ui->broker_service.running() && ui->session.broker_mcp_server_registered();
+}
+
+// Crosses the worker→UI boundary for WM_SCYLLA_BROKER_PREPARE. Owned by the worker for the whole
+// SendMessage, so the UI thread may write through the pointers but must not retain them.
+struct BrokerPrepareBridge {
+    ConnectionQueryRequest request;
+    PreparedOperation* prepared = nullptr;
+    bool accepted = false;
+};
+
+// UI-thread half of a brokered query: bind the active project, resolve the alias, classify the SQL,
+// ask the user when policy demands it, and authorize Keyring values for this one operation. Never
+// blocks on the network, so the UI stays responsive.
+void broker_prepare_on_ui(Ui* ui, BrokerPrepareBridge* bridge) {
+    if (!ui || !bridge || !bridge->prepared || !ui->query_broker) return;
+    bridge->request.project_id = ui->session.store.active_project_id;
+    if (bridge->request.project_id.empty()) {
+        bridge->prepared->response.status = BrokerStatus::ConnectionNotFound;
+        bridge->prepared->response.safe_message =
+            "No Scylla project is active, so no saved connection can be resolved.";
+        return;
+    }
+    *bridge->prepared = ui->query_broker->prepare(bridge->request);
+    if (bridge->prepared->ready) {
+        bridge->accepted = true;
+        return;
+    }
+    if (bridge->prepared->response.status != BrokerStatus::ApprovalRequired) return;
+
+    std::wstring prompt = L"The agent asked to run a statement that changes data or schema on \"";
+    prompt += utf16(bridge->request.alias);
+    prompt += L"\".\n\n";
+    prompt += utf16(bridge->prepared->response.assessment.reason.empty()
+                        ? bridge->request.sql
+                        : bridge->prepared->response.assessment.reason + "\n\n" + bridge->request.sql);
+    prompt += L"\n\nRun it?";
+    if (MessageBoxW(ui->wnd, prompt.c_str(), L"Scylla — approve brokered query",
+                    MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+        return;  // keep the ApprovalRequired refusal the agent already has
+    }
+    ConnectionQueryRequest approved = bridge->request;
+    approved.approved = true;
+    *bridge->prepared = ui->query_broker->prepare(approved);
+    bridge->accepted = bridge->prepared->ready;
+}
+
+// Worker-thread entry point handed to BrokerPipeService. Marshals the Keyring-touching phase to the
+// UI thread, then runs the blocking SSH execution here.
+std::string broker_handle_query(Ui* ui, const QueryToolCall& call) {
+    BrokerResponse refused;
+    refused.status = BrokerStatus::Disabled;
+    refused.safe_message = "The Scylla query broker is not available.";
+    if (!ui || !ui->wnd || !ui->query_broker) return encode_broker_response(refused);
+
+    BrokerPrepareBridge bridge;
+    bridge.request.operation_id = ProjectConnectionManager::make_id();
+    bridge.request.alias = call.connection_alias;
+    bridge.request.sql = call.sql;
+    PreparedOperation prepared;
+    bridge.prepared = &prepared;
+    SendMessageW(ui->wnd, WM_SCYLLA_BROKER_PREPARE, 0, reinterpret_cast<LPARAM>(&bridge));
+    if (!bridge.accepted) return encode_broker_response(prepared.response);
+    return encode_broker_response(ui->query_broker->finish(std::move(prepared)));
+}
+
+std::wstring current_executable_path() {
+    wchar_t buffer[MAX_PATH]{};
+    const DWORD length = GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+    return length > 0 ? std::wstring(buffer, length) : std::wstring();
+}
+
+// Brings up the broker and tells the agent runtime about it. Until this succeeds the scylla_query
+// tool simply does not exist, which is what keeps /scylla-query honest.
+void start_query_broker(Ui* ui) {
+    if (!ui || ui->broker_service.running()) return;
+    const std::wstring exe = current_executable_path();
+    if (exe.empty()) return;
+
+    ui->query_executor = std::make_unique<SshQueryExecutor>(
+        join_path(ui->session.paths.appdata, L"broker-run"));
+    ui->query_broker = std::make_unique<ConnectionBroker>(ui->connections, ui->keyring_ui.keyring(),
+                                                         *ui->query_executor);
+    std::string error;
+    if (!ui->broker_service.start([ui](const QueryToolCall& call) { return broker_handle_query(ui, call); },
+                                  &error)) {
+        ui->query_broker.reset();
+        ui->query_executor.reset();
+        return;
+    }
+
+    // The helper is this same executable in a secret-free child mode. It receives only the pipe name
+    // and the session token; the Keyring stays in this process.
+    CodexMcpServer server;
+    server.name = "scylla-query";
+    server.stdio = true;
+    server.command = exe;
+    server.arguments = {L"--mcp-query-broker"};
+    // Token only: the helper derives the pipe name from it. Emitting the literal pipe path here
+    // would be corrupted by the config writer's backslash-to-slash rewriting.
+    server.environment = {{utf16(kBrokerTokenEnvVar), utf16(ui->broker_service.token())}};
+    ui->session.set_broker_mcp_server(std::move(server));
+    ui->session.sync_lockdown_config();
+}
+
+// Result of a Connections → Test connection run, handed to the UI thread by pointer.
+struct ConnectionTestResult {
+    bool ok = false;
+    std::wstring message;
+};
+
+// Runs the smallest possible real query through the broker so a saved alias can be proven end to end
+// before the agent depends on it. Keyring authorization happens here on the UI thread; the SSH round
+// trip runs on a detached worker so the window keeps painting.
+void start_connection_test(Ui* ui, const std::string& alias) {
+    if (!ui || alias.empty()) return;
+    if (!ui->query_broker) {
+        ui->connections_ui.report_test_result(false, L"The query broker is not running.");
+        return;
+    }
+    if (ui->connection_test_running) {
+        ui->connections_ui.report_test_result(false, L"A connection test is already running.");
+        return;
+    }
+
+    ConnectionQueryRequest request;
+    request.operation_id = ProjectConnectionManager::make_id();
+    request.project_id = ui->session.store.active_project_id;
+    request.alias = alias;
+    request.sql = "SELECT 1";
+    PreparedOperation prepared = ui->query_broker->prepare(request);
+    if (!prepared.ready) {
+        ui->connections_ui.report_test_result(false, utf16(prepared.response.safe_message));
+        return;
+    }
+
+    ui->connections_ui.report_test_result(true, L"Connecting…");
+    if (ui->connection_test.joinable()) ui->connection_test.join();  // finished worker from a prior run
+    const HWND wnd = ui->wnd;
+    ConnectionBroker* broker = ui->query_broker.get();
+    ui->connection_test_running = true;
+    ui->connection_test = std::thread([wnd, broker, moved = std::move(prepared)]() mutable {
+        const BrokerResponse response = broker->finish(std::move(moved));
+        auto* result = new ConnectionTestResult{};
+        result->ok = response.status == BrokerStatus::Ok;
+        result->message = result->ok ? L"Connection succeeded — SELECT 1 returned a row."
+                                     : utf16(response.safe_message);
+        if (!PostMessageW(wnd, WM_SCYLLA_TEST_RESULT, 0, reinterpret_cast<LPARAM>(result))) {
+            delete result;
+        }
+    });
+}
+
+void stop_query_broker(Ui* ui) {
+    if (!ui) return;
+    // Join before the broker goes away: the test worker holds a raw pointer into it.
+    if (ui->connection_test.joinable()) ui->connection_test.join();
+    ui->connection_test_running = false;
+    ui->broker_service.stop();
+    ui->session.set_broker_mcp_server({});
+    ui->query_broker.reset();
+    ui->query_executor.reset();
+}
+
 int px_to_dip(HWND hwnd, int px) {
     return MulDiv(px, 96, static_cast<int>(GetDpiForWindow(hwnd)));
+}
+
+// Height of one composer line, taken from the RichEdit's own default character format so it
+// tracks whatever face and size set_rich_colors installed rather than a parallel constant.
+int composer_line_height(Ui* ui) {
+    const int fallback = dip(ui->wnd, 19);
+    if (!ui->composer) return fallback;
+    CHARFORMAT2W cf{};
+    cf.cbSize = sizeof(cf);
+    cf.dwMask = CFM_SIZE | CFM_FACE;
+    SendMessageW(ui->composer, EM_GETCHARFORMAT, SCF_DEFAULT, reinterpret_cast<LPARAM>(&cf));
+    if (cf.yHeight <= 0) return fallback;
+    LOGFONTW lf{};
+    lf.lfHeight = -MulDiv(cf.yHeight, static_cast<int>(GetDpiForWindow(ui->wnd)), 72 * 20);
+    lf.lfCharSet = DEFAULT_CHARSET;
+    lf.lfQuality = CLEARTYPE_QUALITY;
+    lstrcpynW(lf.lfFaceName, cf.szFaceName[0] ? cf.szFaceName : L"Segoe UI", LF_FACESIZE);
+    HFONT font = CreateFontIndirectW(&lf);
+    if (!font) return fallback;
+    HDC dc = GetDC(ui->composer);
+    HGDIOBJ old = SelectObject(dc, font);
+    TEXTMETRICW tm{};
+    const bool measured = GetTextMetricsW(dc, &tm) != FALSE;
+    if (old) SelectObject(dc, old);
+    ReleaseDC(ui->composer, dc);
+    DeleteObject(font);
+    const int line = tm.tmHeight + tm.tmExternalLeading;
+    return (measured && line > 0) ? line : fallback;
+}
+
+// Caches the composer's visible line count. Returns true when the height requirement moved, which
+// is the only case worth a relayout.
+bool sync_composer_growth(Ui* ui) {
+    if (!ui || !ui->composer) return false;
+    const auto wrapped = static_cast<int>(SendMessageW(ui->composer, EM_GETLINECOUNT, 0, 0));
+    const int lines = composer_visible_lines(wrapped);
+    if (lines == ui->composer_lines) return false;
+    ui->composer_lines = lines;
+    return true;
 }
 
 HFONT make_font_dip(HWND hwnd, int dips, bool bold, const wchar_t* face) {
@@ -677,8 +898,31 @@ void append_rich(HWND edit, const std::wstring& text, COLORREF color, bool bold)
 }
 
 void append_divider(HWND edit) {
+    // RichEdit has no full-width horizontal-rule primitive. Size the text rule
+    // from the current client width so it follows the chat pane at every size.
+    RECT client{};
+    GetClientRect(edit, &client);
+    HDC dc = GetDC(edit);
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(edit, WM_GETFONT, 0, 0));
+    HGDIOBJ previous = font ? SelectObject(dc, font) : nullptr;
+    TEXTMETRICW metrics{};
+    GetTextMetricsW(dc, &metrics);
+    const int char_width = (std::max)(1, static_cast<int>(metrics.tmAveCharWidth));
+    int count = (std::max)(1, static_cast<int>((client.right - client.left) / char_width) - 2);
+    // Box-drawing glyphs can be wider than the font's average character. Measure
+    // the actual rule and trim it until it fits; never let it wrap.
+    SIZE extent{};
+    std::wstring rule(static_cast<std::size_t>(count), L'─');
+    while (count > 1) {
+        GetTextExtentPoint32W(dc, rule.c_str(), static_cast<int>(rule.size()), &extent);
+        if (extent.cx <= client.right - client.left - 2) break;
+        rule.pop_back();
+        --count;
+    }
+    if (previous) SelectObject(dc, previous);
+    ReleaseDC(edit, dc);
     // Hairline rule: low-contrast box-drawing line, not a bubble/border.
-    append_rich(edit, L"\r\n────────────────────────\r\n\r\n", kRule, false);
+    append_rich(edit, L"\r\n" + rule + L"\r\n\r\n", kRule, false);
 }
 
 void append_user_message(HWND edit, const std::wstring& text) {
@@ -711,32 +955,38 @@ std::wstring folder_name(const std::wstring& path) {
     return path.substr(pos + 1);
 }
 
-bool pick_folder(HWND owner, std::wstring& out) {
+bool pick_folders(HWND owner, std::vector<std::wstring>& out) {
     IFileOpenDialog* dlg = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg)))) {
         return false;
     }
     DWORD opts = 0;
     dlg->GetOptions(&opts);
-    dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-    dlg->SetTitle(L"Open project folder");
+    dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_ALLOWMULTISELECT);
+    dlg->SetTitle(L"Open project folders or repositories");
     const HRESULT shown = dlg->Show(owner);
     if (FAILED(shown)) {
         dlg->Release();
         return false;
     }
-    IShellItem* item = nullptr;
-    if (FAILED(dlg->GetResult(&item)) || !item) {
+    IShellItemArray* items = nullptr;
+    if (FAILED(dlg->GetResults(&items)) || !items) {
         dlg->Release();
         return false;
     }
-    PWSTR path = nullptr;
-    const HRESULT gn = item->GetDisplayName(SIGDN_FILESYSPATH, &path);
-    if (SUCCEEDED(gn) && path) {
-        out = path;
-        CoTaskMemFree(path);
+    DWORD count = 0;
+    items->GetCount(&count);
+    for (DWORD i = 0; i < count; ++i) {
+        IShellItem* item = nullptr;
+        if (FAILED(items->GetItemAt(i, &item)) || !item) continue;
+        PWSTR path = nullptr;
+        if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+            out.emplace_back(path);
+            CoTaskMemFree(path);
+        }
+        item->Release();
     }
-    item->Release();
+    items->Release();
     dlg->Release();
     return !out.empty();
 }
@@ -844,6 +1094,18 @@ void fill_dir(HWND tree, HTREEITEM parent, const std::wstring& dir, const std::w
 
 void rebuild_tree(Ui* ui) {
     std::vector<std::pair<std::string, std::wstring>> expanded;
+    std::vector<std::wstring> expanded_project_roots;
+    const bool had_project_items = TreeView_GetRoot(ui->tree) != nullptr;
+    for (HTREEITEM item = TreeView_GetRoot(ui->tree); item; item = TreeView_GetNextSibling(ui->tree, item)) {
+        TVITEMW value{};
+        value.mask = TVIF_PARAM | TVIF_STATE;
+        value.stateMask = TVIS_EXPANDED;
+        value.hItem = item;
+        if (TreeView_GetItem(ui->tree, &value)) {
+            const auto* node = reinterpret_cast<TreeNode*>(value.lParam);
+            if (node && (value.state & TVIS_EXPANDED)) expanded_project_roots.push_back(node->path);
+        }
+    }
     std::function<void(HTREEITEM)> remember = [&](HTREEITEM item) {
         for (; item; item = TreeView_GetNextSibling(ui->knowledge_tree, item)) {
             TVITEMW value{};
@@ -859,8 +1121,11 @@ void rebuild_tree(Ui* ui) {
     remember(TreeView_GetRoot(ui->knowledge_tree));
     TreeView_DeleteAllItems(ui->tree);
     TreeView_DeleteAllItems(ui->knowledge_tree);
-    const auto& project = ui->session.settings.project_folder;
-    if (!project.empty()) {
+    std::vector<std::wstring> project_roots;
+    if (const auto* active = ui->session.store.active()) project_roots = active->roots;
+    if (project_roots.empty() && !ui->session.settings.project_folder.empty())
+        project_roots.push_back(ui->session.settings.project_folder);
+    for (const auto& project : project_roots) {
         const DWORD attrs = GetFileAttributesW(project.c_str());
         auto* root = new TreeNode{};
         root->loaded = true;
@@ -869,7 +1134,9 @@ void rebuild_tree(Ui* ui) {
             root->dir = true;
             HTREEITEM item = insert_tree_item(ui->tree, TVI_ROOT, folder_name(project), root, true);
             fill_dir(ui->tree, item, project, get_window_text(ui->filter));
-            TreeView_Expand(ui->tree, item, TVE_EXPAND);
+            const bool was_expanded = std::any_of(expanded_project_roots.begin(), expanded_project_roots.end(),
+                [&](const auto& path) { return _wcsicmp(path.c_str(), project.c_str()) == 0; });
+            if (!had_project_items || was_expanded) TreeView_Expand(ui->tree, item, TVE_EXPAND);
         } else insert_tree_item(ui->tree, TVI_ROOT, L"Folder missing — use Open folder", root, false);
     }
     // Separate KNOWLEDGE / SKILLS sections — never merge into project src tree. Disabled sources
@@ -961,6 +1228,7 @@ void refresh_models(Ui* ui);
 void apply_selector(Ui* ui, int owner, int sel);
 std::wstring model_choice_label(const ModelChoice& m);
 void do_open_folder(Ui* ui);
+void do_add_authorized_folders(Ui* ui);
 void persist_store(Ui* ui);
 void browse_codex(Ui* ui);
 void open_ai_providers_settings(Ui* ui);
@@ -1219,7 +1487,10 @@ void apply_editor_prefs(Ui* ui) {
 void edit_target_action(Ui* ui, int id) {
     HWND focus = GetFocus();
     const bool on_editor = focus == ui->editor;
-    const bool on_rich = focus == ui->composer || focus == ui->transcript || focus == ui->find;
+    wchar_t focus_class[64]{};
+    if (focus) GetClassNameW(focus, focus_class, ARRAYSIZE(focus_class));
+    const bool on_edit_control = focus &&
+        (_wcsicmp(focus_class, L"Edit") == 0 || _wcsicmp(focus_class, MSFTEDIT_CLASS) == 0);
     if (on_editor) {
         switch (id) {
             case ID_EDIT_UNDO:
@@ -1245,7 +1516,9 @@ void edit_target_action(Ui* ui, int id) {
         }
         return;
     }
-    if (on_rich && focus) {
+    // Ctrl+V and the Edit menu are app-level accelerators. Forward them to whichever native
+    // edit control owns focus, including Settings and Keyring fields.
+    if (on_edit_control) {
         switch (id) {
             case ID_EDIT_UNDO:
                 SendMessageW(focus, EM_UNDO, 0, 0);
@@ -1321,7 +1594,7 @@ HMENU build_menu_bar() {
     AppendMenuW(agent, MF_STRING, ID_ADD_SEL, L"Add Selection to Context");
     AppendMenuW(agent, MF_STRING, ID_CLEAR_CTX, L"Clear Context");
     AppendMenuW(agent, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(agent, MF_STRING, ID_AI_PROVIDERS, L"Manage AI Providers…");
+    AppendMenuW(agent, MF_STRING, ID_AI_PROVIDERS, L"Manage Agent Providers…");
     AppendMenuW(agent, MF_STRING, ID_PERM_INFO, L"Permission modes…");
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(agent), L"&Agent");
 
@@ -1357,23 +1630,30 @@ CommandUiState capture_command_state(Ui* ui) {
 }
 
 void hide_settings_controls(Ui* ui) {
-    const HWND ctrls[] = {ui->content_nav, ui->set_oa_status, ui->set_oa_signin, ui->set_oa_signout,
-                          ui->set_cl_status, ui->set_cursor_status, ui->set_cl_key, ui->set_cl_code, ui->set_cl_disc, ui->set_def_label,
-                          ui->set_def_combo, ui->set_codex, ui->set_copy_runtime, ui->set_wrap, ui->set_whitespace,
+    const HWND ctrls[] = {ui->content_nav, ui->set_codex, ui->set_copy_runtime, ui->set_wrap, ui->set_whitespace,
                           ui->set_enter_sends, ui->set_ui_gallery, ui->gs_open_folder, ui->gs_providers};
     for (HWND h : ctrls) {
         if (h) {
             ShowWindow(h, SW_HIDE);
         }
     }
+    ui->providers_ui.set_visible(false);
     ui->knowledge_ui.set_visible(false);
     ui->mcp_ui.hide();
     ui->strata_ui.set_visible(false);
     ui->keyring_ui.show(false);
     ui->environment_ui.set_visible(false);
+    // Leave the Connections page alone when it is the page being laid out. layout() calls this on every
+    // pass and then re-shows the active subpage, so hiding ~60 controls just to restore them flashed the
+    // whole panel on each click. The page's own visibility is diffed, so this stays correct either way.
+    if (!(ui->content_view == ContentView::Settings && ui->settings_section == SettingsSection::Security &&
+          ui->security_subpage == SecuritySubpage::Connections)) {
+        ui->connections_ui.set_visible(false);
+    }
     ui->security_overview.set_visible(false);
     ui->security_policy.set_visible(false);
-    for (HWND tab : {ui->sec_tab_overview, ui->sec_tab_keyring, ui->sec_tab_environments, ui->sec_tab_policy}) {
+    for (HWND tab : {ui->sec_tab_overview, ui->sec_tab_keyring, ui->sec_tab_environments,
+                     ui->sec_tab_connections, ui->sec_tab_policy}) {
         if (tab) {
             ShowWindow(tab, SW_HIDE);
         }
@@ -1393,11 +1673,13 @@ void apply_security_subpage(Ui* ui) {
     }
     ui->security_overview.set_visible(ui->security_subpage == SecuritySubpage::Overview);
     ui->environment_ui.set_visible(ui->security_subpage == SecuritySubpage::Environments);
+    ui->connections_ui.set_visible(ui->security_subpage == SecuritySubpage::Connections);
     ui->security_policy.set_visible(ui->security_subpage == SecuritySubpage::Policy);
     // Keyring full page under Security, or Access→Keyring ContentView.
     const bool show_kr = ui->security_subpage == SecuritySubpage::Keyring;
     ui->keyring_ui.show(show_kr);
-    for (HWND tab : {ui->sec_tab_overview, ui->sec_tab_keyring, ui->sec_tab_environments, ui->sec_tab_policy}) {
+    for (HWND tab : {ui->sec_tab_overview, ui->sec_tab_keyring, ui->sec_tab_environments,
+                     ui->sec_tab_connections, ui->sec_tab_policy}) {
         if (tab) {
             ShowWindow(tab, SW_SHOW);
             InvalidateRect(tab, nullptr, TRUE);
@@ -1430,39 +1712,9 @@ void refresh_settings_pane(Ui* ui) {
     if (!ui || ui->content_view != ContentView::Settings) {
         return;
     }
-    const auto oa = openai_provider_status(ui->session.account.signed_in, ui->session.account.email,
-                                           ui->session.account.plan, ui->session.account.type);
-    std::wstring oa_line = L"OpenAI — ";
-    oa_line += utf16(oa.auth_label);
-    if (!oa.detail.empty()) {
-        oa_line += L"\n";
-        oa_line += utf16(oa.detail);
+    if (ui->settings_section == SettingsSection::Providers) {
+        ui->providers_ui.refresh(ui->session);
     }
-    SetWindowTextW(ui->set_oa_status, oa_line.c_str());
-
-    const auto cl = claude_provider_status();
-    std::wstring cl_line = L"Claude — ";
-    cl_line += utf16(cl.auth_label);
-    if (!cl.detail.empty()) {
-        cl_line += L"\n";
-        cl_line += utf16(cl.detail);
-    }
-    cl_line += L"\n(Chat via Claude Code — print mode)";
-    SetWindowTextW(ui->set_cl_status, cl_line.c_str());
-    SetWindowTextW(ui->set_cursor_status, discover_cursor_agent_cli().empty()
-        ? L"Cursor ACP — Agent CLI not found\nIntegration in progress. Install the Agent CLI separately from Cursor desktop."
-        : L"Cursor ACP — Agent CLI found\nIntegration in progress. Account connection and chat are not available yet.");
-    EnableWindow(ui->set_oa_signin, !ui->session.account.signed_in);
-    EnableWindow(ui->set_oa_signout, ui->session.account.signed_in);
-    const bool claude_cli = !discover_claude_cli().empty();
-    const bool claude_connected = cl.connected;
-    EnableWindow(ui->set_cl_disc, claude_connected ? TRUE : FALSE);
-    // Mirror OpenAI: Sign in disabled while already authenticated.
-    EnableWindow(ui->set_cl_code, (claude_cli && !claude_connected) ? TRUE : FALSE);
-
-    // Active agent button mirrors the header model selector (same popup catalog).
-    EnableWindow(ui->set_def_combo, TRUE);
-    InvalidateRect(ui->set_def_combo, nullptr, TRUE);
 
     InvalidateRect(ui->set_wrap, nullptr, TRUE);
     InvalidateRect(ui->set_whitespace, nullptr, TRUE);
@@ -2240,8 +2492,10 @@ std::wstring access_body_text(Ui* ui) {
            L"Agent sees references only — never values.)";
 
     msg += L"\r\n\r\nAUTHORIZED FOLDERS\r\n";
-    msg += ui->session.project_root.empty() ? L"(none)" : ui->session.project_root;
-    msg += L"\r\n\r\nUse Access → Authorized Folders… (or Open Folder) to set the project grant.";
+    if (const auto* project = ui->session.store.active(); project && !project->roots.empty()) {
+        for (const auto& root : project->roots) msg += L"• " + root + L"\r\n";
+    } else msg += L"(none)\r\n";
+    msg += L"\r\nUse Access → Authorized Folders… to add one or more peer repositories.";
     return msg;
 }
 
@@ -2294,7 +2548,7 @@ std::wstring shortcuts_body_text() {
 std::wstring getting_started_body_text() {
     return L"GETTING STARTED\r\n\r\n"
            L"1. Open a project folder (sets the agent grant)\r\n"
-           L"2. Sign in under Settings → AI Providers (OpenAI and/or Claude)\r\n"
+           L"2. Sign in under Settings → Agent Providers (OpenAI and/or Claude)\r\n"
            L"3. Choose a model in the header (OpenAI · … or Claude · …)\r\n"
            L"4. Open a file in the editor\r\n"
            L"5. Ask about your code in the Agent pane\r\n"
@@ -2356,7 +2610,7 @@ void show_content_view(Ui* ui, ContentView view, SettingsSection section = Setti
     }
     if (view == ContentView::Settings && ui->content_nav) {
         SendMessageW(ui->content_nav, LB_RESETCONTENT, 0, 0);
-        SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"AI Providers"));
+        SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Agent Providers"));
         SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Editor"));
         SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Terminal"));
         SendMessageW(ui->content_nav, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Knowledge/Skills"));
@@ -2433,7 +2687,7 @@ void go_back_content(Ui* ui) {
 void show_about(HWND parent) {
     MessageBoxW(parent,
                 L"Scylla Workbench\nNative Windows client for OpenAI (ChatGPT / Codex) and Claude.\n\n"
-                L"Sign in to either or both under Settings → AI Providers. "
+                L"Sign in to either or both under Settings → Agent Providers. "
                 L"Pick the active model from the header (OpenAI · … / Claude · …) or Default provider.\n\n"
                 L"Agent chat Send uses Codex for OpenAI and Claude Code print mode for Claude.",
                 L"About Scylla Workbench", MB_OK | MB_ICONINFORMATION);
@@ -3192,6 +3446,7 @@ void apply_selector(Ui* ui, int owner, int sel) {
             ui->session.selected_model = m.id;
             ui->session.settings.selected_model = m.id;
             ui->session.settings.default_provider = m.provider_id.empty() ? "openai" : m.provider_id;
+            ui->session.set_provider_default_model(ui->session.settings.default_provider, m.id);
             save_settings(ui->session.paths.settings_path, ui->session.settings);
             if (auto* conv = ui->session.store.by_thread(ui->session.active_thread_id)) {
                 conv->provider_id = ui->session.settings.default_provider;
@@ -3216,8 +3471,8 @@ void apply_selector(Ui* ui, int owner, int sel) {
 }
 
 std::wstring model_choice_label(const ModelChoice& m) {
-    const char* prefix = m.provider_id == "claude" ? "Claude Code" : "OpenAI";
-    return utf16(std::string(prefix) + " · " + (m.display.empty() ? m.id : m.display));
+    return utf16(std::string(provider_display_name(m.provider_id)) + " · " +
+                 (m.display.empty() ? m.id : m.display));
 }
 
 void open_selector(Ui* ui, HWND face, int id, bool refetch_models) {
@@ -3248,7 +3503,7 @@ void open_selector(Ui* ui, HWND face, int id, bool refetch_models) {
         if (refetch_models && ui->session.account.signed_in) {
             bool has_openai = false;
             for (const auto& m : ui->session.models) {
-                if (m.provider_id != "claude") {
+                if (m.provider_id == "openai") {
                     has_openai = true;
                     break;
                 }
@@ -3270,26 +3525,29 @@ void open_selector(Ui* ui, HWND face, int id, bool refetch_models) {
             }
         }
     } else if (id == ID_MODELS) {
-        ui->sel_models = ui->session.models;
+        ui->sel_models.clear();
+        const std::string pid = coerce_default_provider(ui->session.settings.default_provider);
+        for (const auto& m : ui->session.models) {
+            if (m.provider_id != pid) {
+                continue;
+            }
+            if (!ui->session.is_model_enabled(m.provider_id, m.id)) {
+                continue;
+            }
+            ui->sel_models.push_back(m);
+        }
         bool found = false;
         for (std::size_t i = 0; i < ui->sel_models.size(); ++i) {
             items.push_back(model_choice_label(ui->sel_models[i]));
-            if (ui->sel_models[i].id == ui->session.selected_model &&
-                ui->sel_models[i].provider_id == ui->session.settings.default_provider) {
+            if (ui->sel_models[i].id == ui->session.selected_model) {
                 cur = static_cast<int>(i);
                 found = true;
             }
         }
-        if (!found) {
-            for (std::size_t i = 0; i < ui->sel_models.size(); ++i) {
-                if (ui->sel_models[i].id == ui->session.selected_model) {
-                    cur = static_cast<int>(i);
-                    break;
-                }
-            }
-        }
+        (void)found;
         if (items.empty()) {
-            items.push_back(L"Sign in under Settings → AI Providers");
+            items.push_back(is_api_provider(pid) ? L"Enable models under Settings → Agent Providers"
+                                                 : L"Sign in under Settings → Agent Providers");
         }
     } else if (id == ID_SCOPE) {
         items.push_back(L"Current project");
@@ -3489,6 +3747,9 @@ void refresh_settings_data(Ui* ui) {
                 ui->environment_ui.reload(ui->environments, ui->keyring_ui.keyring(),
                                           ui->session.store.active_project_id, pname,
                                           ui->session.paths.environments_path);
+            } else if (ui->security_subpage == SecuritySubpage::Connections) {
+                ui->connections_ui.reload(ui->connections, ui->keyring_ui.keyring(),
+                                          ui->session.store.active_project_id, pname);
             } else if (ui->security_subpage == SecuritySubpage::Keyring) {
                 ui->keyring_ui.refresh();
             }
@@ -3553,6 +3814,10 @@ UINT panel_default_command(Ui* ui, HWND field) {
                 ui->environment_ui.owns_hwnd(field)) {
                 return ui->environment_ui.default_command(field);
             }
+            if (ui->security_subpage == SecuritySubpage::Connections &&
+                ui->connections_ui.owns_hwnd(field)) {
+                return ui->connections_ui.default_command(field);
+            }
             if (ui->security_subpage == SecuritySubpage::Keyring) {
                 return ui->keyring_ui.default_command(field);
             }
@@ -3584,6 +3849,8 @@ bool cancel_active_form(Ui* ui) {
             case SettingsSection::Security:
                 if (ui->security_subpage == SecuritySubpage::Environments) {
                     cmd = ui->environment_ui.cancel_command();
+                } else if (ui->security_subpage == SecuritySubpage::Connections) {
+                    cmd = ui->connections_ui.cancel_command();
                 } else if (ui->security_subpage == SecuritySubpage::Keyring) {
                     cmd = ui->keyring_ui.cancel_command();
                 }
@@ -3620,7 +3887,11 @@ void layout(Ui* ui) {
     const int ybtn = (toolbar_h - btnh) / 2;
     const int filter_h = dip(ui->wnd, 28);
     const int thumb_extra = ui->images.empty() ? 0 : dip(ui->wnd, 56);
-    const int composer = dip(ui->wnd, 112) + thumb_extra;
+    // Self-heal after programmatic text changes (thread switch, send, clear) so the box does not
+    // stay tall with an empty draft.
+    sync_composer_growth(ui);
+    const int composer_text = composer_line_height(ui) * ui->composer_lines + dip(ui->wnd, 2);
+    const int composer = composer_text + dip(ui->wnd, 56) + thumb_extra;
 
     const bool narrow = ui->panes.narrow_tabs;
     ShowWindow(ui->tab_editor, narrow ? SW_SHOW : SW_HIDE);
@@ -3785,25 +4056,9 @@ void layout(Ui* ui) {
                     py += hh + dip(ui->wnd, 8);
                 };
                 if (ui->settings_section == SettingsSection::Providers) {
-                    place_btn(ui->set_oa_status, pw, dip(ui->wnd, 40));
-                    place_btn(ui->set_oa_signin, dip(ui->wnd, 160));
-                    MoveWindow(ui->set_oa_signout, px + dip(ui->wnd, 168), py - btnh - dip(ui->wnd, 8), dip(ui->wnd, 100),
-                               btnh, TRUE);
-                    ShowWindow(ui->set_oa_signout, SW_SHOW);
-                    InvalidateRect(ui->set_oa_signout, nullptr, TRUE);
-                    place_btn(ui->set_cl_status, pw, dip(ui->wnd, 48));
-                    place_btn(ui->set_cl_key, dip(ui->wnd, 140));
-                    MoveWindow(ui->set_cl_code, px + dip(ui->wnd, 148), py - btnh - dip(ui->wnd, 8), dip(ui->wnd, 180),
-                               btnh, TRUE);
-                    ShowWindow(ui->set_cl_code, SW_SHOW);
-                    InvalidateRect(ui->set_cl_code, nullptr, TRUE);
-                    MoveWindow(ui->set_cl_disc, px + dip(ui->wnd, 336), py - btnh - dip(ui->wnd, 8), dip(ui->wnd, 90), btnh,
-                               TRUE);
-                    ShowWindow(ui->set_cl_disc, SW_SHOW);
-                    InvalidateRect(ui->set_cl_disc, nullptr, TRUE);
-                    place_btn(ui->set_cursor_status, pw, dip(ui->wnd, 64));
-                    place_btn(ui->set_def_label, dip(ui->wnd, 160), dip(ui->wnd, 20));
-                    place_btn(ui->set_def_combo, dip(ui->wnd, 280));
+                    RECT area{px, py, px + pw, y0 + h0};
+                    ui->providers_ui.set_visible(true);
+                    ui->providers_ui.layout(area);
                     refresh_settings_pane(ui);
                 } else if (ui->settings_section == SettingsSection::Editor) {
                     // Full content-column width — not a narrow chip column.
@@ -3846,6 +4101,7 @@ void layout(Ui* ui) {
                     } sec_tabs[] = {{ui->sec_tab_overview, tab_w},
                                     {ui->sec_tab_keyring, tab_w},
                                     {ui->sec_tab_environments, tab_w + dip(ui->wnd, 40)},
+                                    {ui->sec_tab_connections, tab_w},
                                     {ui->sec_tab_policy, tab_w + dip(ui->wnd, 10)}};
                     int tab_x = px;
                     for (const auto& t : sec_tabs) {
@@ -3861,6 +4117,8 @@ void layout(Ui* ui) {
                         ui->security_overview.layout(body);
                     } else if (ui->security_subpage == SecuritySubpage::Environments) {
                         ui->environment_ui.layout(body);
+                    } else if (ui->security_subpage == SecuritySubpage::Connections) {
+                        ui->connections_ui.layout(body);
                     } else if (ui->security_subpage == SecuritySubpage::Keyring) {
                         ui->keyring_ui.layout(body);
                     } else if (ui->security_subpage == SecuritySubpage::Policy) {
@@ -4015,15 +4273,13 @@ void layout(Ui* ui) {
         const int activity_h = ui->session.activity.visible ? dip(ui->wnd, 96) : 0;
         const int trans_h = body_h - hdr - chip_h - composer - activity_h;
         const int ty = body_y + hdr + chip_h;
-        GETTEXTLENGTHEX gtl{};
-        gtl.flags = GTL_DEFAULT;
-        gtl.codepage = 1200;
-        const bool empty = SendMessageW(ui->transcript, EM_GETTEXTLENGTHEX, reinterpret_cast<WPARAM>(&gtl), 0) <= 0;
-        ShowWindow(ui->transcript, empty ? SW_HIDE : SW_SHOW);
+        const bool empty = chat_log_empty(ui->chat_log);
+        ShowWindow(ui->transcript, SW_HIDE);
+        ShowWindow(ui->chat_log, empty ? SW_HIDE : SW_SHOW);
         ShowWindow(ui->empty_agent, empty ? SW_SHOW : SW_HIDE);
-        const int transcript_pad = dip(ui->wnd, 12);
-        MoveWindow(ui->transcript, cx + transcript_pad, ty + transcript_pad, ww - transcript_pad * 2,
-                   std::max(dip(ui->wnd, 80), trans_h) - transcript_pad * 2, TRUE);
+        // The chat log applies its own grid padding internally; a second inset here made the
+        // gutters disagree with every other pane.
+        MoveWindow(ui->chat_log, cx, ty, ww, std::max(dip(ui->wnd, 80), trans_h), TRUE);
         MoveWindow(ui->empty_agent, cx, ty, ww, std::max(dip(ui->wnd, 80), trans_h), TRUE);
         const int activity_y = ty + std::max(dip(ui->wnd, 80), trans_h);
         ShowWindow(ui->activity, activity_h ? SW_SHOW : SW_HIDE);
@@ -4045,7 +4301,7 @@ void layout(Ui* ui) {
         const int text_h = (box.bottom - foot) - text_top - 4;
         MoveWindow(ui->composer, box.left + inner, text_top, (box.right - box.left) - inner * 2,
                    std::max(dip(ui->wnd, 36), text_h), TRUE);
-        MoveWindow(ui->composer_cue, box.left + inner + 4, text_top + 2, dip(ui->wnd, 200), dip(ui->wnd, 20), TRUE);
+        MoveWindow(ui->composer_cue, box.left + inner + 4, text_top + 2, dip(ui->wnd, 320), dip(ui->wnd, 20), TRUE);
         MoveWindow(ui->workflow, box.left + inner, box.bottom - foot, dip(ui->wnd, 100), dip(ui->wnd, 26), TRUE);
         MoveWindow(ui->send, box.right - inner - send_s, box.bottom - foot - 2, send_s, send_s, TRUE);
         const bool cue = get_window_text(ui->composer).empty();
@@ -4061,6 +4317,7 @@ void layout(Ui* ui) {
         ShowWindow(ui->workflow, SW_HIDE);
         ShowWindow(ui->ctx, SW_HIDE);
         ShowWindow(ui->transcript, SW_HIDE);
+        ShowWindow(ui->chat_log, SW_HIDE);
         ShowWindow(ui->activity, SW_HIDE);
         ShowWindow(ui->composer, SW_HIDE);
         ShowWindow(ui->composer_panel, SW_HIDE);
@@ -4174,7 +4431,6 @@ void layout(Ui* ui) {
     refresh_thin_scrollbar(ui->tree);
     refresh_thin_scrollbar(ui->threads);
     refresh_thin_scrollbar(ui->ctx);
-    refresh_thin_scrollbar(ui->transcript);
     refresh_thin_scrollbar(ui->editor);
     refresh_thin_scrollbar(ui->composer);
 }
@@ -4193,7 +4449,8 @@ void refresh_models(Ui* ui) {
     }
     if (label == L"Model") {
         for (const auto& m : ui->session.models) {
-            if (m.provider_id == ui->session.settings.default_provider) {
+            if (m.provider_id == ui->session.settings.default_provider &&
+                ui->session.is_model_enabled(m.provider_id, m.id)) {
                 label = model_choice_label(m);
                 break;
             }
@@ -4209,10 +4466,6 @@ void refresh_models(Ui* ui) {
     }
     SetWindowTextW(ui->models, label.c_str());
     InvalidateRect(ui->models, nullptr, TRUE);
-    if (ui->set_def_combo) {
-        SetWindowTextW(ui->set_def_combo, label == L"Model" ? L"Choose agent…" : label.c_str());
-        InvalidateRect(ui->set_def_combo, nullptr, TRUE);
-    }
 }
 
 void open_chat_index(Ui* ui, int index) {
@@ -4308,6 +4561,10 @@ void refresh_chrome(Ui* ui) {
     if (def == ProviderId::Claude) {
         const auto cl = claude_provider_status();
         acc = cl.connected ? L"Claude · connected" : L"Claude · not connected";
+    } else if (def == ProviderId::ClaudeApi) {
+        acc = claude_api_connected() ? L"Claude API · connected" : L"Claude API · not connected";
+    } else if (def == ProviderId::OpenAiApi) {
+        acc = openai_api_key_present() ? L"OpenAI API · connected" : L"OpenAI API · not connected";
     } else if (ui->session.account.signed_in) {
         acc = utf16(ui->session.account.email);
         if (acc.size() > 28) {
@@ -4321,11 +4578,25 @@ void refresh_chrome(Ui* ui) {
         st = L"Connected";
     }
     if (def == ProviderId::Claude) {
-        st = claude_is_connected() ? L"Claude connected" : L"Claude not connected";
+        st = claude_account_connected() ? L"Claude connected" : L"Claude not connected";
         if (ui->session.state == AppState::Generating) {
             st = L"Claude generating…";
         } else if (ui->session.state == AppState::Ready) {
-            st = L"Ready · Claude";
+            st = L"Ready · Claude Account";
+        }
+    } else if (def == ProviderId::ClaudeApi) {
+        st = claude_api_connected() ? L"Claude API connected" : L"Claude API not connected";
+        if (ui->session.state == AppState::Generating) {
+            st = L"Claude API generating…";
+        } else if (ui->session.state == AppState::Ready) {
+            st = L"Ready · Claude API";
+        }
+    } else if (def == ProviderId::OpenAiApi) {
+        st = openai_api_key_present() ? L"OpenAI API connected" : L"OpenAI API not connected";
+        if (ui->session.state == AppState::Generating) {
+            st = L"OpenAI API generating…";
+        } else if (ui->session.state == AppState::Ready) {
+            st = L"Ready · OpenAI API";
         }
     } else if (ui->session.has_project_grant()) {
         st += L"  ·  browse/edit ";
@@ -4370,7 +4641,7 @@ void refresh_chrome(Ui* ui) {
         }
     }
     if (!ui->session.last_error.empty() &&
-        (def != ProviderId::Claude || ui->session.state == AppState::Failed)) {
+        (def == ProviderId::OpenAI || ui->session.state == AppState::Failed)) {
         st = utf16(ui->session.last_error);
     }
     if (ui->active_doc >= 0) {
@@ -4383,8 +4654,12 @@ void refresh_chrome(Ui* ui) {
     SetWindowTextW(ui->status, st.c_str());
     const bool generating = ui->session.state == AppState::Generating || ui->session.activity.busy;
     SetWindowTextW(ui->send, generating ? L"Stop" : L"Send");
+    const bool has_enabled_model =
+        !ui->session.models_for_provider(ui->session.settings.default_provider, true).empty();
     const bool provider_ready =
-        (def == ProviderId::Claude && claude_is_connected()) ||
+        (def == ProviderId::Claude && claude_account_connected()) ||
+        (def == ProviderId::ClaudeApi && claude_api_connected() && has_enabled_model) ||
+        (def == ProviderId::OpenAiApi && openai_api_key_present() && has_enabled_model) ||
         (def == ProviderId::OpenAI && ui->session.account.signed_in);
     const bool can_send = generating || (provider_can_send(def) && provider_ready);
     EnableWindow(ui->send, can_send ? TRUE : FALSE);
@@ -4396,14 +4671,16 @@ void refresh_chrome(Ui* ui) {
     InvalidateRect(ui->toggle_history, nullptr, TRUE);
     InvalidateRect(ui->focus, nullptr, TRUE);
     if (ui->empty_agent) {
-        GETTEXTLENGTHEX gtl{};
-        gtl.flags = GTL_DEFAULT;
-        gtl.codepage = 1200;
-        const LRESULT len = SendMessageW(ui->transcript, EM_GETTEXTLENGTHEX, reinterpret_cast<WPARAM>(&gtl), 0);
-        const bool empty = len <= 0;
-        ShowWindow(ui->transcript, empty ? SW_HIDE : SW_SHOW);
+        const bool empty = chat_log_empty(ui->chat_log);
+        ShowWindow(ui->transcript, SW_HIDE);
+        ShowWindow(ui->chat_log, empty ? SW_HIDE : SW_SHOW);
         ShowWindow(ui->empty_agent, empty ? SW_SHOW : SW_HIDE);
-        RedrawWindow(ui->empty_agent, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+        // refresh_chrome runs on every streaming delta; a synchronous repaint here made the pane
+        // flicker for the whole turn. Only repaint when the empty state actually flips.
+        if (ui->chat_empty_state != (empty ? 1 : 0)) {
+            ui->chat_empty_state = empty ? 1 : 0;
+            RedrawWindow(ui->empty_agent, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+        }
     }
     if (ui->empty_chats) {
         ShowWindow(ui->empty_chats, ui->thread_ids.empty() ? SW_SHOW : SW_HIDE);
@@ -4481,72 +4758,33 @@ void choose_status_environment(Ui* ui) {
 
 void apply_stream(Ui* ui) {
     const auto visible_stream = visible_chat_text(ui->session.stream_buffer);
-    if (ui->session.transcript_replace) {
-        ui->markdown_stream_start = -1;
-        ui->agent_heading_pending = false;
-        close_attachment_windows(ui);
-        ui->message_attachments.clear();
-        SetWindowTextW(ui->transcript, L"");
-        set_rich_colors(ui->transcript, kWindow, 14, L"Segoe UI");
-        for (std::size_t i = 0; i < ui->session.history_messages.size(); ++i) {
-            if (i > 0) {
-                append_divider(ui->transcript);
-            }
-            const auto& message = ui->session.history_messages[i];
-            if (message.user) {
-                const auto display = parse_user_display(message.text);
-                append_user_message(ui->transcript, utf16(display.text));
-                append_attachment_footer(ui, display.attachments);
-            } else {
-                append_agent_message(ui->transcript, utf16(message.user ? message.text : visible_chat_text(message.text)));
-            }
+    if (!ui->session.transcript_replace && visible_stream == ui->shown_stream) return;
+    std::vector<ChatLogMessage> messages;
+    messages.reserve(ui->session.history_messages.size() + 1);
+    for (const auto& message : ui->session.history_messages) {
+        ChatLogMessage row;
+        row.user = message.user;
+        if (message.user) {
+            const auto display = parse_user_display(message.text);
+            row.text = utf16(display.text);
+            row.attachments = display.attachments;
+        } else {
+            row.text = utf16(visible_chat_text(message.text));
         }
-        if (ui->session.active_thread_busy() && !visible_stream.empty()) {
-            if (!ui->session.history_messages.empty()) append_divider(ui->transcript);
-            append_rich(ui->transcript, L"Agent\r\n", kAccent, true);
-            CHARRANGE end{-1, -1};
-            SendMessageW(ui->transcript, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&end));
-            SendMessageW(ui->transcript, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&end));
-            ui->markdown_stream_start = end.cpMin;
-            ui_kit::append_markdown(ui->transcript, utf16(visible_stream));
-        }
-        ui->shown_stream = visible_stream;
-        ui->session.transcript_replace = false;
-        SendMessageW(ui->transcript, EM_SETSEL, -1, -1);
-        SendMessageW(ui->transcript, EM_SCROLLCARET, 0, 0);
-        SendMessageW(ui->transcript, WM_VSCROLL, SB_BOTTOM, 0);
-        refresh_thin_scrollbar(ui->transcript);
-        return;
+        messages.push_back(std::move(row));
     }
-    if (visible_stream == ui->shown_stream) return;
-    bool follow = at_bottom(ui->transcript);
-    POINT scroll{}; SendMessageW(ui->transcript, EM_GETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&scroll));
-    CHARRANGE selection{}; SendMessageW(ui->transcript, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&selection));
-    follow = follow && selection.cpMin == selection.cpMax;
-    const bool first_agent_content = ui->agent_heading_pending && !visible_stream.empty();
-    if (first_agent_content) {
-        append_rich(ui->transcript, L"Agent\r\n", kAccent, true);
-        ui->agent_heading_pending = false;
-        follow = true;
+    if (ui->session.active_thread_busy() && !visible_stream.empty()) {
+        // A completing turn still reports busy for a moment after its final assistant message has
+        // landed in history; appending the live row again showed the same reply twice.
+        const auto live = utf16(visible_stream);
+        const bool already_in_history =
+            !messages.empty() && !messages.back().user && messages.back().text == live;
+        if (!already_in_history) messages.push_back({false, live, {}});
     }
-    if (ui->markdown_stream_start < 0) {
-        CHARRANGE end{-1, -1}; SendMessageW(ui->transcript, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&end));
-        SendMessageW(ui->transcript, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&end));
-        ui->markdown_stream_start = end.cpMin;
-    }
-    SendMessageW(ui->transcript, WM_SETREDRAW, FALSE, 0);
-    CHARRANGE tail{ui->markdown_stream_start, -1};
-    SendMessageW(ui->transcript, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&tail));
-    SendMessageW(ui->transcript, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(L""));
-    ui_kit::trim_markdown_links(ui->transcript, ui->markdown_stream_start);
-    ui_kit::append_markdown(ui->transcript, utf16(visible_stream));
-    if (!follow) {
-        SendMessageW(ui->transcript, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&selection));
-        SendMessageW(ui->transcript, EM_SETSCROLLPOS, 0, reinterpret_cast<LPARAM>(&scroll));
-    } else SendMessageW(ui->transcript, WM_VSCROLL, SB_BOTTOM, 0);
-    SendMessageW(ui->transcript, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(ui->transcript, nullptr, TRUE);
+    chat_log_set_messages(ui->chat_log, std::move(messages));
+    chat_log_scroll_bottom(ui->chat_log);
     ui->shown_stream = visible_stream;
+    ui->session.transcript_replace = false;
 }
 
 void persist_window(Ui* ui) {
@@ -4795,7 +5033,23 @@ void append_attachment_footer(Ui* ui, const std::vector<DisplayAttachment>& atta
     if (!ui || attachments.empty()) return;
     const std::wstring key = utf16(make_uuid());
     ui->message_attachments[key] = attachments;
-    const std::wstring label = L"(" + std::to_wstring(attachments.size()) + L") Attachments       [+]";
+    // Keep the whole compact footer as one left-aligned hit target. The renderer
+    // gives this attachment link a filled background, matching the file-browser
+    // CTA and allowing the thumbnail tray to open from either the plus or label.
+    std::wstring label = L" +   (" + std::to_wstring(attachments.size()) + L") Attachments";
+    RECT client{};
+    GetClientRect(ui->transcript, &client);
+    HDC dc = GetDC(ui->transcript);
+    HFONT font = reinterpret_cast<HFONT>(SendMessageW(ui->transcript, WM_GETFONT, 0, 0));
+    HGDIOBJ previous = font ? SelectObject(dc, font) : nullptr;
+    TEXTMETRICW metrics{};
+    GetTextMetricsW(dc, &metrics);
+    if (previous) SelectObject(dc, previous);
+    ReleaseDC(ui->transcript, dc);
+    const int char_width = (std::max)(1, static_cast<int>(metrics.tmAveCharWidth));
+    const int fill = (std::max)(
+        0, static_cast<int>((client.right - client.left) / char_width) - static_cast<int>(label.size()) - 2);
+    label.append(static_cast<std::size_t>(fill), L' ');
     ui_kit::append_markdown(ui->transcript, L"[" + label + L"](scylla-attachments:" + key + L")\n");
 }
 
@@ -4808,8 +5062,17 @@ void show_attachment_tray(Ui* ui, const std::wstring& key, HWND source, long pos
     const int tile = dip(ui->wnd, 72), gap = dip(ui->wnd, 10);
     for (const auto& attachment : state->attachments)
         state->thumbs.push_back(attachment.image ? load_file_thumb(utf16(attachment.path), tile - 8) : nullptr);
-    POINTL point{}; SendMessageW(source, EM_POSFROMCHAR, reinterpret_cast<WPARAM>(&point), position);
-    POINT screen{point.x, point.y + dip(ui->wnd, 24)}; ClientToScreen(source, &screen);
+    POINT screen{};
+    if (source == ui->chat_log) {
+        RECT source_rect{};
+        GetWindowRect(source, &source_rect);
+        screen = {source_rect.left + dip(ui->wnd, 12), source_rect.top + dip(ui->wnd, 24)};
+    } else {
+        POINTL point{};
+        SendMessageW(source, EM_POSFROMCHAR, reinterpret_cast<WPARAM>(&point), position);
+        screen = {point.x, point.y + dip(ui->wnd, 24)};
+        ClientToScreen(source, &screen);
+    }
     const int width = (std::min)(static_cast<int>(state->attachments.size()), 6) * (tile + gap) - gap;
     HMONITOR monitor = MonitorFromPoint(screen, MONITOR_DEFAULTTONEAREST);
     MONITORINFO info{sizeof(info)}; GetMonitorInfoW(monitor, &info);
@@ -4964,12 +5227,24 @@ void do_send(Ui* ui) {
     }
     const ProviderId def = provider_id_from_string(ui->session.settings.default_provider);
     if (!provider_can_send(def)) {
-        SetWindowTextW(ui->status, def == ProviderId::Claude ? L"Connect Claude under Settings → AI Providers"
-                                                             : L"Sign in with ChatGPT to send");
+        if (def == ProviderId::Claude) {
+            SetWindowTextW(ui->status, L"Connect Claude Account under Settings → Agent Providers");
+        } else if (def == ProviderId::ClaudeApi) {
+            SetWindowTextW(ui->status, L"Connect Claude API key under Settings → Agent Providers");
+        } else if (def == ProviderId::OpenAiApi) {
+            SetWindowTextW(ui->status, L"Connect OpenAI API key under Settings → Agent Providers");
+        } else {
+            SetWindowTextW(ui->status, L"Sign in with ChatGPT to send");
+        }
         return;
     }
     if (def == ProviderId::OpenAI && !ui->session.account.signed_in) {
         SetWindowTextW(ui->status, L"Sign in with ChatGPT to send");
+        return;
+    }
+    if ((def == ProviderId::OpenAiApi || def == ProviderId::ClaudeApi) &&
+        ui->session.models_for_provider(ui->session.settings.default_provider, true).empty()) {
+        SetWindowTextW(ui->status, L"Enable at least one API model under Settings → Agent Providers");
         return;
     }
     const auto mode = static_cast<WorkflowMode>(ui_kit::select_get_data(ui->workflow));
@@ -4987,6 +5262,7 @@ void do_send(Ui* ui) {
     if (text.empty() && ui->images.empty()) {
         return;
     }
+    const bool scylla_query = consume_scylla_query_slash(&text);
     std::vector<DisplayAttachment> display_attachments;
     for (const auto& chip : ui->session.context_chips) {
         if (!chip.path.empty()) display_attachments.push_back({utf8(chip.path), chip.label, chip.kind == "image"});
@@ -5003,29 +5279,33 @@ void do_send(Ui* ui) {
     }
     clear_composer_images(ui);
     const std::wstring display = text.empty() ? L"(image attachment)" : text;
-    GETTEXTLENGTHEX gtl{};
-    gtl.flags = GTL_DEFAULT;
-    gtl.codepage = 1200;
-    const bool had_content = SendMessageW(ui->transcript, EM_GETTEXTLENGTHEX, reinterpret_cast<WPARAM>(&gtl), 0) > 0;
-    if (had_content) {
-        append_divider(ui->transcript);
-    }
-    append_user_message(ui->transcript, display);
-    append_attachment_footer(ui, display_attachments);
-    append_divider(ui->transcript);
     ui->agent_heading_pending = true;
     ui->session.stream_buffer.clear();
     ui->shown_stream.clear();
     ui->markdown_stream_start = -1;
-    const auto sources = agent_file_catalog(ui->knowledge, ui->session.store.active_project_id, ui->session.project_root);
+    const auto* active_project = ui->session.store.active();
+    const auto sources = agent_file_catalog(ui->knowledge, ui->session.store.active_project_id,
+                                            ui->session.project_root,
+                                            active_project ? active_project->roots : std::vector<std::wstring>{});
     ui->session.chat_title_seed = utf8(display);
     ui->restore_chat_pending = false;
-    ui->session.send_user(user_display_metadata(utf8(display), display_attachments) + workflow_source_manifest(sources, ui->session.project_root, utf8(display)) + workflow_instructions(mode, plan_directory, utf8(folder_name(ui->session.project_root))) +
-                          utf8(text.empty() ? display : text));
-    SendMessageW(ui->transcript, EM_SETSEL, -1, -1);
-    SendMessageW(ui->transcript, EM_SCROLLCARET, 0, 0);
-    SendMessageW(ui->transcript, WM_VSCROLL, SB_BOTTOM, 0);
-    refresh_thin_scrollbar(ui->transcript);
+    std::string skill;
+    if (scylla_query) {
+        const std::string catalog = format_keyring_name_catalog(
+            &ui->keyring_ui.keyring(), &ui->environments, ui->session.store.active_project_id);
+        skill = scylla_query_instructions(catalog, broker_query_tool_available(ui));
+    } else if (composer_text_has_bang_keyring_token(text)) {
+        skill = keyring_bang_token_instructions();
+    }
+    ui->session.send_user(user_display_metadata(utf8(display), display_attachments) +
+                          workflow_source_manifest(sources, ui->session.project_root, utf8(display),
+                                                   active_project ? active_project->roots
+                                                                  : std::vector<std::wstring>{}) +
+                          workflow_instructions(mode, plan_directory,
+                                                utf8(folder_name(ui->session.project_root))) +
+                          skill + utf8(text.empty() ? display : text));
+    ui->session.transcript_replace = true;
+    apply_stream(ui);
     SetWindowTextW(ui->composer, L"");
     ui->session.set_draft(ui->session.active_thread_id, "");
     refresh_chrome(ui);
@@ -5033,10 +5313,11 @@ void do_send(Ui* ui) {
 }
 
 void do_open_folder(Ui* ui) {
-    std::wstring folder;
-    if (!pick_folder(ui->wnd, folder)) {
+    std::vector<std::wstring> folders;
+    if (!pick_folders(ui->wnd, folders)) {
         return;
     }
+    const std::wstring& folder = folders.front();
     if (_wcsicmp(folder.c_str(), ui->session.project_root.c_str()) != 0 &&
         !confirm_project_switch_with_live_terminals(ui)) {
         return;
@@ -5049,6 +5330,7 @@ void do_open_folder(Ui* ui) {
     ui->keyring_ui.on_project_switching(p->id, p->name);
     ui->session.project_root = p->root;
     ui->session.settings.project_folder = p->root;
+    for (std::size_t i = 1; i < folders.size(); ++i) ui->session.store.add_root(p->id, folders[i]);
     persist_store(ui);
     save_settings(ui->session.paths.settings_path, ui->session.settings);
     ui->session.sync_lockdown_config();
@@ -5065,6 +5347,30 @@ void do_open_folder(Ui* ui) {
     layout(ui);
 }
 
+void do_add_authorized_folders(Ui* ui) {
+    std::vector<std::wstring> folders;
+    if (!pick_folders(ui->wnd, folders)) return;
+    bool changed = false;
+    auto* project = ui->session.store.active();
+    if (!project) {
+        project = ui->session.store.open_or_create(folders.front());
+        if (!project) return;
+        ui->session.project_root = project->root;
+        ui->session.settings.project_folder = project->root;
+        folders.erase(folders.begin());
+        changed = true;
+    }
+    for (const auto& folder : folders) changed = ui->session.store.add_root(project->id, folder) || changed;
+    if (!changed) return;
+    persist_store(ui);
+    ui->session.sync_lockdown_config();
+    rebuild_tree(ui);
+    if (ui->content_view == ContentView::Access) populate_content_body(ui);
+    refresh_projects(ui);
+    refresh_chrome(ui);
+    layout(ui);
+}
+
 void toggle_mode(int& mode, bool currently_shown) {
     if (currently_shown) {
         mode = 2;
@@ -5076,6 +5382,35 @@ void toggle_mode(int& mode, bool currently_shown) {
 void apply_mcp_alias_popup(Ui* ui);
 void close_mcp_alias_popup(Ui* ui);
 void update_mcp_alias_popup(Ui* ui);
+std::wstring mention_composer_text(HWND composer);
+void refresh_composer_token_styles(Ui* ui);
+
+void refresh_composer_token_styles(Ui* ui) {
+    if (!ui || !ui->composer) return;
+    const auto text = mention_composer_text(ui->composer);
+    CHARRANGE caret{};
+    SendMessageW(ui->composer, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&caret));
+    CHARRANGE all{0, -1};
+    SendMessageW(ui->composer, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&all));
+    CHARFORMAT2W base{};
+    base.cbSize = sizeof(base);
+    base.dwMask = CFM_COLOR | CFM_BOLD | CFM_UNDERLINE | CFM_LINK;
+    base.crTextColor = kText;
+    base.dwEffects = 0;
+    SendMessageW(ui->composer, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&base));
+    for (const auto& span : find_scylla_query_spans(text)) {
+        CHARRANGE range{static_cast<LONG>(span.begin), static_cast<LONG>(span.end)};
+        SendMessageW(ui->composer, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&range));
+        CHARFORMAT2W amber{};
+        amber.cbSize = sizeof(amber);
+        amber.dwMask = CFM_COLOR | CFM_BOLD;
+        amber.crTextColor = theme().amber;
+        amber.dwEffects = CFE_BOLD;
+        SendMessageW(ui->composer, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&amber));
+    }
+    SendMessageW(ui->composer, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&caret));
+}
+
 LRESULT CALLBACK composer_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     Ui* ui = g_ui;
     if (!ui || !ui->composer_prev) {
@@ -5157,21 +5492,25 @@ void apply_mcp_alias_popup(Ui* ui) {
     if (!ui || !ui->mcp_alias_popup) return;
     const int selected = static_cast<int>(SendMessageW(ui->mcp_alias_popup, LB_GETCURSEL, 0, 0));
     if (selected < 0 || selected >= static_cast<int>(ui->mcp_alias_completions.size())) return;
+    if (ui->mcp_alias_completions[selected].empty()) return;  // hint row, nothing to insert
     const auto completion = utf16(ui->mcp_alias_completions[selected]);
     const auto text = mention_composer_text(ui->composer);
     CHARRANGE range{};
     SendMessageW(ui->composer, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&range));
     std::size_t start = std::min(text.size(), static_cast<std::size_t>((std::max)(0L, range.cpMin)));
     while (start > 0 && !iswspace(text[start - 1])) --start;
-    if (start >= text.size() || text[start] != L'@') return;
+    if (start >= text.size()) return;
+    const wchar_t lead = text[start];
+    if (lead != L'@' && lead != L'/' && lead != L'!') return;
     range.cpMin = static_cast<LONG>(start);
-    // Copy completion before closing; EN_CHANGE can rebuild the suggestions synchronously.
     close_mcp_alias_popup(ui);
     SetFocus(ui->composer);
     SendMessageW(ui->composer, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&range));
     const auto replacement = completion + L" ";
     SendMessageW(ui->composer, EM_REPLACESEL, TRUE, reinterpret_cast<LPARAM>(replacement.c_str()));
+    refresh_composer_token_styles(ui);
 }
+
 void update_mcp_alias_popup(Ui* ui) {
     if (!ui || !ui->composer || !ui->wnd) {
         return;
@@ -5184,14 +5523,39 @@ void update_mcp_alias_popup(Ui* ui) {
     std::size_t i = end;
     while (i > 0 && !iswspace(text[i - 1])) --i;
     const auto token = text.substr(i, end - i);
-    if (token.empty() || token[0] != L'@') { close_mcp_alias_popup(ui); return; }
-    if (!ui->mcp_alias_popup) ui->mention_files = agent_file_catalog(ui->knowledge, ui->session.store.active_project_id, ui->session.project_root);
-    auto comps = ui->mcp.alias_completions(utf8(token.substr(1)));
-    for (auto& c : comps) c.first = "@" + c.first;
-    for (const auto& file : match_agent_files(ui->mention_files, token.substr(1))) {
-        // Quoted absolute references remain unambiguous for spaces and duplicate basenames.
-        comps.emplace_back("@\"" + utf8(file.path) + "\"", file.label);
-    }    if (comps.empty()) {
+    if (token.empty() || (token[0] != L'@' && token[0] != L'/' && token[0] != L'!')) {
+        close_mcp_alias_popup(ui);
+        return;
+    }
+
+    std::vector<std::pair<std::string, std::wstring>> comps;
+    if (token[0] == L'/') {
+        if (const auto skill = slash_skill_completion_for_token(token); !skill.empty()) {
+            comps.emplace_back(utf8(skill), L"Slash skill");
+        }
+    } else if (token[0] == L'!') {
+        auto& keyring = ui->keyring_ui.keyring();
+        if (keyring.vault_bound() && keyring.is_unlocked()) {
+            comps = filter_keyring_bang_completions(keyring.list_refs_for_ui(ui->session.store.active_project_id),
+                                                    token);
+        } else if (keyring.vault_bound()) {
+            // Empty insert text marks a non-insertable hint row.
+            comps.emplace_back("", L"Keyring locked — unlock to insert a reference");
+        }
+    } else {
+        if (!ui->mcp_alias_popup) {
+            const auto* active_project = ui->session.store.active();
+            ui->mention_files = agent_file_catalog(ui->knowledge, ui->session.store.active_project_id,
+                                                   ui->session.project_root,
+                                                   active_project ? active_project->roots : std::vector<std::wstring>{});
+        }
+        comps = ui->mcp.alias_completions(utf8(token.substr(1)));
+        for (auto& c : comps) c.first = "@" + c.first;
+        for (const auto& file : match_agent_files(ui->mention_files, token.substr(1))) {
+            comps.emplace_back("@\"" + utf8(file.path) + "\"", file.label);
+        }
+    }
+    if (comps.empty()) {
         close_mcp_alias_popup(ui);
         return;
     }
@@ -5209,13 +5573,23 @@ void update_mcp_alias_popup(Ui* ui) {
         SendMessageW(ui->mcp_alias_popup, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font), TRUE);
         apply_dark_child(ui->mcp_alias_popup);
         install_thin_scrollbar(ui->mcp_alias_popup, theme().menu);
+        if (token[0] == L'@') {
+            const auto* active_project = ui->session.store.active();
+            ui->mention_files = agent_file_catalog(ui->knowledge, ui->session.store.active_project_id,
+                                                   ui->session.project_root,
+                                                   active_project ? active_project->roots : std::vector<std::wstring>{});
+        }
     }
 
     SendMessageW(ui->mcp_alias_popup, LB_RESETCONTENT, 0, 0);
     ui->mcp_alias_completions.clear();
     for (const auto& c : comps) {
-        std::wstring row = c.first.starts_with("@\"") ? c.second + L"  —  file"
-            : utf16(c.first) + L"  —  " + c.second;
+        std::wstring row;
+        if (c.first.empty()) row = c.second;
+        else if (c.first.starts_with("@\"")) row = c.second + L"  —  file";
+        else if (c.first.starts_with("!")) row = utf16(c.first) + L"  —  " + c.second;
+        else if (c.first.starts_with("/")) row = utf16(c.first) + L"  —  " + c.second;
+        else row = utf16(c.first) + L"  —  " + c.second;
         SendMessageW(ui->mcp_alias_popup, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(row.c_str()));
         ui->mcp_alias_completions.push_back(c.first);
     }
@@ -5254,7 +5628,7 @@ void create_controls(Ui* ui, HWND hwnd) {
     ui->tab_agent = mk(hwnd, L"BUTTON", L"Agent", btn, ID_TAB_AGENT);
     ui->hdr_files = mk(hwnd, L"STATIC", L"  Files", 0, ID_HDR_FILES);
     ui->filter = mk(hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL | ES_MULTILINE, ID_FILTER);
-    ui->tree = mk(hwnd, WC_TREEVIEWW, L"", WS_TABSTOP | TVS_HASBUTTONS | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | TVS_TRACKSELECT,
+    ui->tree = mk(hwnd, WC_TREEVIEWW, L"", WS_TABSTOP | TVS_HASBUTTONS | TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | TVS_TRACKSELECT,
                    ID_TREE);
     ui->knowledge_tree = mk(hwnd, WC_TREEVIEWW, L"", WS_TABSTOP | TVS_HASBUTTONS | TVS_LINESATROOT |
         TVS_SHOWSELALWAYS | TVS_FULLROWSELECT | TVS_INFOTIP, ID_KNOWLEDGE_TREE);
@@ -5302,16 +5676,8 @@ void create_controls(Ui* ui, HWND hwnd) {
     apply_dark_child(ui->content_body);
     install_thin_scrollbar(ui->content_body, theme().panel);
     install_thin_scrollbar(ui->content_nav, theme().navigation);
-    ui->set_oa_status = mk(hwnd, L"STATIC", L"", 0, ID_SET_OA_STATUS);
-    ui->set_oa_signin = mk(hwnd, L"BUTTON", L"Sign in with ChatGPT", btn, ID_SET_OA_SIGNIN);
-    ui->set_oa_signout = mk(hwnd, L"BUTTON", L"Sign out", btn, ID_SET_OA_SIGNOUT);
-    ui->set_cl_status = mk(hwnd, L"STATIC", L"", 0, ID_SET_CL_STATUS);
-    ui->set_cursor_status = ui_kit::create_static(hwnd, GetModuleHandleW(nullptr), 0, L"Cursor ACP", ui->font);
-    ui->set_cl_key = mk(hwnd, L"BUTTON", L"Connect API key…", btn, ID_SET_CL_KEY);
-    ui->set_cl_code = mk(hwnd, L"BUTTON", L"Sign in with Claude Code", btn, ID_SET_CL_CODE);
-    ui->set_cl_disc = mk(hwnd, L"BUTTON", L"Disconnect", btn, ID_SET_CL_DISC);
-    ui->set_def_label = mk(hwnd, L"STATIC", L"Active agent", 0, ID_SET_DEF_LABEL);
-    ui->set_def_combo = mk(hwnd, L"BUTTON", L"Choose agent…", btn, ID_SET_DEF_COMBO);
+    ui->providers_ui.create(hwnd, reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE)), ui->font,
+                            ui->font_small ? ui->font_small : ui->font);
     ui->set_codex = mk(hwnd, L"BUTTON", L"Codex executable…", btn, ID_SET_CODEX);
     ui->set_copy_runtime = mk(hwnd, L"BUTTON", L"Copy runtime path", btn, ID_SET_COPY_RUNTIME);
     ui->set_wrap = mk(hwnd, L"BUTTON", L"Word wrap", btn, ID_SET_WRAP);
@@ -5336,6 +5702,7 @@ void create_controls(Ui* ui, HWND hwnd) {
     ui->strata_ui.create(hwnd, GetModuleHandleW(nullptr), ui->font);
     ui->keyring_ui.create(hwnd, ui->font, ui->font_small, ui->font_semi);
     ui->environment_ui.create(hwnd, GetModuleHandleW(nullptr), ui->font, ui->font_small);
+    ui->connections_ui.create(hwnd, GetModuleHandleW(nullptr), ui->font, ui->font_small);
     ui->security_overview.create(hwnd, GetModuleHandleW(nullptr), ui->font, ui->font_small);
     ui->security_policy.create(hwnd, GetModuleHandleW(nullptr), ui->font, ui->font_small);
     ui->sec_tab_overview =
@@ -5347,12 +5714,16 @@ void create_controls(Ui* ui, HWND hwnd) {
     ui->sec_tab_environments =
         ui_kit::create_button(hwnd, GetModuleHandleW(nullptr), Cmd_SecTabEnvironments, L"Project Environments",
                               ui_kit::ButtonKind::Secondary, ui->font);
+    ui->sec_tab_connections =
+        ui_kit::create_button(hwnd, GetModuleHandleW(nullptr), Cmd_SecTabConnections, L"Connections",
+                              ui_kit::ButtonKind::Secondary, ui->font);
     ui->sec_tab_policy =
         ui_kit::create_button(hwnd, GetModuleHandleW(nullptr), Cmd_SecTabPolicy, L"Execution Policy",
                               ui_kit::ButtonKind::Secondary, ui->font);
     ShowWindow(ui->sec_tab_overview, SW_HIDE);
     ShowWindow(ui->sec_tab_keyring, SW_HIDE);
     ShowWindow(ui->sec_tab_environments, SW_HIDE);
+    ShowWindow(ui->sec_tab_connections, SW_HIDE);
     ShowWindow(ui->sec_tab_policy, SW_HIDE);
     ui->terminal_ui.create(hwnd, GetModuleHandleW(nullptr), ui->font);
     ui->ui_gallery.create(hwnd, GetModuleHandleW(nullptr), ui->font);
@@ -5382,8 +5753,49 @@ void create_controls(Ui* ui, HWND hwnd) {
     ui->empty_agent = mk(hwnd, L"STATIC", L"", SS_OWNERDRAW, 0);
     ui->activity = ui_kit::create_document_view(hwnd, GetModuleHandleW(nullptr), 0, ui->font_small);
     ui->transcript = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
-                                    WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 0, 0,
-                                    hwnd, reinterpret_cast<HMENU>(ID_TRANSCRIPT), nullptr, nullptr);
+                                     WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL, 0, 0, 0, 0,
+                                     hwnd, reinterpret_cast<HMENU>(ID_TRANSCRIPT), nullptr, nullptr);
+    // Keep link notifications enabled for the transcript for its entire lifetime.
+    // Attachment footers are appended after history reloads as well as during send.
+    SendMessageW(ui->transcript, EM_SETEVENTMASK, 0,
+                 SendMessageW(ui->transcript, EM_GETEVENTMASK, 0, 0) | ENM_LINK);
+    ui->chat_log = chat_log_create(
+        hwnd, ui->font,
+        [ui](const std::vector<DisplayAttachment>& attachments) {
+            if (attachments.empty()) return;
+            const std::wstring key = utf16(make_uuid());
+            ui->message_attachments[key] = attachments;
+            show_attachment_tray(ui, key, ui->chat_log, 0);
+        },
+        [ui](const std::wstring& path) {
+            if (path.empty()) return;
+            std::wstring resolved = path;
+            const bool looks_absolute =
+                (path.size() >= 2 && path[1] == L':') ||
+                (!path.empty() && (path[0] == L'\\' || path[0] == L'/'));
+            if (!looks_absolute) {
+                const auto* active_project = ui->session.store.active();
+                const auto catalog =
+                    agent_file_catalog(ui->knowledge, ui->session.store.active_project_id,
+                                       ui->session.project_root,
+                                       active_project ? active_project->roots : std::vector<std::wstring>{});
+                for (const auto& file : catalog) {
+                    const auto slash = file.path.find_last_of(L"\\/");
+                    const auto base =
+                        slash == std::wstring::npos ? file.path : file.path.substr(slash + 1);
+                    if (_wcsicmp(base.c_str(), path.c_str()) == 0 ||
+                        _wcsicmp(file.label.c_str(), path.c_str()) == 0) {
+                        resolved = file.path;
+                        break;
+                    }
+                }
+            }
+            if (open_document(ui, resolved, true)) {
+                show_editor_content(ui);
+                layout(ui);
+            }
+        });
+    ShowWindow(ui->chat_log, SW_HIDE);
     ui->composer_panel = mk(hwnd, L"STATIC", L"", SS_OWNERDRAW | SS_NOTIFY | WS_CLIPSIBLINGS, 0);
     ui->composer = CreateWindowExW(0, MSFTEDIT_CLASS, L"",
                                     WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_WANTRETURN | WS_TABSTOP, 0, 0, 0, 0,
@@ -5391,7 +5803,7 @@ void create_controls(Ui* ui, HWND hwnd) {
     ui->send = mk(hwnd, L"BUTTON", L"Send", btn | BS_OWNERDRAW, ID_SEND);
     ui->cancel = mk(hwnd, L"BUTTON", L"Stop", btn | BS_OWNERDRAW, ID_CANCEL);
     ShowWindow(ui->cancel, SW_HIDE);
-    ui->composer_cue = mk(hwnd, L"STATIC", L"Message your agent", SS_NOTIFY, 0);
+    ui->composer_cue = mk(hwnd, L"STATIC", L"Message your agent  ·  /scylla-query for DB handoff", SS_NOTIFY, 0);
     ui->hdr_history = mk(hwnd, L"STATIC", L"  Chats", 0, ID_HDR_HISTORY);
     ShowWindow(ui->hdr_history, SW_HIDE);
     ui->scope = mk(hwnd, L"BUTTON", L"Current project", btn, ID_SCOPE);
@@ -5457,6 +5869,10 @@ void create_controls(Ui* ui, HWND hwnd) {
     install_thin_scrollbar(ui->transcript, kWindow);
     install_thin_scrollbar(ui->editor, kEditor);
     install_thin_scrollbar(ui->composer, kInput);
+    // RichEdit sends no EN_CHANGE unless asked. Without this the composer's token styling,
+    // autocomplete popup, and auto-grow never run.
+    SendMessageW(ui->composer, EM_SETEVENTMASK, 0,
+                 SendMessageW(ui->composer, EM_GETEVENTMASK, 0, 0) | ENM_CHANGE);
     ui->composer_prev =
         reinterpret_cast<WNDPROC>(SetWindowLongPtrW(ui->composer, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(composer_proc)));
     ui->panel_prev = reinterpret_cast<WNDPROC>(
@@ -5503,14 +5919,14 @@ void apply_fonts(Ui* ui) {
                     ui->tab_editor, ui->tab_agent, ui->models, ui->threads, ui->filter, ui->search, ui->tree, ui->knowledge_tree, ui->knowledge_header, ui->knowledge_manage, ui->tabs,
                     ui->chat_tabs, ui->find, ui->find_toggle, ui->save, ui->scope, ui->ctx, ui->add_file, ui->workflow,
                     ui->pin, ui->archive, ui->empty_open_file, ui->empty_open_folder, ui->composer_cue, ui->account,
-                    ui->content_back, ui->content_title, ui->content_nav, ui->content_body, ui->set_oa_status,
-                    ui->set_oa_signin, ui->set_oa_signout, ui->set_cl_status, ui->set_cursor_status, ui->set_cl_key, ui->set_cl_code,
-                    ui->set_cl_disc, ui->set_def_label, ui->set_def_combo, ui->set_codex, ui->set_copy_runtime, ui->set_wrap,
+                    ui->content_back, ui->content_title, ui->content_nav, ui->content_body, ui->set_codex,
+                    ui->set_copy_runtime, ui->set_wrap,
                     ui->set_whitespace, ui->set_enter_sends, ui->gs_open_folder, ui->gs_providers}) {
         if (h) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font), TRUE);
         }
     }
+    ui->providers_ui.set_fonts(ui->font, ui->font_small);
     SendMessageW(ui->account, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font_small), TRUE);
     SendMessageW(ui->agent_hint, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font_small), TRUE);
     SendMessageW(ui->activity, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font_small), TRUE);
@@ -5522,6 +5938,7 @@ void apply_fonts(Ui* ui) {
     if (ui->content_title) {
         SendMessageW(ui->content_title, WM_SETFONT, reinterpret_cast<WPARAM>(ui->font_semi), TRUE);
     }
+    chat_log_set_font(ui->chat_log, ui->font);
 }
 
 bool pt_in(const RECT& r, int x, int y) {
@@ -5538,10 +5955,14 @@ HBRUSH brush_for(Ui* ui, HWND child) {
     if (child == ui->hdr_agent || child == ui->agent_hint || child == ui->ctx || child == ui->chat_tabs) {
         return ui->agent_br;
     }
+    if (ui->providers_ui.on_card(child)) {
+        return ui->agent_br;  // provider cards are raised (theme.surface)
+    }
     if (child == ui->content_host || child == ui->content_title || child == ui->content_body || child == ui->content_nav ||
-        child == ui->set_oa_status || child == ui->set_cl_status || child == ui->set_def_label ||
+        ui->providers_ui.owns_hwnd(child) ||
         ui->keyring_ui.owns_hwnd(child) || ui->environment_ui.owns_hwnd(child) ||
-        ui->security_overview.owns_hwnd(child) || ui->security_policy.owns_hwnd(child)) {
+        ui->connections_ui.owns_hwnd(child) || ui->security_overview.owns_hwnd(child) ||
+        ui->security_policy.owns_hwnd(child)) {
         return ui->editor_br;
     }
     return ui->bg;
@@ -5591,6 +6012,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             ui->session.set_mcp_manager(&ui->mcp);
             ui->strata.load(ui->session.paths.strata_path);
             ui->environments.load(ui->session.paths.environments_path);
+            ui->connections.load(ui->session.paths.connections_path);
+            start_query_broker(ui);
             reload_terminal_profiles(ui);
             ui->session.selected_model = ui->session.settings.selected_model;
             ui->session.sync_claude_models();
@@ -5715,6 +6138,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             SelectObject(dc, old);
             DeleteObject(pen);
+            if (ui->content_view == ContentView::Settings && ui->settings_section == SettingsSection::Providers) {
+                ui->providers_ui.paint_chrome(dc);
+            }
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -5873,7 +6299,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             auto* mi = reinterpret_cast<MEASUREITEMSTRUCT*>(lparam);
             if (mi->CtlType == ODT_LISTBOX) {
                 if (ui->mcp_ui.measure_item(mi) || ui->terminal_ui.measure_item(mi) ||
-                    ui->knowledge_ui.measure_item(mi) || ui->environment_ui.measure_item(mi)) {
+                    ui->knowledge_ui.measure_item(mi) || ui->environment_ui.measure_item(mi) ||
+                    ui->connections_ui.measure_item(mi) || ui->providers_ui.measure_item(mi)) {
                     return TRUE;
                 }
                 if (mi->CtlID == ID_THREADS) {
@@ -5899,6 +6326,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             }
             if (ui->terminal_ui.draw_item(di, ui->font) || ui->knowledge_ui.draw_item(di, ui->font) ||
                 ui->mcp_ui.draw_item(di, ui->font) || ui->environment_ui.draw_item(di, ui->font) ||
+                ui->connections_ui.draw_item(di, ui->font) || ui->providers_ui.draw_item(di, ui->font) ||
                 ui->ui_gallery.draw_item(di, ui->font)) {
                 return TRUE;
             }
@@ -5909,7 +6337,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     vis = BtnVisual::Primary;
                 } else if (di->CtlID == ID_PROJECT || di->CtlID == ID_SCOPE) {
                     vis = BtnVisual::Selector;
-                } else if (di->CtlID == ID_MODELS || di->CtlID == ID_SET_DEF_COMBO) {
+                } else if (di->CtlID == ID_MODELS) {
                     vis = BtnVisual::Selector;
                 } else if (di->CtlID == ID_ADD_FILE || di->CtlID == ID_ADD_SEL) {
                     vis = BtnVisual::Quiet;
@@ -6331,6 +6759,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 ui->message_attachments.clear();
                 SetWindowTextW(ui->composer, L"");
                 SetWindowTextW(ui->transcript, L"");
+                chat_log_clear(ui->chat_log);
                 ui->shown_stream.clear();
                 ui->markdown_stream_start = -1;
                 ui->agent_heading_pending = false;
@@ -6370,13 +6799,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 PostMessageW(hwnd, WM_SCYLLA_OPEN_SEL, ID_PROJECT, reinterpret_cast<LPARAM>(ui->project));
             } else if (id == ID_MODELS && code == BN_CLICKED) {
                 PostMessageW(hwnd, WM_SCYLLA_OPEN_SEL, ID_MODELS, reinterpret_cast<LPARAM>(ui->models));
-            } else if (id == ID_SET_DEF_COMBO && code == BN_CLICKED) {
-                // Same agent catalog as the header — not a separate OpenAI/Claude stub list.
-                PostMessageW(hwnd, WM_SCYLLA_OPEN_SEL, ID_MODELS, reinterpret_cast<LPARAM>(ui->set_def_combo));
             } else if (id == ID_SCOPE && code == BN_CLICKED) {
                 PostMessageW(hwnd, WM_SCYLLA_OPEN_SEL, ID_SCOPE, reinterpret_cast<LPARAM>(ui->scope));
             } else if (id == ID_COMPOSER && code == EN_CHANGE) {
                 ShowWindow(ui->composer_cue, get_window_text(ui->composer).empty() ? SW_SHOW : SW_HIDE);
+                refresh_composer_token_styles(ui);
+                // Grow before the popup is placed; the popup anchors to the composer rect.
+                if (sync_composer_growth(ui)) layout(ui);
                 update_mcp_alias_popup(ui);
             } else if (id == ID_MCP_ALIAS_POPUP && (code == LBN_SELCHANGE || code == LBN_DBLCLK)) {
                 apply_mcp_alias_popup(ui);
@@ -6458,7 +6887,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             } else if (id == ID_ACCESS_SHOW || id == ID_PERM_INFO) {
                 show_content_view(ui, ContentView::Access);
             } else if (id == ID_ACCESS_FOLDERS) {
-                do_open_folder(ui);
+                do_add_authorized_folders(ui);
             } else if (id == ID_ACCESS_KEYRING) {
                 show_content_view(ui, ContentView::Keyring);
             } else if (id == ID_HELP_ABOUT) {
@@ -6474,64 +6903,101 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             } else if (id == ID_CONTENT_NAV && code == LBN_SELCHANGE) {
                 const int sel = static_cast<int>(SendMessageW(ui->content_nav, LB_GETCURSEL, 0, 0));
                 show_content_view(ui, ContentView::Settings, settings_section_from_nav(sel));
-            } else if (id == ID_SET_OA_SIGNIN) {
-                ui->session.login_chatgpt();
-                refresh_settings_pane(ui);
-                refresh_chrome(ui);
-            } else if (id == ID_SET_OA_SIGNOUT) {
-                ui->session.logout();
-                refresh_settings_pane(ui);
-                refresh_chrome(ui);
-            } else if (id == ID_SET_CL_KEY) {
-                const std::wstring key = prompt_text(hwnd, L"Anthropic API key", L"");
-                if (!key.empty()) {
-                    if (claude_api_key_save(key)) {
-                        MessageBoxW(hwnd, L"Claude API key saved to Windows Credential Manager.", L"Claude",
-                                    MB_OK | MB_ICONINFORMATION);
-                    } else {
-                        MessageBoxW(hwnd, L"Could not save API key to Credential Manager.", L"Claude",
-                                    MB_OK | MB_ICONERROR);
+            } else if (const auto prov_action =
+                           ui->providers_ui.handle_command(id, code, ui->session, hwnd);
+                       prov_action != ProvidersSettingsAction::None) {
+                using PA = ProvidersSettingsAction;
+                if (prov_action == PA::OpenAISignIn) {
+                    ui->session.login_chatgpt();
+                } else if (prov_action == PA::OpenAISignOut) {
+                    ui->session.logout();
+                } else if (prov_action == PA::ClaudeApiKey) {
+                    const std::wstring key = prompt_text(hwnd, L"Anthropic API key", L"");
+                    if (!key.empty()) {
+                        if (claude_api_key_save(key)) {
+                            MessageBoxW(hwnd, L"Claude API key saved to Windows Credential Manager.", L"Claude API",
+                                        MB_OK | MB_ICONINFORMATION);
+                            ui->session.refresh_claude_api_models();
+                        } else {
+                            MessageBoxW(hwnd, L"Could not save API key to Credential Manager.", L"Claude API",
+                                        MB_OK | MB_ICONERROR);
+                        }
                     }
-                }
-                ui->session.sync_claude_models();
-                refresh_settings_pane(ui);
-                refresh_models(ui);
-                refresh_chrome(ui);
-            } else if (id == ID_SET_CL_CODE) {
-                std::wstring err;
-                if (!claude_code_login_launch(&err)) {
-                    MessageBoxW(hwnd, err.c_str(), L"Claude Code", MB_OK | MB_ICONWARNING);
-                } else {
-                    ui->claude_auth_polls = 45;  // ~90s at 2s timer — pick up OAuth when console finishes
-                    MessageBoxW(hwnd,
-                                L"Complete Claude Code login in the console/browser.\n"
-                                L"Settings will refresh when the session is detected.\n"
-                                L"(Chat send remains Codex-only for now.)",
-                                L"Claude Code", MB_OK | MB_ICONINFORMATION);
-                }
-                claude_code_session_status(true);
-                ui->session.sync_claude_models();
-                refresh_settings_pane(ui);
-                refresh_models(ui);
-                refresh_chrome(ui);
-            } else if (id == ID_SET_CL_DISC) {
-                std::wstring err;
-                if (claude_code_session_status(true).logged_in) {
-                    if (!claude_code_logout(&err) && !err.empty()) {
+                } else if (prov_action == PA::ClaudeApiDisconnect) {
+                    claude_api_key_clear();
+                    if (ui->session.settings.default_provider == "claude-api") {
+                        ui->session.set_default_provider("openai");
+                    }
+                    ui->session.sync_claude_models();
+                } else if (prov_action == PA::OpenAiApiKey) {
+                    const std::wstring key = prompt_text(hwnd, L"OpenAI API key", L"");
+                    if (!key.empty()) {
+                        if (openai_api_key_save(key)) {
+                            MessageBoxW(hwnd, L"OpenAI API key saved to Windows Credential Manager.", L"OpenAI API",
+                                        MB_OK | MB_ICONINFORMATION);
+                            ui->session.refresh_openai_api_models();
+                        } else {
+                            MessageBoxW(hwnd, L"Could not save API key to Credential Manager.", L"OpenAI API",
+                                        MB_OK | MB_ICONERROR);
+                        }
+                    }
+                } else if (prov_action == PA::OpenAiApiDisconnect) {
+                    openai_api_key_clear();
+                    if (ui->session.settings.default_provider == "openai-api") {
+                        ui->session.set_default_provider("openai");
+                    }
+                    ui->session.sync_claude_models();
+                } else if (prov_action == PA::ClaudeCodeLogin) {
+                    std::wstring err;
+                    if (!claude_code_login_launch(&err)) {
                         MessageBoxW(hwnd, err.c_str(), L"Claude Code", MB_OK | MB_ICONWARNING);
+                    } else {
+                        ui->claude_auth_polls = 45;
+                        MessageBoxW(hwnd,
+                                    L"Complete Claude Code login in the console/browser.\n"
+                                    L"Settings will refresh when the session is detected.",
+                                    L"Claude Code", MB_OK | MB_ICONINFORMATION);
                     }
+                    claude_code_session_status(true);
+                } else if (prov_action == PA::ClaudeDisconnect) {
+                    std::wstring err;
+                    if (claude_code_session_status(true).logged_in) {
+                        if (!claude_code_logout(&err) && !err.empty()) {
+                            MessageBoxW(hwnd, err.c_str(), L"Claude Code", MB_OK | MB_ICONWARNING);
+                        }
+                    }
+                    claude_clear_connection_state();
+                    if (ui->session.settings.default_provider == "claude") {
+                        ui->session.set_default_provider("openai");
+                    }
+                } else if (prov_action == PA::RefreshOpenAI) {
+                    if (ui->session.account.signed_in) {
+                        ui->session.refresh_models();
+                    }
+                } else if (prov_action == PA::RefreshClaude) {
+                    ui->session.refresh_claude_model_catalog(true);
+                } else if (prov_action == PA::RefreshOpenAiApi) {
+                    ui->session.refresh_openai_api_models();
+                } else if (prov_action == PA::RefreshClaudeApi) {
+                    ui->session.refresh_claude_api_models();
                 }
-                claude_api_key_clear();
-                claude_clear_connection_state();
-                if (ui->session.settings.default_provider == "claude") {
-                    ui->session.set_default_provider("openai");
+                if (prov_action == PA::PersistAndSync || prov_action == PA::OpenAISignIn ||
+                    prov_action == PA::OpenAISignOut || prov_action == PA::ClaudeApiKey ||
+                    prov_action == PA::ClaudeApiDisconnect || prov_action == PA::OpenAiApiKey ||
+                    prov_action == PA::OpenAiApiDisconnect || prov_action == PA::ClaudeCodeLogin ||
+                    prov_action == PA::ClaudeDisconnect || prov_action == PA::RefreshOpenAI ||
+                    prov_action == PA::RefreshClaude || prov_action == PA::RefreshOpenAiApi ||
+                    prov_action == PA::RefreshClaudeApi) {
+                    save_settings(ui->session.paths.settings_path, ui->session.settings);
+                    ui->session.sync_claude_models();
+                    refresh_settings_pane(ui);
+                    refresh_models(ui);
+                    refresh_chrome(ui);
                 }
-                save_settings(ui->session.paths.settings_path, ui->session.settings);
-                claude_code_session_status(true);
-                ui->session.sync_claude_models();
-                refresh_settings_pane(ui);
-                refresh_models(ui);
-                refresh_chrome(ui);
+                if (prov_action == PA::Relayout) {
+                    layout(ui);
+                    refresh_settings_pane(ui);
+                }
             } else if (id == ID_SET_CODEX) {
                 browse_codex(ui);
             } else if (id == ID_SET_COPY_RUNTIME) {
@@ -6579,6 +7045,8 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 set_security_subpage(ui, SecuritySubpage::Keyring);
             } else if (id == Cmd_SecTabEnvironments) {
                 set_security_subpage(ui, SecuritySubpage::Environments);
+            } else if (id == Cmd_SecTabConnections) {
+                set_security_subpage(ui, SecuritySubpage::Connections);
             } else if (id == Cmd_SecTabPolicy) {
                 set_security_subpage(ui, SecuritySubpage::Policy);
             } else if (const auto sec_act = ui->security_overview.on_command(static_cast<WORD>(id), code);
@@ -6635,6 +7103,24 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                     layout(ui);
                     refresh_chrome(ui);
                 }
+            } else if (ui->connections_ui.on_command(static_cast<WORD>(id), code, hwnd, ui->connections,
+                                                     ui->keyring_ui.keyring(),
+                                                     ui->session.store.active_project_id,
+                                                     ui->session.paths.connections_path)) {
+                switch (ui->connections_ui.take_request()) {
+                    case ConnUiRequest::OpenKeyring:
+                        set_security_subpage(ui, SecuritySubpage::Keyring);
+                        break;
+                    case ConnUiRequest::TestConnection:
+                        start_connection_test(ui, ui->connections_ui.pending_test_alias());
+                        layout(ui);
+                        refresh_chrome(ui);
+                        break;
+                    case ConnUiRequest::None:
+                        layout(ui);
+                        refresh_chrome(ui);
+                        break;
+                }
             } else if (ui->mcp_ui.handle_command(static_cast<int>(id), code, ui->mcp, ui->session.paths.mcp_path,
                                                  hwnd)) {
                 layout(ui);
@@ -6673,6 +7159,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                             ui->session.active_thread_id.clear();
                             ui->session.settings.last_thread_id.clear();
                             SetWindowTextW(ui->transcript, L"");
+                            chat_log_clear(ui->chat_log);
                             SetWindowTextW(ui->composer, L"");
                             ui->shown_stream.clear();
                             ui->markdown_stream_start = -1;
@@ -6780,6 +7267,18 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_SCYLLA_MCP_AUTH:
             handle_mcp_auth_result(ui, reinterpret_cast<McpAuthPosted*>(lparam));
             return 0;
+        case WM_SCYLLA_TEST_RESULT: {
+            std::unique_ptr<ConnectionTestResult> result(reinterpret_cast<ConnectionTestResult*>(lparam));
+            if (ui->connection_test.joinable()) ui->connection_test.join();
+            ui->connection_test_running = false;
+            if (result) {
+                ui->connections_ui.report_test_result(result->ok, result->message);
+            }
+            return 0;
+        }
+        case WM_SCYLLA_BROKER_PREPARE:
+            broker_prepare_on_ui(ui, reinterpret_cast<BrokerPrepareBridge*>(lparam));
+            return 0;
         case WM_SCYLLA_RELAYOUT: {
             if (wparam == kRelayoutEnsurePanel) {
                 ensure_terminal_panel(ui);
@@ -6869,8 +7368,10 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             ui->workbench_panel.set_fonts(ui->font, ui->font_small);
             ui->keyring_ui.set_fonts(ui->font, ui->font_small, ui->font_semi);
             ui->environment_ui.set_fonts(ui->font, ui->font_small);
+            ui->connections_ui.set_fonts(ui->font, ui->font_small);
             ui->security_overview.set_fonts(ui->font, ui->font_small);
             ui->security_policy.set_fonts(ui->font, ui->font_small);
+            ui->providers_ui.set_fonts(ui->font, ui->font_small);
             ui->knowledge_ui.set_fonts(ui->font);
             ui->mcp_ui.set_fonts(ui->font);
             ui->strata_ui.set_fonts(ui->font);
@@ -6981,6 +7482,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             // Past the point of no return — now shut down sessions and secrets.
             ui->terminal_sessions.destroy_all();
             close_attachment_windows(ui);
+            // Before locking the vault: the broker holds a Keyring reference and its pipe workers
+            // may be mid-SendMessage back to this thread.
+            stop_query_broker(ui);
             ui->keyring_ui.lock_now();
             persist_window(ui);
             ui->session.stop_runtime();

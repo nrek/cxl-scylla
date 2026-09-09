@@ -1,9 +1,12 @@
 #include "scyllagpt/session.h"
 #include "scyllagpt/chat_history.h"
+#include "scyllagpt/codex_thread_util.h"
+#include "scyllagpt/history_merge.h"
 
 #include "scyllagpt/lockdown.h"
 #include "scyllagpt/mcp_oauth.h"
 #include "scyllagpt/provider.h"
+#include "scyllagpt/provider_http.h"
 #include "scyllagpt/utf.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -59,6 +62,25 @@ std::string normalized_item_type(std::string type) {
         if (std::isalnum(ch)) normalized.push_back(static_cast<char>(std::tolower(ch)));
     }
     return normalized;
+}
+
+bool is_supported_gpt_generation(const std::string& id) {
+    // Codex remains authoritative for model availability. This only enforces the
+    // Manage Models floor requested by Scylla: do not expose pre-GPT-4 entries.
+    if (id.rfind("gpt-", 0) != 0) return true;
+    std::size_t pos = 4;
+    int major = 0;
+    bool found_digit = false;
+    while (pos < id.size() && std::isdigit(static_cast<unsigned char>(id[pos]))) {
+        found_digit = true;
+        major = (major * 10) + (id[pos] - '0');
+        ++pos;
+    }
+    return !found_digit || major >= 4;
+}
+
+bool is_gpt4_generation(const std::string& id) {
+    return id.rfind("gpt-4", 0) == 0;
 }
 
 void save_local_history(WorkspaceStore& store, const std::wstring& store_path,
@@ -190,7 +212,12 @@ bool Session::start_runtime(HWND hwnd, UINT line_msg, std::wstring* error) {
     }
     const bool allow_shell = has_project_grant();
     const auto mcp_runtime = collect_mcp_runtime(mcp_manager_, store.active_project_id);
-    if (!write_isolated_codex_config(paths, allow_shell, knowledge_accessible_paths_, mcp_runtime.servers)) {
+    auto writable_roots = knowledge_accessible_paths_;
+    if (const auto* project = store.active()) for (const auto& root : project->roots)
+        if (_wcsicmp(root.c_str(), project->root.c_str()) != 0) writable_roots.push_back(root);
+    auto runtime_servers = mcp_runtime.servers;
+    if (!broker_mcp_server_.name.empty()) runtime_servers.push_back(broker_mcp_server_);
+    if (!write_isolated_codex_config(paths, allow_shell, writable_roots, runtime_servers)) {
         if (error) {
             *error = L"Failed to write isolated Codex lockdown config";
         }
@@ -264,27 +291,143 @@ void Session::sync_claude_models() {
     // Only authenticated providers contribute agent options.
     if (!account.signed_in) {
         models.erase(std::remove_if(models.begin(), models.end(),
-                                    [](const ModelChoice& m) { return m.provider_id != "claude"; }),
+                                    [](const ModelChoice& m) { return m.provider_id == "openai"; }),
                      models.end());
     }
     merge_claude_models();
+    if (!openai_api_key_present()) {
+        models.erase(std::remove_if(models.begin(), models.end(),
+                                    [](const ModelChoice& m) { return m.provider_id == "openai-api"; }),
+                     models.end());
+    }
+    if (!claude_api_connected()) {
+        models.erase(std::remove_if(models.begin(), models.end(),
+                                    [](const ModelChoice& m) { return m.provider_id == "claude-api"; }),
+                     models.end());
+    }
     finalize_model_catalog();
 }
 
 void Session::refresh_claude_model_catalog(bool force_cli) {
     (void)force_cli;
-    if (!claude_is_connected()) {
+    if (!claude_account_connected()) {
         return;
     }
-    // Refresh curated Claude Code aliases into the agent catalog (CLI has no `models` cmd).
     claude_code_list_models(true);
     merge_claude_models();
     finalize_model_catalog();
 }
 
+void Session::refresh_openai_api_models() {
+    if (!openai_api_key_present()) {
+        models.erase(std::remove_if(models.begin(), models.end(),
+                                    [](const ModelChoice& m) { return m.provider_id == "openai-api"; }),
+                     models.end());
+        finalize_model_catalog();
+        return;
+    }
+    std::vector<HttpModelRow> rows;
+    std::wstring err;
+    if (!openai_api_list_models(&rows, &err)) {
+        last_error = err.empty() ? "OpenAI API model list failed" : utf8(err);
+        return;
+    }
+    std::vector<std::pair<std::string, std::string>> pairs;
+    pairs.reserve(rows.size());
+    for (const auto& r : rows) {
+        pairs.emplace_back(r.id, r.display);
+    }
+    merge_http_provider_models("openai-api", pairs);
+    finalize_model_catalog();
+}
+
+void Session::refresh_claude_api_models() {
+    if (!claude_api_connected()) {
+        models.erase(std::remove_if(models.begin(), models.end(),
+                                    [](const ModelChoice& m) { return m.provider_id == "claude-api"; }),
+                     models.end());
+        finalize_model_catalog();
+        return;
+    }
+    std::vector<HttpModelRow> rows;
+    std::wstring err;
+    if (!claude_api_list_models(&rows, &err)) {
+        last_error = err.empty() ? "Claude API model list failed" : utf8(err);
+        return;
+    }
+    std::vector<std::pair<std::string, std::string>> pairs;
+    pairs.reserve(rows.size());
+    for (const auto& r : rows) {
+        pairs.emplace_back(r.id, r.display);
+    }
+    merge_http_provider_models("claude-api", pairs);
+    finalize_model_catalog();
+}
+
 void Session::set_default_provider(const std::string& provider) {
-    settings.default_provider = (provider == "claude") ? "claude" : "openai";
+    settings.default_provider = coerce_default_provider(provider);
     ensure_selected_model();
+}
+
+bool Session::is_model_enabled(const std::string& provider_id, const std::string& model_id) const {
+    return settings_model_enabled(settings, provider_id, model_id);
+}
+
+void Session::set_model_enabled(const std::string& provider_id, const std::string& model_id, bool enabled) {
+    settings.model_enabled[model_enable_key(provider_id, model_id)] = enabled;
+    if (!enabled && selected_model == model_id && settings.default_provider == provider_id) {
+        ensure_selected_model();
+    }
+    if (!enabled) {
+        const auto it = settings.provider_default_model.find(provider_id);
+        if (it != settings.provider_default_model.end() && it->second == model_id) {
+            settings.provider_default_model.erase(it);
+            ensure_selected_model();
+        }
+    }
+}
+
+std::vector<ModelChoice> Session::models_for_provider(const std::string& provider_id,
+                                                      bool enabled_only) const {
+    std::vector<ModelChoice> out;
+    out.reserve(models.size());
+    for (const auto& m : models) {
+        if (m.provider_id != provider_id) {
+            continue;
+        }
+        if (enabled_only && !is_model_enabled(provider_id, m.id)) {
+            continue;
+        }
+        out.push_back(m);
+    }
+    return out;
+}
+
+std::string Session::provider_default_model_id(const std::string& provider_id) const {
+    const auto it = settings.provider_default_model.find(provider_id);
+    if (it != settings.provider_default_model.end() && !it->second.empty() &&
+        is_model_enabled(provider_id, it->second)) {
+        return it->second;
+    }
+    for (const auto& m : models) {
+        if (m.provider_id == provider_id && is_model_enabled(provider_id, m.id)) {
+            return m.id;
+        }
+    }
+    return {};
+}
+
+void Session::set_provider_default_model(const std::string& provider_id, const std::string& model_id) {
+    if (model_id.empty()) {
+        settings.provider_default_model.erase(provider_id);
+    } else {
+        settings.provider_default_model[provider_id] = model_id;
+        set_model_enabled(provider_id, model_id, true);
+    }
+    if (settings.default_provider == provider_id && !model_id.empty()) {
+        selected_model = model_id;
+        settings.selected_model = model_id;
+    }
 }
 
 void Session::request_models(const std::string& cursor) {
@@ -300,8 +443,8 @@ void Session::request_models(const std::string& cursor) {
 }
 
 int Session::model_sort_rank(const std::string& id, const std::string& provider_id) {
-    // Provider blocks: OpenAI first, then Claude. Within OpenAI, prefer newest family.
-    if (provider_id == "claude") {
+    // Provider blocks: openai, openai-api, claude, claude-api. Within OpenAI, prefer newest family.
+    if (provider_id == "claude" || provider_id == "claude-api") {
         if (id.find("opus") != std::string::npos) {
             return 100;
         }
@@ -325,6 +468,9 @@ int Session::model_sort_rank(const std::string& id, const std::string& provider_
     if (id.rfind("o3", 0) == 0 || id.rfind("o4", 0) == 0) {
         return 4;
     }
+    if (id.rfind("gpt-4", 0) == 0) {
+        return 5;
+    }
     return 10;
 }
 
@@ -332,16 +478,29 @@ void Session::merge_claude_models() {
     models.erase(std::remove_if(models.begin(), models.end(),
                                 [](const ModelChoice& m) { return m.provider_id == "claude"; }),
                  models.end());
-    if (!claude_is_connected()) {
+    if (!claude_account_connected()) {
         return;
     }
-    // Live `claude models` when cached; otherwise curated (never blocks UI).
     const auto rows = claude_code_list_models(false);
-    for (std::size_t i = 0; i < rows.size() && i < 3; ++i) {
+    for (const auto& row : rows) {
         ModelChoice c;
-        c.id = rows[i].id;
-        c.display = rows[i].display;
+        c.id = row.id;
+        c.display = row.display;
         c.provider_id = "claude";
+        models.push_back(std::move(c));
+    }
+}
+
+void Session::merge_http_provider_models(const std::string& provider_id,
+                                         const std::vector<std::pair<std::string, std::string>>& rows) {
+    models.erase(std::remove_if(models.begin(), models.end(),
+                                [&](const ModelChoice& m) { return m.provider_id == provider_id; }),
+                 models.end());
+    for (const auto& row : rows) {
+        ModelChoice c;
+        c.id = row.first;
+        c.display = row.second.empty() ? row.first : row.second;
+        c.provider_id = provider_id;
         models.push_back(std::move(c));
     }
 }
@@ -369,11 +528,26 @@ void Session::clamp_models_per_provider(std::size_t max_per) {
 }
 
 void Session::finalize_model_catalog() {
-    std::stable_sort(models.begin(), models.end(), [](const ModelChoice& a, const ModelChoice& b) {
-        const int pa = a.provider_id == "claude" ? 1 : 0;
-        const int pb = b.provider_id == "claude" ? 1 : 0;
+    auto provider_ord = [](const std::string& p) -> int {
+        if (p == "openai") {
+            return 0;
+        }
+        if (p == "openai-api") {
+            return 1;
+        }
+        if (p == "claude") {
+            return 2;
+        }
+        if (p == "claude-api") {
+            return 3;
+        }
+        return 9;
+    };
+    std::stable_sort(models.begin(), models.end(), [&](const ModelChoice& a, const ModelChoice& b) {
+        const int pa = provider_ord(a.provider_id);
+        const int pb = provider_ord(b.provider_id);
         if (pa != pb) {
-            return pa < pb;  // OpenAI block, then Claude Code
+            return pa < pb;
         }
         const int ra = model_sort_rank(a.id, a.provider_id);
         const int rb = model_sort_rank(b.id, b.provider_id);
@@ -382,10 +556,9 @@ void Session::finalize_model_catalog() {
         }
         return a.display < b.display;
     });
-    clamp_models_per_provider(3);
     ensure_selected_model();
 
-    // Avoid models_epoch thrash (UI blink) when pagination/sync yields the same clamped set.
+    // Avoid models_epoch thrash (UI blink) when pagination/sync yields the same set.
     std::string sig;
     sig.reserve(models.size() * 40);
     for (const auto& m : models) {
@@ -395,6 +568,7 @@ void Session::finalize_model_catalog() {
         sig.push_back('\0');
         sig.append(m.display);
         sig.push_back('\0');
+        sig.push_back(m.hidden ? '\1' : '\0');
     }
     sig.append(selected_model);
     sig.push_back('\0');
@@ -409,25 +583,37 @@ void Session::ensure_selected_model() {
     if (selected_model.empty() && !settings.selected_model.empty()) {
         selected_model = settings.selected_model;
     }
-    if (settings.default_provider != "claude") {
-        settings.default_provider = "openai";
-    }
+    settings.default_provider = coerce_default_provider(settings.default_provider);
 
-    // Claude disconnected while still selected → fall back to OpenAI only.
-    if (settings.default_provider == "claude" && !claude_is_connected()) {
+    // Drop disconnected buckets back to OpenAI ChatGPT when possible.
+    if (settings.default_provider == "claude" && !claude_account_connected()) {
+        settings.default_provider = "openai";
+    } else if (settings.default_provider == "openai-api" && !openai_api_key_present()) {
+        settings.default_provider = "openai";
+    } else if (settings.default_provider == "claude-api" && !claude_api_connected()) {
         settings.default_provider = "openai";
     }
 
     auto best_for = [&](const std::string& provider) -> const ModelChoice* {
         const ModelChoice* exact = nullptr;
+        const ModelChoice* preferred = nullptr;
         const ModelChoice* best = nullptr;
         int best_rank = 0x7fffffff;
+        const auto pdm = settings.provider_default_model.find(provider);
+        const std::string preferred_id =
+            pdm != settings.provider_default_model.end() ? pdm->second : std::string{};
         for (const auto& m : models) {
             if (m.provider_id != provider) {
                 continue;
             }
+            if (!is_model_enabled(provider, m.id)) {
+                continue;
+            }
             if (!selected_model.empty() && m.id == selected_model) {
                 exact = &m;
+            }
+            if (!preferred_id.empty() && m.id == preferred_id) {
+                preferred = &m;
             }
             const int rank = model_sort_rank(m.id, m.provider_id);
             if (!best || rank < best_rank) {
@@ -435,44 +621,36 @@ void Session::ensure_selected_model() {
                 best_rank = rank;
             }
         }
-        return exact ? exact : best;
+        if (exact) {
+            return exact;
+        }
+        if (preferred) {
+            return preferred;
+        }
+        return best;
     };
 
     // Respect default_provider — never steal provider from a cross-catalog id match.
-    // (Bug: Claude rows arrive before Codex model/list; matching by id alone flipped
-    //  default_provider to Claude and blocked OpenAI ↔ Claude toggle.)
     if (const ModelChoice* hit = best_for(settings.default_provider)) {
         selected_model = hit->id;
         settings.selected_model = hit->id;
         return;
     }
-
-    // Preferred catalog empty (e.g. OpenAI list not in yet) — keep provider preference.
-    // Leave selected_model as-is if it already belongs to that provider; else clear face id.
-    bool keep = false;
-    for (const auto& m : models) {
-        if (m.provider_id == settings.default_provider && m.id == selected_model) {
-            keep = true;
-            break;
-        }
+    // API providers may legitimately have zero enabled models.
+    if (is_api_provider(settings.default_provider)) {
+        selected_model.clear();
+        settings.selected_model.clear();
+        return;
     }
-    if (!keep) {
-        // Stale id from the other provider — clear until catalog fills.
-        for (const auto& m : models) {
-            if (m.id == selected_model && m.provider_id != settings.default_provider) {
-                selected_model.clear();
-                settings.selected_model.clear();
-                break;
-            }
-        }
-    }
+    selected_model.clear();
+    settings.selected_model.clear();
 }
 
 void Session::ingest_models(const Json& result, bool replace) {
     if (replace) {
-        // Replace OpenAI rows only — keep Claude catalog intact across pagination resets.
+        // Replace ChatGPT/Codex rows only — keep Claude + API catalogs intact.
         models.erase(std::remove_if(models.begin(), models.end(),
-                                    [](const ModelChoice& m) { return m.provider_id != "claude"; }),
+                                    [](const ModelChoice& m) { return m.provider_id == "openai"; }),
                      models.end());
     }
     const Json& data = (result.has("data") && result.at("data").is_array())
@@ -497,6 +675,10 @@ void Session::ingest_models(const Json& result, bool replace) {
             if (c.id.empty()) {
                 continue;
             }
+            if (!is_supported_gpt_generation(c.id)) {
+                continue;
+            }
+            c.hidden = m.at("hidden").as_bool(false);
             bool dup = false;
             for (const auto& existing : models) {
                 if (existing.provider_id == c.provider_id && existing.id == c.id) {
@@ -506,6 +688,15 @@ void Session::ingest_models(const Json& result, bool replace) {
             }
             if (dup) {
                 continue;
+            }
+            // Hidden models are intentionally visible in Manage Models because
+            // model/list is requested with includeHidden=true. Keep those and
+            // the explicitly supported GPT-4 legacy floor opt-in unless the
+            // user has already saved a preference.
+            const std::string enabled_key = model_enable_key(c.provider_id, c.id);
+            if ((c.hidden || is_gpt4_generation(c.id)) &&
+                settings.model_enabled.find(enabled_key) == settings.model_enabled.end()) {
+                settings.model_enabled[enabled_key] = false;
             }
             models.push_back(std::move(c));
         }
@@ -575,6 +766,8 @@ std::wstring Session::grant_label() const {
         return L"No project — agent read-only";
     }
     std::wstring label = L"Grant: " + conversation_cwd() + L" (browse / edit)";
+    if (const auto* project = store.active(); project && project->roots.size() > 1)
+        label += L" + " + std::to_wstring(project->roots.size() - 1) + L" repositories";
     if (!knowledge_accessible_paths_.empty()) {
         label += L" + " + std::to_wstring(knowledge_accessible_paths_.size()) + L" knowledge";
     }
@@ -606,7 +799,12 @@ bool Session::sync_lockdown_config() {
     }
     const bool allow_shell = has_project_grant();
     const auto mcp_runtime = collect_mcp_runtime(mcp_manager_, store.active_project_id);
-    const bool ok = write_isolated_codex_config(paths, allow_shell, knowledge_accessible_paths_, mcp_runtime.servers);
+    auto writable_roots = knowledge_accessible_paths_;
+    if (const auto* project = store.active()) for (const auto& root : project->roots)
+        if (_wcsicmp(root.c_str(), project->root.c_str()) != 0) writable_roots.push_back(root);
+    auto runtime_servers = mcp_runtime.servers;
+    if (!broker_mcp_server_.name.empty()) runtime_servers.push_back(broker_mcp_server_);
+    const bool ok = write_isolated_codex_config(paths, allow_shell, writable_roots, runtime_servers);
     if (ok) {
         isolated_home_note = L"CODEX_HOME is isolated: " + paths.codex_home +
                              L"  CreateProcess cwd=" + paths.workspace;
@@ -680,6 +878,11 @@ void Session::send_user(const std::string& text) {
     if (settings.default_provider == "claude") {
         activity.begin();
         send_claude_user(text);
+        return;
+    }
+    if (settings.default_provider == "openai-api" || settings.default_provider == "claude-api") {
+        activity.begin();
+        send_api_user(settings.default_provider, text);
         return;
     }
     if (active_thread_id.empty()) {
@@ -801,10 +1004,33 @@ void Session::ensure_claude_thread() {
     store.save(paths.store_path);
 }
 
+void Session::ensure_api_thread(const std::string& provider_id, const char* backend) {
+    if (!active_thread_id.empty()) {
+        if (auto* c = store.by_thread(active_thread_id)) {
+            if (c->provider_id == provider_id) {
+                return;
+            }
+        }
+    }
+    const std::string tid = provider_id + "-" + make_uuid();
+    active_thread_id = tid;
+    settings.last_thread_id = tid;
+    if (auto* pr = store.active()) {
+        pr->last_thread_id = tid;
+    }
+    auto* conv = store.upsert_thread(store.active_project_id, account_scope(), tid, "New Chat", "");
+    if (conv) {
+        conv->provider_id = provider_id;
+        conv->backend = backend ? backend : "http-chat";
+        conv->resumable = false;
+    }
+    store.save(paths.store_path);
+}
+
 void Session::send_claude_user(const std::string& text) {
-    if (!claude_is_connected()) {
-        last_error = "Claude is not connected";
-        set_state(AppState::Failed, L"Claude not connected");
+    if (!claude_account_connected()) {
+        last_error = "Claude Account is not connected";
+        set_state(AppState::Failed, L"Claude Account not connected");
         return;
     }
     if (claude_busy_) {
@@ -885,6 +1111,106 @@ void Session::send_claude_user(const std::string& text) {
     }).detach();
 }
 
+void Session::send_api_user(const std::string& provider_id, const std::string& text) {
+    const bool openai = provider_id == "openai-api";
+    if (openai && !openai_api_key_present()) {
+        last_error = "OpenAI API key is not configured";
+        set_state(AppState::Failed, L"OpenAI API not connected");
+        return;
+    }
+    if (!openai && !claude_api_connected()) {
+        last_error = "Claude API key is not configured";
+        set_state(AppState::Failed, L"Claude API not connected");
+        return;
+    }
+    if (selected_model.empty() || !is_model_enabled(provider_id, selected_model)) {
+        last_error = "Enable at least one model for this API provider";
+        set_state(AppState::Failed, L"No API model enabled");
+        return;
+    }
+    if (claude_busy_) {
+        return;
+    }
+    ensure_api_thread(provider_id, openai ? "openai-api-http" : "claude-api-http");
+
+    auto* naming_chat = store.by_thread(active_thread_id);
+    if (naming_chat) {
+        naming_chat->updated_at = std::time(nullptr);
+        if (!naming_chat->title_manual && !naming_chat->title_generated &&
+            (naming_chat->title.empty() || naming_chat->title == "New Chat"))
+            naming_chat->title = short_chat_title(chat_title_seed);
+        store.save(paths.store_path);
+    }
+    std::string payload = text;
+    const std::string grant = knowledge_grant_preamble() + chat_title_request(naming_chat);
+    const std::string ctx = snapshot_context(context_chips);
+    if (!grant.empty() || !ctx.empty()) {
+        std::string head;
+        if (!grant.empty()) {
+            head = grant;
+        }
+        if (!ctx.empty()) {
+            if (!head.empty()) {
+                head += "\n";
+            }
+            head += ctx;
+        }
+        payload = head + "\n---\n" + text;
+    }
+
+    std::vector<HttpChatMessage> msgs;
+    const std::size_t start = history_messages.size() > 12 ? history_messages.size() - 12 : 0;
+    for (std::size_t i = start; i < history_messages.size(); ++i) {
+        msgs.push_back({history_messages[i].user, history_messages[i].text});
+    }
+    msgs.push_back({true, payload});
+
+    history_messages.push_back({true, text});
+    if (auto* chat = store.by_thread(active_thread_id)) {
+        chat->local_messages = Json::array();
+        for (const auto& message : history_messages) {
+            Json item = Json::object();
+            item["user"] = Json::boolean(message.user);
+            item["text"] = Json::string(message.text);
+            chat->local_messages.push(std::move(item));
+        }
+        store.save(paths.store_path);
+    }
+    stream_buffer.clear();
+    claude_busy_ = true;
+    claude_cancel_ = false;
+    set_state(AppState::Generating, openai ? L"OpenAI API generating…" : L"Claude API generating…");
+
+    const std::string model = selected_model;
+    HWND hwnd = hwnd_;
+    std::thread([this, openai, msgs, model, hwnd]() {
+        std::string result;
+        std::wstring err;
+        bool ok = false;
+        if (claude_cancel_) {
+            err = L"Cancelled";
+        } else if (openai) {
+            ok = openai_api_chat(model, msgs, &result, &err, 300000);
+        } else {
+            ok = claude_api_chat(model, msgs, &result, &err, 300000);
+        }
+        auto* r = new ClaudePrintResult{};
+        if (claude_cancel_) {
+            r->ok = false;
+            r->error = L"Cancelled";
+        } else {
+            r->ok = ok;
+            r->text = std::move(result);
+            r->error = std::move(err);
+        }
+        if (hwnd) {
+            PostMessageW(hwnd, WM_SCYLLA_CLAUDE_DONE, 0, reinterpret_cast<LPARAM>(r));
+        } else {
+            delete r;
+        }
+    }).detach();
+}
+
 void Session::complete_claude_print(bool ok, const std::string& text, const std::wstring& error) {
     claude_busy_ = false;
     if (claude_cancel_) {
@@ -929,8 +1255,9 @@ void Session::open_thread(const std::string& id) {
             history_messages.push_back({message.at("user").as_bool(false), message.at("text").as_string()});
         transcript_replace = true;
     }
-    if (auto* c = store.by_thread(id); c && c->provider_id == "claude") {
-        settings.default_provider = "claude";
+    if (auto* c = store.by_thread(id); c && (c->provider_id == "claude" || c->provider_id == "claude-api" ||
+                                             c->provider_id == "openai-api")) {
+        settings.default_provider = coerce_default_provider(c->provider_id);
         history_messages.clear();
         if (c->local_messages.is_array()) for (const auto& message : c->local_messages.array_items())
             history_messages.push_back({message.at("user").as_bool(false), message.at("text").as_string()});
@@ -950,6 +1277,49 @@ void Session::open_thread(const std::string& id) {
     if (thread_read_id_ >= 0) thread_read_threads_[thread_read_id_] = id;
 }
 
+void Session::interrupt_thread_turn(const std::string& thread_id, const std::string& turn_id) {
+    if (thread_id.empty() || turn_id.empty()) {
+        return;
+    }
+    Json p = Json::object();
+    p["threadId"] = Json::string(thread_id);
+    p["turnId"] = Json::string(turn_id);
+    turn_interrupt_id_ = send_req("turn/interrupt", std::move(p));
+    auto& running = thread_runtime_[thread_id];
+    running.turn_id = turn_id;
+    turn_threads_[turn_id] = thread_id;
+    if (thread_id == active_thread_id) {
+        active_turn_id = turn_id;
+        if (activity.busy) {
+            activity.phase = "Cancelling";
+        }
+        set_state(AppState::Interrupted, L"Cancelling stuck turn…");
+    }
+}
+
+void Session::clear_orphaned_in_progress_turn(const std::string& thread_id, const Json& thread) {
+    const std::string orphan = latest_in_progress_turn_id(thread);
+    if (orphan.empty()) {
+        return;
+    }
+    auto& running = thread_runtime_[thread_id];
+    running.turn_id = orphan;
+    turn_threads_[orphan] = thread_id;
+    // Live turns keep activity.busy true from send_user_to_thread. After a Workbench relaunch the
+    // map is empty so busy is false while Codex still lists inProgress — that blocks turn/start.
+    if (running.activity.busy) {
+        if (thread_id == active_thread_id) {
+            active_turn_id = orphan;
+            activity = running.activity;
+            set_state(AppState::Generating, L"Generating");
+        }
+        return;
+    }
+    last_error =
+        "Cleared a stuck prior turn left by a previous Scylla session. Send your message again.";
+    interrupt_thread_turn(thread_id, orphan);
+}
+
 void Session::cancel_turn() {
     if (activity.busy) activity.phase = "Cancelling";
     if (claude_busy_) {
@@ -958,14 +1328,19 @@ void Session::cancel_turn() {
         return;
     }
     const auto running = thread_runtime_.find(active_thread_id);
-    if (active_thread_id.empty() || running == thread_runtime_.end() || running->second.turn_id.empty()) {
+    std::string turn_id;
+    if (running != thread_runtime_.end()) {
+        turn_id = running->second.turn_id;
+    }
+    if (turn_id.empty()) {
+        turn_id = active_turn_id;
+    }
+    if (active_thread_id.empty() || turn_id.empty()) {
+        last_error = "No active turn to cancel";
+        set_state(AppState::Ready, L"Nothing to cancel");
         return;
     }
-    Json p = Json::object();
-    p["threadId"] = Json::string(active_thread_id);
-    p["turnId"] = Json::string(running->second.turn_id);
-    turn_interrupt_id_ = send_req("turn/interrupt", std::move(p));
-    set_state(AppState::Interrupted, L"Cancelling…");
+    interrupt_thread_turn(active_thread_id, turn_id);
 }
 
 bool Session::thread_busy(const std::string& thread_id) const {
@@ -1047,13 +1422,9 @@ void Session::extract_history(const Json& thread, const std::string& thread_id) 
             for (const auto& message : chat->local_messages.array_items()) {
                 local.push_back({message.at("user").as_bool(false), message.at("text").as_string()});
             }
-            const auto local_agents = std::count_if(local.begin(), local.end(),
-                                                    [](const HistoryMessage& m) { return !m.user; });
-            std::size_t seen_agents = 0;
-            for (const auto& message : history_messages) {
-                if (!message.user && seen_agents++ >= local_agents) local.push_back(message);
+            if (!local.empty()) {
+                history_messages = merge_provider_agent_messages(local, history_messages);
             }
-            if (!local.empty()) history_messages = std::move(local);
         }
     }
     save_local_history(store, paths.store_path, active_thread_id, history_messages);
@@ -1063,6 +1434,7 @@ void Session::extract_history(const Json& thread, const std::string& thread_id) 
         stream_buffer.clear();
     }
     transcript_replace = true;
+    clear_orphaned_in_progress_turn(thread_id, thread);
 }
 
 void Session::handle_server_request(const Json& msg) {
@@ -1229,21 +1601,45 @@ void Session::handle_response(const Json& msg) {
             if (id == thread_start_id_) thread_start_id_ = -1;
         }
         if (const auto started = turn_start_threads_.find(id); started != turn_start_threads_.end()) {
-            auto& running = thread_runtime_[started->second];
-            running.activity.finish("Failed");
-            if (started->second == active_thread_id) activity = running.activity;
+            const std::string thread_id = started->second;
+            auto& running = thread_runtime_[thread_id];
+            const std::string fail_label =
+                last_error.empty() ? std::string("Failed") : AgentActivity::label("Failed: " + last_error);
+            running.activity.finish(fail_label);
+            if (thread_id == active_thread_id) activity = running.activity;
             turn_start_threads_.erase(started);
+            // Common after relaunch: Codex still holds an inProgress turn we no longer track.
+            if (!running.turn_id.empty()) {
+                interrupt_thread_turn(thread_id, running.turn_id);
+            }
         }
         if (id == initialize_id_) {
             set_state(AppState::Failed, L"Initialize failed");
         } else if (id == turn_start_id_ || id == thread_start_id_) {
-            set_state(AppState::Failed, L"Turn could not start");
+            set_state(AppState::Failed,
+                      last_error.empty() ? L"Turn could not start" : utf16("Turn could not start: " + last_error));
         } else if (id == turn_interrupt_id_) {
             set_state(AppState::Generating, L"Cancellation failed — still working");
         }
         return;
     }
     const Json& result = msg.at("result");
+    if (id == turn_interrupt_id_) {
+        turn_interrupt_id_ = 0;
+        if (!active_thread_id.empty()) {
+            auto& running = thread_runtime_[active_thread_id];
+            if (!running.turn_id.empty()) {
+                turn_threads_.erase(running.turn_id);
+                running.turn_id.clear();
+            }
+            running.activity.finish("Interrupted");
+            activity = running.activity;
+        }
+        active_turn_id.clear();
+        last_error.clear();
+        set_state(AppState::Ready, L"Ready — stuck turn cleared");
+        return;
+    }
     if (id == initialize_id_) {
         send_notify("initialized", Json::object());
         isolated_home_note = L"Runtime CODEX_HOME: " + utf16(result.at("codexHome").as_string());
@@ -1334,7 +1730,9 @@ void Session::handle_response(const Json& msg) {
         return;
     }
     if (id == thread_resume_id_) {
-        active_thread_id = result.at("thread").at("id").as_string();
+        const Json& thread = result.at("thread");
+        active_thread_id = thread.at("id").as_string();
+        clear_orphaned_in_progress_turn(active_thread_id, thread);
         return;
     }
     if (const auto read = thread_read_threads_.find(id); read != thread_read_threads_.end()) {

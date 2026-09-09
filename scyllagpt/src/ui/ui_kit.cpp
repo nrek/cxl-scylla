@@ -58,10 +58,12 @@ void append_markdown(HWND view, const std::wstring& text) {
         CHARRANGE range{}; SendMessageW(view, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&range));
         CHARFORMAT2W cf{}; cf.cbSize = sizeof(cf);
         cf.dwMask = CFM_COLOR | CFM_BACKCOLOR | CFM_BOLD | CFM_ITALIC | CFM_STRIKEOUT | CFM_LINK | CFM_UNDERLINE | CFM_FACE | CFM_SIZE;
-        cf.crTextColor = run.link.empty() ? theme().text : theme().amber_text;
-        cf.crBackColor = theme().input;
+        const bool attachment_link = run.link.starts_with(L"scylla-attachments:");
+        cf.crTextColor = run.link.empty() ? theme().text : (attachment_link ? theme().text : theme().amber_text);
+        cf.crBackColor = attachment_link ? theme().raised : theme().input;
         cf.dwEffects = (run.bold ? CFE_BOLD : 0) | (run.italic ? CFE_ITALIC : 0) | (run.strike ? CFE_STRIKEOUT : 0) |
-            (run.link.empty() ? 0 : CFE_LINK | CFE_UNDERLINE) | (run.code ? 0 : CFE_AUTOBACKCOLOR);
+            (run.link.empty() ? 0 : CFE_LINK | (attachment_link ? 0 : CFE_UNDERLINE)) |
+            (run.code || attachment_link ? 0 : CFE_AUTOBACKCOLOR);
         cf.yHeight = (run.heading ? 22 - run.heading * 2 : 11) * 20;
         lstrcpynW(cf.szFaceName, run.code ? L"Consolas" : L"Segoe UI", LF_FACESIZE);
         SendMessageW(view, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
@@ -77,6 +79,78 @@ void set_markdown(HWND view, const std::wstring& text) {
     SendMessageW(view, EM_SETSEL, 0, 0);
     SendMessageW(view, WM_VSCROLL, SB_TOP, 0);
     SendMessageW(view, WM_SETREDRAW, TRUE, 0); InvalidateRect(view, nullptr, TRUE);
+}
+std::wstring set_markdown_body(HWND view, const std::wstring& source, const MessageBodyStyle& style) {
+    SetWindowSubclass(view, markdown_subclass, 0x534D4456, 0);
+    // ENM_REQUESTRESIZE lets the host ask the control how tall its wrapped content is, so row
+    // heights come from the text engine that actually renders them.
+    SendMessageW(view, EM_SETEVENTMASK, 0,
+                 SendMessageW(view, EM_GETEVENTMASK, 0, 0) | ENM_LINK | ENM_REQUESTRESIZE);
+    SendMessageW(view, WM_SETREDRAW, FALSE, 0);
+    SetWindowTextW(view, L"");
+    markdown_links[view].clear();
+    SendMessageW(view, EM_SETBKGNDCOLOR, 0, style.bg);
+    std::wstring assembled;
+    for (const auto& run : parse_markdown(source)) {
+        if (run.text.empty()) continue;
+        CHARRANGE tail{-1, -1};
+        SendMessageW(view, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&tail));
+        CHARRANGE before{};
+        SendMessageW(view, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&before));
+        const bool is_link = !run.link.empty();
+        CHARFORMAT2W cf{};
+        cf.cbSize = sizeof(cf);
+        cf.dwMask = CFM_COLOR | CFM_BACKCOLOR | CFM_FACE | CFM_SIZE | CFM_BOLD | CFM_ITALIC |
+                    CFM_STRIKEOUT | CFM_UNDERLINE | CFM_LINK;
+        cf.crTextColor = is_link ? style.link : style.text;
+        cf.crBackColor = run.code ? style.code_bg : style.bg;
+        if (run.bold) cf.dwEffects |= CFE_BOLD;
+        if (run.italic) cf.dwEffects |= CFE_ITALIC;
+        if (run.strike) cf.dwEffects |= CFE_STRIKEOUT;
+        if (is_link) cf.dwEffects |= CFE_LINK | CFE_UNDERLINE;
+        int pt = style.base_pt;
+        if (run.heading == 1) pt = style.base_pt + 6;
+        else if (run.heading == 2) pt = style.base_pt + 4;
+        else if (run.heading == 3) pt = style.base_pt + 2;
+        else if (run.heading > 0) pt = style.base_pt + 1;
+        cf.yHeight = pt * 20;
+        lstrcpynW(cf.szFaceName, run.code ? style.mono : style.face, LF_FACESIZE);
+        SendMessageW(view, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
+        SendMessageW(view, EM_REPLACESEL, FALSE, reinterpret_cast<LPARAM>(run.text.c_str()));
+        CHARRANGE after{};
+        SendMessageW(view, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&after));
+        if (is_link) markdown_links[view].push_back({before.cpMin, after.cpMin, run.link});
+        assembled += run.text;
+        // Keep assembled offsets aligned with RichEdit character positions even if the control
+        // normalizes a run, so callers can locate spans by index afterwards.
+        if (static_cast<long>(assembled.size()) != after.cpMin) {
+            assembled.resize(static_cast<std::size_t>((std::max)(0L, after.cpMin)), L' ');
+        }
+    }
+    SendMessageW(view, EM_SETSEL, 0, 0);
+    SendMessageW(view, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(view, nullptr, FALSE);
+    return assembled;
+}
+
+void apply_link_spans(HWND view, const std::vector<CharLinkSpan>& spans, COLORREF link_color) {
+    if (spans.empty()) return;
+    SendMessageW(view, WM_SETREDRAW, FALSE, 0);
+    for (const auto& span : spans) {
+        if (span.end <= span.begin) continue;
+        CHARRANGE range{span.begin, span.end};
+        SendMessageW(view, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&range));
+        CHARFORMAT2W cf{};
+        cf.cbSize = sizeof(cf);
+        cf.dwMask = CFM_COLOR | CFM_LINK | CFM_UNDERLINE;
+        cf.crTextColor = link_color;
+        cf.dwEffects = CFE_LINK | CFE_UNDERLINE;
+        SendMessageW(view, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&cf));
+        markdown_links[view].push_back({span.begin, span.end, span.target});
+    }
+    SendMessageW(view, EM_SETSEL, 0, 0);
+    SendMessageW(view, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(view, nullptr, FALSE);
 }
 HWND create_markdown_view(HWND parent, HINSTANCE inst, UINT id, HFONT font) {
     LoadLibraryW(L"Msftedit.dll");
@@ -719,6 +793,19 @@ HWND create_text_field(HWND parent, HINSTANCE inst, UINT id, HFONT font, bool pa
     apply_control_chrome(h, font);
     SetWindowSubclass(h, field_subclass, kFieldSubclassId, 0);
     center_field_text(h);
+    return h;
+}
+
+HWND create_text_area(HWND parent, HINSTANCE inst, UINT id, HFONT font) {
+    HWND h = CreateWindowExW(0, L"EDIT", L"",
+                             WS_CHILD | WS_TABSTOP | WS_VSCROLL | ES_LEFT | ES_MULTILINE |
+                                 ES_AUTOVSCROLL | ES_WANTRETURN,
+                             0, 0, 0, 0, parent,
+                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), inst, nullptr);
+    apply_control_chrome(h, font);
+    style_scroll_host(h, theme().input);
+    SetWindowSubclass(h, document_subclass, 0x534B5441, 0);
+    SendMessageW(h, EM_SETLIMITTEXT, 16 * 1024 * 1024, 0);
     return h;
 }
 

@@ -191,6 +191,7 @@ Paths make_paths() {
     p.mcp_path = join_path(p.appdata, L"mcp_connections.json");
     p.terminals_path = join_path(p.appdata, L"terminals.json");
     p.environments_path = join_path(p.appdata, L"environments.json");
+    p.connections_path = join_path(p.appdata, L"connections.json");
     p.recovery_dir = join_path(p.appdata, L"recovery");
     p.attachments_dir = join_path(p.appdata, L"attachments");
     p.stderr_log = join_path(p.appdata, L"runtime-stderr.log");

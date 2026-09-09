@@ -1540,6 +1540,20 @@ KeyringStatus Keyring::authorize_use(std::string_view name, std::string_view ope
     return KeyringStatus::Ok;
 }
 
+KeyringStatus Keyring::authorize_use_many(const std::vector<std::string_view>& names,
+                                          std::string_view operation_id) {
+    if (!unlocked_) return KeyringStatus::UnlockedRequired;
+    if (operation_id.empty()) return KeyringStatus::InvalidName;
+    for (const auto name : names) {
+        const auto found = std::find_if(entries_.begin(), entries_.end(),
+                                        [&](const Entry& entry) { return entry.name == name; });
+        if (found == entries_.end()) return KeyringStatus::NotFound;
+    }
+    mark_activity();
+    for (const auto name : names) authorizations_.push_back(Auth{std::string(name), std::string(operation_id)});
+    return KeyringStatus::Ok;
+}
+
 KeyringStatus Keyring::build_authorized_env_block(std::string_view operation_id,
                                                   std::wstring& out_fragment) {
     out_fragment.clear();

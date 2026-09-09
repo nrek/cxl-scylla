@@ -6,7 +6,7 @@ The box keeps partial-turn file results on completion, failure, or interruption,
 
 ## Cursor status
 
-**Protocol foundation only; Cursor account connection and chat are not enabled.** Settings → AI Providers distinguishes an absent Agent CLI from a discovered executable. Discovery checks the user's `.local/bin` and absolute local PATH entries for Agent launchers; it does not treat Cursor desktop as an agent or execute candidate files.
+**Protocol foundation only; Cursor account connection and chat are not enabled.** Cursor is hidden from Settings → AI Providers until Scylla has a working process transport, authentication flow, and agent execution path. Executable discovery alone is not presented as a provider capability.
 
 `AcpClient` is a transport-independent JSON-RPC 2.0 client compiled into Workbench and tested with fixtures. It supports version negotiation, advertised authentication methods, session create/load, advertised model/mode selection, prompt text streaming, tool/plan activity, partial tool updates, cancellation, and disconnect/error states. Model IDs come from the server. Unsupported client requests receive errors; permissions and blocking Cursor extensions are cancelled. These replies and `clientCapabilities` are **not filesystem or shell isolation**. An empty `mcpServers` array also does not disable Cursor's native MCP configuration.
 
@@ -14,7 +14,7 @@ Still required before enabling Send: native process transport and bounded asynch
 
 ## Evidence and verification
 
-Cursor's official [ACP documentation](https://cursor.com/docs/cli/acp) and [installation documentation](https://cursor.com/docs/cli/installation), read 2026-09-07, document `agent acp`, newline-delimited JSON-RPC 2.0, `cursor_login`, session modes, and native Windows installation. No Agent CLI was found in the local discovery locations, so no live ACP/authentication claim is made.
+Cursor's official [ACP documentation](https://cursor.com/docs/cli/acp) and [installation documentation](https://cursor.com/docs/cli/installation), read 2026-09-07, document `agent acp`, newline-delimited JSON-RPC 2.0, `cursor_login`, session modes, and native Windows installation. A Cursor-managed launcher was later found, but it is not sufficient evidence of a usable integration and failed direct invocation in the Scylla environment. No live ACP/authentication claim is made.
 
 Build and run the focused tests from a Windows compiler environment:
 

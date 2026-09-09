@@ -113,7 +113,10 @@ void StrataSettingsUi::layout(const RECT &content) {
         y += height + m.pad_tight;
     };
     row(heading_, m.row_h);
-    row(desc_, m.row_h);
+    // Static labels use the system word-wrapping behavior. Reserve two lines so a
+    // narrow settings column cannot place the next control over the description.
+    const int message_h = m.row_h * 2;
+    row(desc_, message_h);
     ui_space::place_labeled_row(workspace_label_, workspace_, col, y, m);
     ui_kit::center_field_text(workspace_);
     y += m.row_h + m.pad_tight;
@@ -133,8 +136,10 @@ void StrataSettingsUi::layout(const RECT &content) {
     MoveWindow(search_btn_, x + w - aw, y, aw, m.row_h, TRUE);
     y += m.row_h + m.pad_tight;
     row(status_, m.row_h);
-    int height =
-        (std::max)(m.row_h, static_cast<int>(col.bottom) - y - 3 * m.row_h - 3 * m.pad_tight - m.pad_outer);
+    // The document/results area shares the page with the close/open row and two
+    // wrapped status rows. Budget their actual heights before expanding the list.
+    const int fixed_after_results = m.row_h + 2 * message_h + 3 * m.pad_tight + m.pad_outer;
+    int height = (std::max)(m.row_h, static_cast<int>(col.bottom) - y - fixed_after_results);
     MoveWindow(results_, x, y, w, height, TRUE);
     MoveWindow(detail_, x, y, w, height, TRUE);
     y += height + m.pad_tight;
@@ -142,8 +147,8 @@ void StrataSettingsUi::layout(const RECT &content) {
     MoveWindow(close_doc_, x, y, aw + m.row_h, m.row_h, TRUE);
     MoveWindow(save_binding_btn_, x + w - aw, y, aw, m.row_h, TRUE);
     y += m.row_h + m.pad_tight;
-    row(diag_, m.row_h);
-    row(hint_, m.row_h);
+    row(diag_, message_h);
+    row(hint_, message_h);
     update_visibility();
 }
 void StrataSettingsUi::set_workspace_path(const std::wstring &p) {

@@ -16,6 +16,7 @@ struct Paths {
     std::wstring mcp_path;            // MCP connections JSON (Phase 4)
     std::wstring terminals_path;      // custom terminal profiles JSON
     std::wstring environments_path;   // project environments JSON (App Keyring Phase 2)
+    std::wstring connections_path;    // project-bound brokered connections JSON
     std::wstring recovery_dir;
     std::wstring attachments_dir;  // pasted/attached images for composer
     std::wstring stderr_log;

@@ -5,6 +5,7 @@
 #include <richedit.h>
 #include <uxtheme.h>
 #include <vsstyle.h>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <cwctype>
@@ -401,17 +402,92 @@ void apply_dark_child(HWND hwnd) {
 namespace {
 
 constexpr UINT_PTR kThinSbSubclassId = 0x5342594C;  // 'SBYL'
-constexpr UINT_PTR kThinSbTrackTimerId = 0x53425452;  // 'SBTR'
 constexpr wchar_t kThinSbTrackingProp[] = L"ScyllaThinScrollbarTracking";
 constexpr wchar_t kThinSbHoverProp[] = L"ScyllaThinScrollbarHover";
-constexpr UINT kThinSbDeferredPaint = WM_APP + 0x31A;
+constexpr wchar_t kThinSbGrabProp[] = L"ScyllaThinScrollbarGrab";
+
+enum class ScrollAxis : INT_PTR { None = 0, Vertical = 1, Horizontal = 2 };
+
+struct ScrollGeometry {
+    RECT track{};
+    RECT thumb{};
+    int min = 0;
+    int max_position = 0;
+    int position = 0;
+    int travel = 0;
+};
 
 int sb_thumb_width(HWND hwnd) {
     const int dpi = static_cast<int>(GetDpiForWindow(hwnd));
     return (std::max)(6, MulDiv(8, dpi, 96));
 }
 
-bool paint_thin_vscrollbar(HWND hwnd, COLORREF track, bool active) {
+ScrollAxis tracking_axis(HWND hwnd) {
+    return static_cast<ScrollAxis>(reinterpret_cast<INT_PTR>(GetPropW(hwnd, kThinSbTrackingProp)));
+}
+
+void set_tracking_axis(HWND hwnd, ScrollAxis axis) {
+    if (axis == ScrollAxis::None) RemovePropW(hwnd, kThinSbTrackingProp);
+    else SetPropW(hwnd, kThinSbTrackingProp, reinterpret_cast<HANDLE>(static_cast<INT_PTR>(axis)));
+}
+
+bool scrollbar_geometry(HWND hwnd, int bar, ScrollGeometry* geometry) {
+    if (!hwnd || !geometry) return false;
+    const LONG style = GetWindowLongW(hwnd, GWL_STYLE);
+    if ((bar == SB_VERT && (style & WS_VSCROLL) == 0) ||
+        (bar == SB_HORZ && (style & WS_HSCROLL) == 0)) return false;
+
+    SCROLLINFO si{sizeof(si), SIF_RANGE | SIF_PAGE | SIF_POS};
+    if (!GetScrollInfo(hwnd, bar, &si)) return false;
+    const int span = si.nMax - si.nMin + 1;
+    if (span <= 0 || static_cast<int>(si.nPage) >= span) return false;
+
+    RECT window{};
+    RECT client{};
+    GetWindowRect(hwnd, &window);
+    GetClientRect(hwnd, &client);
+    POINT client_tl{0, 0};
+    POINT client_br{client.right, client.bottom};
+    ClientToScreen(hwnd, &client_tl);
+    ClientToScreen(hwnd, &client_br);
+
+    if (bar == SB_VERT) {
+        const int width = GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(hwnd));
+        const int left = client_tl.x - window.left + client.right;
+        geometry->track = {left, client_tl.y - window.top, left + width, client_br.y - window.top};
+    } else {
+        const int height = GetSystemMetricsForDpi(SM_CYHSCROLL, GetDpiForWindow(hwnd));
+        const int top = client_tl.y - window.top + client.bottom;
+        geometry->track = {client_tl.x - window.left, top, client_br.x - window.left, top + height};
+    }
+
+    const int track_length = bar == SB_VERT ? geometry->track.bottom - geometry->track.top
+                                             : geometry->track.right - geometry->track.left;
+    if (track_length <= 0) return false;
+    int thumb_length = MulDiv(static_cast<int>(si.nPage), track_length, span);
+    thumb_length = (std::max)((std::max)(16, MulDiv(24, static_cast<int>(GetDpiForWindow(hwnd)), 96)), thumb_length);
+    thumb_length = (std::min)(track_length, thumb_length);
+    geometry->travel = track_length - thumb_length;
+    geometry->min = si.nMin;
+    geometry->max_position = (std::max)(si.nMin, si.nMax - static_cast<int>(si.nPage) + 1);
+    geometry->position = (std::max)(si.nMin, (std::min)(si.nPos, geometry->max_position));
+    const int scrollable = geometry->max_position - geometry->min;
+    const int offset = geometry->travel > 0 && scrollable > 0
+        ? MulDiv(geometry->position - geometry->min, geometry->travel, scrollable) : 0;
+    const int thickness = sb_thumb_width(hwnd);
+    if (bar == SB_VERT) {
+        const int middle = (geometry->track.left + geometry->track.right) / 2;
+        geometry->thumb = {middle - thickness / 2, geometry->track.top + offset,
+                           middle + (thickness + 1) / 2, geometry->track.top + offset + thumb_length};
+    } else {
+        const int middle = (geometry->track.top + geometry->track.bottom) / 2;
+        geometry->thumb = {geometry->track.left + offset, middle - thickness / 2,
+                           geometry->track.left + offset + thumb_length, middle + (thickness + 1) / 2};
+    }
+    return true;
+}
+
+bool paint_thin_vscrollbar(HWND hwnd, COLORREF track, COLORREF thumb_color) {
     if (!hwnd || high_contrast_on()) {
         return false;
     }
@@ -482,12 +558,12 @@ bool paint_thin_vscrollbar(HWND hwnd, COLORREF track, bool active) {
         thumb.right = sb_right - 1;
         thumb.left = thumb.right - tw;
     }
-    fill_rect(dc, thumb, active ? theme().scroll_thumb_active : theme().scroll_thumb);
+    fill_rect(dc, thumb, thumb_color);
     ReleaseDC(hwnd, dc);
     return true;
 }
 
-bool paint_thin_hscrollbar(HWND hwnd, COLORREF track, bool active) {
+bool paint_thin_hscrollbar(HWND hwnd, COLORREF track, COLORREF thumb_color) {
     if (!hwnd || high_contrast_on()) {
         return false;
     }
@@ -550,14 +626,67 @@ bool paint_thin_hscrollbar(HWND hwnd, COLORREF track, bool active) {
     const int th = sb_thumb_width(hwnd);
     const int mid = (sb_top + sb_bottom) / 2;
     RECT thumb{thumb_x, mid - th / 2, thumb_x + thumb_w, mid + (th + 1) / 2};
-    fill_rect(dc, thumb, active ? theme().scroll_thumb_active : theme().scroll_thumb);
+    fill_rect(dc, thumb, thumb_color);
     ReleaseDC(hwnd, dc);
     return true;
 }
 
 void paint_thin_scrollbars(HWND hwnd, COLORREF track, bool active = false) {
-    paint_thin_vscrollbar(hwnd, track, active);
-    paint_thin_hscrollbar(hwnd, track, active);
+    const bool dragging = tracking_axis(hwnd) != ScrollAxis::None;
+    const bool hover = active || GetPropW(hwnd, kThinSbHoverProp) != nullptr;
+    const COLORREF thumb = dragging ? theme().scroll_thumb_active
+                                    : (hover ? theme().scroll_thumb_hot : theme().scroll_thumb);
+    paint_thin_vscrollbar(hwnd, track, thumb);
+    paint_thin_hscrollbar(hwnd, track, thumb);
+}
+
+POINT window_point_from_screen(HWND hwnd, LPARAM lparam) {
+    RECT window{};
+    GetWindowRect(hwnd, &window);
+    return {GET_X_LPARAM(lparam) - window.left, GET_Y_LPARAM(lparam) - window.top};
+}
+
+POINT window_point_from_client(HWND hwnd, LPARAM lparam) {
+    POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+    ClientToScreen(hwnd, &point);
+    RECT window{};
+    GetWindowRect(hwnd, &window);
+    point.x -= window.left;
+    point.y -= window.top;
+    return point;
+}
+
+void apply_scroll_thumb(HWND hwnd, ScrollAxis axis, const ScrollGeometry& geometry, int pointer_coordinate) {
+    const int grab = static_cast<int>(reinterpret_cast<INT_PTR>(GetPropW(hwnd, kThinSbGrabProp)));
+    const int track_start = axis == ScrollAxis::Vertical ? geometry.track.top : geometry.track.left;
+    const int thumb_length = axis == ScrollAxis::Vertical ? geometry.thumb.bottom - geometry.thumb.top
+                                                           : geometry.thumb.right - geometry.thumb.left;
+    const int track_length = axis == ScrollAxis::Vertical ? geometry.track.bottom - geometry.track.top
+                                                           : geometry.track.right - geometry.track.left;
+    const int travel = (std::max)(0, track_length - thumb_length);
+    const int thumb_start = (std::max)(track_start,
+        (std::min)(pointer_coordinate - grab, track_start + travel));
+    const int position = travel > 0
+        ? geometry.min + MulDiv(thumb_start - track_start, geometry.max_position - geometry.min, travel)
+        : geometry.min;
+    const int bar = axis == ScrollAxis::Vertical ? SB_VERT : SB_HORZ;
+    SCROLLINFO si{sizeof(si), SIF_POS};
+    si.nPos = position;
+    SetScrollInfo(hwnd, bar, &si, FALSE);
+    SendMessageW(hwnd, axis == ScrollAxis::Vertical ? WM_VSCROLL : WM_HSCROLL,
+                 MAKEWPARAM(SB_THUMBTRACK, position & 0xffff), 0);
+}
+
+void finish_scroll_thumb(HWND hwnd, ScrollAxis axis) {
+    if (axis == ScrollAxis::None) return;
+    const int bar = axis == ScrollAxis::Vertical ? SB_VERT : SB_HORZ;
+    SCROLLINFO si{sizeof(si), SIF_POS};
+    GetScrollInfo(hwnd, bar, &si);
+    SendMessageW(hwnd, axis == ScrollAxis::Vertical ? WM_VSCROLL : WM_HSCROLL,
+                 MAKEWPARAM(SB_THUMBPOSITION, si.nPos & 0xffff), 0);
+    set_tracking_axis(hwnd, ScrollAxis::None);
+    RemovePropW(hwnd, kThinSbGrabProp);
+    if (GetCapture() == hwnd) ReleaseCapture();
 }
 
 LRESULT CALLBACK thin_sb_subclass(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, UINT_PTR id, DWORD_PTR ref) {
@@ -565,42 +694,42 @@ LRESULT CALLBACK thin_sb_subclass(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
     switch (msg) {
         case WM_NCLBUTTONDOWN:
             if (wparam == HTVSCROLL || wparam == HTHSCROLL) {
-                SetPropW(hwnd, kThinSbTrackingProp, reinterpret_cast<HANDLE>(1));
-                // DefSubclassProc enters Windows' nested scrollbar tracking loop.
-                // Its stock NC painter can run after ours, so repaint from a timer
-                // that the nested loop continues to dispatch until mouse release.
-                SetTimer(hwnd, kThinSbTrackTimerId, 15, nullptr);
-                paint_thin_scrollbars(hwnd, track, true);
-                const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
-                RemovePropW(hwnd, kThinSbTrackingProp);
-                if (GetPropW(hwnd, kThinSbHoverProp)) SetTimer(hwnd, kThinSbTrackTimerId, 15, nullptr);
-                else KillTimer(hwnd, kThinSbTrackTimerId);
-                paint_thin_scrollbars(hwnd, track, GetPropW(hwnd, kThinSbHoverProp) != nullptr);
-                return r;
-            }
-            break;
-        case WM_TIMER:
-            if (wparam == kThinSbTrackTimerId &&
-                (GetPropW(hwnd, kThinSbTrackingProp) || GetPropW(hwnd, kThinSbHoverProp))) {
+                const ScrollAxis axis = wparam == HTVSCROLL ? ScrollAxis::Vertical : ScrollAxis::Horizontal;
+                ScrollGeometry geometry{};
+                const int bar = axis == ScrollAxis::Vertical ? SB_VERT : SB_HORZ;
+                if (!scrollbar_geometry(hwnd, bar, &geometry)) return 0;
+                SetFocus(hwnd);
+                const POINT point = window_point_from_screen(hwnd, lparam);
+                if (PtInRect(&geometry.thumb, point)) {
+                    set_tracking_axis(hwnd, axis);
+                    const int grab = axis == ScrollAxis::Vertical ? point.y - geometry.thumb.top
+                                                                  : point.x - geometry.thumb.left;
+                    SetPropW(hwnd, kThinSbGrabProp, reinterpret_cast<HANDLE>(static_cast<INT_PTR>(grab)));
+                    SetCapture(hwnd);
+                } else {
+                    const bool before = axis == ScrollAxis::Vertical ? point.y < geometry.thumb.top
+                                                                     : point.x < geometry.thumb.left;
+                    SendMessageW(hwnd, axis == ScrollAxis::Vertical ? WM_VSCROLL : WM_HSCROLL,
+                                 MAKEWPARAM(before ? SB_PAGEUP : SB_PAGEDOWN, 0), 0);
+                }
                 paint_thin_scrollbars(hwnd, track, true);
                 return 0;
             }
             break;
-        case kThinSbDeferredPaint:
-            paint_thin_scrollbars(hwnd, track, GetPropW(hwnd, kThinSbTrackingProp) != nullptr);
-            return 0;
         case WM_CAPTURECHANGED:
         case WM_CANCELMODE: {
+            const ScrollAxis axis = tracking_axis(hwnd);
+            finish_scroll_thumb(hwnd, axis);
             const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
-            if (GetPropW(hwnd, kThinSbTrackingProp)) {
-                RemovePropW(hwnd, kThinSbTrackingProp);
-                if (GetPropW(hwnd, kThinSbHoverProp)) SetTimer(hwnd, kThinSbTrackTimerId, 15, nullptr);
-                else KillTimer(hwnd, kThinSbTrackTimerId);
-                paint_thin_scrollbars(hwnd, track);
-            }
+            paint_thin_scrollbars(hwnd, track);
             return r;
         }
         case WM_NCPAINT:
+            // The overlay owns the scrollbar non-client surface. Letting the
+            // default painter run here briefly replaces it with the system
+            // white scrollbar during hover/track transitions.
+            paint_thin_scrollbars(hwnd, track, GetPropW(hwnd, kThinSbTrackingProp) != nullptr);
+            return 0;
         case WM_PAINT:
         case WM_NCCALCSIZE:
         case WM_SETTEXT:
@@ -615,16 +744,20 @@ LRESULT CALLBACK thin_sb_subclass(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
         case WM_MOUSEHWHEEL: {
             const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
             paint_thin_scrollbars(hwnd, track);
-            PostMessageW(hwnd, kThinSbDeferredPaint, 0, 0);
             return r;
         }
         case WM_NCLBUTTONUP:
-        case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
+            if (tracking_axis(hwnd) != ScrollAxis::None) {
+                finish_scroll_thumb(hwnd, tracking_axis(hwnd));
+                paint_thin_scrollbars(hwnd, track, GetPropW(hwnd, kThinSbHoverProp) != nullptr);
+                return 0;
+            }
+            [[fallthrough]];
+        case WM_LBUTTONDOWN:
         case WM_SETCURSOR: {
             const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
             paint_thin_scrollbars(hwnd, track, GetPropW(hwnd, kThinSbTrackingProp) != nullptr);
-            PostMessageW(hwnd, kThinSbDeferredPaint, 0, 0);
             return r;
         }
         case WM_NCMOUSEMOVE:
@@ -632,19 +765,31 @@ LRESULT CALLBACK thin_sb_subclass(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
                 SetPropW(hwnd, kThinSbHoverProp, reinterpret_cast<HANDLE>(1));
                 TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE | TME_NONCLIENT, hwnd, 0};
                 TrackMouseEvent(&tme);
-                SetTimer(hwnd, kThinSbTrackTimerId, 15, nullptr);
+                paint_thin_scrollbars(hwnd, track, true);
+                return 0;
             }
             [[fallthrough]];
         case WM_MOUSEMOVE: {
+            const ScrollAxis axis = tracking_axis(hwnd);
+            if (axis != ScrollAxis::None) {
+                ScrollGeometry geometry{};
+                const int bar = axis == ScrollAxis::Vertical ? SB_VERT : SB_HORZ;
+                if (scrollbar_geometry(hwnd, bar, &geometry)) {
+                    const POINT point = window_point_from_client(hwnd, lparam);
+                    apply_scroll_thumb(hwnd, axis, geometry,
+                                       axis == ScrollAxis::Vertical ? point.y : point.x);
+                }
+                paint_thin_scrollbars(hwnd, track, true);
+                return 0;
+            }
             const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
             paint_thin_scrollbars(hwnd, track, GetPropW(hwnd, kThinSbHoverProp) != nullptr);
             return r;
         }
         case WM_NCMOUSELEAVE:
             RemovePropW(hwnd, kThinSbHoverProp);
-            if (!GetPropW(hwnd, kThinSbTrackingProp)) KillTimer(hwnd, kThinSbTrackTimerId);
             paint_thin_scrollbars(hwnd, track);
-            return DefSubclassProc(hwnd, msg, wparam, lparam);
+            return 0;
         case WM_SIZE:
         case WM_STYLECHANGED: {
             const LRESULT r = DefSubclassProc(hwnd, msg, wparam, lparam);
@@ -655,9 +800,9 @@ LRESULT CALLBACK thin_sb_subclass(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
             break;
     }
     if (msg == WM_NCDESTROY) {
-        KillTimer(hwnd, kThinSbTrackTimerId);
         RemovePropW(hwnd, kThinSbTrackingProp);
         RemovePropW(hwnd, kThinSbHoverProp);
+        RemovePropW(hwnd, kThinSbGrabProp);
         RemoveWindowSubclass(hwnd, thin_sb_subclass, id);
     }
     return DefSubclassProc(hwnd, msg, wparam, lparam);
@@ -669,11 +814,12 @@ void install_thin_scrollbar(HWND hwnd, COLORREF track) {
     if (!hwnd || high_contrast_on()) {
         return;
     }
-    // Preserve the caller's control theme. ui_kit scroll hosts already use
-    // DarkMode_Explorer, which provides a dark native fallback if Windows
-    // repaints between overlay frames. Specialized hosts may deliberately
-    // choose an empty theme before installing the overlay.
+    // Preserve the caller's control theme while taking ownership of scrollbar
+    // painting and pointer tracking through the shared Scylla controller.
     RemoveWindowSubclass(hwnd, thin_sb_subclass, kThinSbSubclassId);
+    RemovePropW(hwnd, kThinSbTrackingProp);
+    RemovePropW(hwnd, kThinSbHoverProp);
+    RemovePropW(hwnd, kThinSbGrabProp);
     SetWindowSubclass(hwnd, thin_sb_subclass, kThinSbSubclassId, static_cast<DWORD_PTR>(track));
     refresh_thin_scrollbar(hwnd);
 }

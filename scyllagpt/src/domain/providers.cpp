@@ -17,6 +17,52 @@ namespace scyllagpt {
 namespace {
 
 constexpr wchar_t kClaudeCredTarget[] = L"ScyllaGPT/ClaudeApiKey";
+constexpr wchar_t kOpenAiCredTarget[] = L"ScyllaGPT/OpenAiApiKey";
+
+bool cred_save(const wchar_t* target, const wchar_t* username, const std::wstring& key) {
+    if (!target || key.empty()) {
+        return false;
+    }
+    CREDENTIALW cred{};
+    cred.Type = CRED_TYPE_GENERIC;
+    cred.TargetName = const_cast<wchar_t*>(target);
+    cred.CredentialBlobSize = static_cast<DWORD>((key.size() + 1) * sizeof(wchar_t));
+    cred.CredentialBlob = reinterpret_cast<LPBYTE>(const_cast<wchar_t*>(key.c_str()));
+    cred.Persist = CRED_PERSIST_ENTERPRISE;
+    cred.UserName = const_cast<wchar_t*>(username);
+    return CredWriteW(&cred, 0) != 0;
+}
+
+bool cred_load(const wchar_t* target, std::wstring* out) {
+    if (!out || !target) {
+        return false;
+    }
+    out->clear();
+    PCREDENTIALW cred = nullptr;
+    if (!CredReadW(target, CRED_TYPE_GENERIC, 0, &cred) || !cred) {
+        return false;
+    }
+    if (cred->CredentialBlobSize >= sizeof(wchar_t) && cred->CredentialBlob) {
+        const std::size_t n = cred->CredentialBlobSize / sizeof(wchar_t);
+        out->assign(reinterpret_cast<wchar_t*>(cred->CredentialBlob), n);
+        while (!out->empty() && out->back() == L'\0') {
+            out->pop_back();
+        }
+    }
+    CredFree(cred);
+    return !out->empty();
+}
+
+bool cred_clear(const wchar_t* target) {
+    return CredDeleteW(target, CRED_TYPE_GENERIC, 0) != 0 || GetLastError() == ERROR_NOT_FOUND;
+}
+
+std::string mask_key_hint(const std::wstring& key, const char* prefix) {
+    if (key.size() > 8) {
+        return std::string(prefix) + utf8(key.substr(key.size() - 4));
+    }
+    return "key saved";
+}
 
 ClaudeCodeSession g_claude_session_cache{};
 DWORD g_claude_session_cache_tick = 0;
@@ -137,46 +183,37 @@ bool run_claude_cli(const std::wstring& args, std::string* stdout_utf8, std::wst
 }  // namespace
 
 bool claude_api_key_save(const std::wstring& key) {
-    if (key.empty()) {
-        return false;
-    }
-    CREDENTIALW cred{};
-    cred.Type = CRED_TYPE_GENERIC;
-    cred.TargetName = const_cast<wchar_t*>(kClaudeCredTarget);
-    cred.CredentialBlobSize = static_cast<DWORD>((key.size() + 1) * sizeof(wchar_t));
-    cred.CredentialBlob = reinterpret_cast<LPBYTE>(const_cast<wchar_t*>(key.c_str()));
-    cred.Persist = CRED_PERSIST_ENTERPRISE;
-    cred.UserName = const_cast<wchar_t*>(L"anthropic");
-    return CredWriteW(&cred, 0) != 0;
+    return cred_save(kClaudeCredTarget, L"anthropic", key);
 }
 
 bool claude_api_key_load(std::wstring* out) {
-    if (!out) {
-        return false;
-    }
-    out->clear();
-    PCREDENTIALW cred = nullptr;
-    if (!CredReadW(kClaudeCredTarget, CRED_TYPE_GENERIC, 0, &cred) || !cred) {
-        return false;
-    }
-    if (cred->CredentialBlobSize >= sizeof(wchar_t) && cred->CredentialBlob) {
-        const std::size_t n = cred->CredentialBlobSize / sizeof(wchar_t);
-        out->assign(reinterpret_cast<wchar_t*>(cred->CredentialBlob), n);
-        while (!out->empty() && out->back() == L'\0') {
-            out->pop_back();
-        }
-    }
-    CredFree(cred);
-    return !out->empty();
+    return cred_load(kClaudeCredTarget, out);
 }
 
 bool claude_api_key_clear() {
-    return CredDeleteW(kClaudeCredTarget, CRED_TYPE_GENERIC, 0) != 0 || GetLastError() == ERROR_NOT_FOUND;
+    return cred_clear(kClaudeCredTarget);
 }
 
 bool claude_api_key_present() {
     std::wstring k;
     return claude_api_key_load(&k);
+}
+
+bool openai_api_key_save(const std::wstring& key) {
+    return cred_save(kOpenAiCredTarget, L"openai", key);
+}
+
+bool openai_api_key_load(std::wstring* out) {
+    return cred_load(kOpenAiCredTarget, out);
+}
+
+bool openai_api_key_clear() {
+    return cred_clear(kOpenAiCredTarget);
+}
+
+bool openai_api_key_present() {
+    std::wstring k;
+    return openai_api_key_load(&k);
 }
 
 std::wstring discover_claude_cli() {
@@ -192,38 +229,6 @@ std::wstring discover_claude_cli() {
     const DWORD n2 = SearchPathW(nullptr, L"claude", L".exe", MAX_PATH, buf, nullptr);
     if (n2 > 0 && n2 < MAX_PATH) {
         return buf;
-    }
-    return {};
-}
-
-std::wstring discover_cursor_agent_cli() {
-    auto env = [](const wchar_t* name) {
-        const DWORD n = GetEnvironmentVariableW(name, nullptr, 0);
-        std::wstring value(n, L'\0');
-        if (n) value.resize(GetEnvironmentVariableW(name, value.data(), n));
-        return value;
-    };
-    std::vector<std::wstring> dirs;
-    const auto home = env(L"USERPROFILE");
-    if (!home.empty()) dirs.push_back(home + L"\\.local\\bin");
-    const auto path = env(L"PATH");
-    std::size_t begin = 0;
-    while (begin < path.size()) {
-        const auto end = path.find(L';', begin);
-        auto dir = path.substr(begin, end == std::wstring::npos ? end : end - begin);
-        if (dir.size() >= 2 && dir.front() == L'"' && dir.back() == L'"')
-            dir = dir.substr(1, dir.size() - 2);
-        // No relative or UNC paths: provider discovery must not probe project scripts/network shares.
-        if (dir.size() > 2 && dir[1] == L':' && (dir[2] == L'\\' || dir[2] == L'/')) dirs.push_back(dir);
-        if (end == std::wstring::npos) break;
-        begin = end + 1;
-    }
-    for (const auto& dir : dirs) {
-        for (const auto* name : {L"agent.exe", L"agent.cmd", L"cursor-agent.exe", L"cursor-agent.cmd"}) {
-            const auto candidate = dir + L"\\" + name;
-            const auto attrs = GetFileAttributesW(candidate.c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES && !(attrs & FILE_ATTRIBUTE_DIRECTORY)) return candidate;
-        }
     }
     return {};
 }
@@ -340,7 +345,7 @@ ProviderStatus openai_provider_status(bool signed_in, const std::string& email, 
                                       const std::string& type) {
     ProviderStatus s;
     s.id = ProviderId::OpenAI;
-    s.display_name = "OpenAI";
+    s.display_name = "OpenAI ChatGPT";
     s.caps.streaming = true;
     s.caps.file_context = true;
     s.caps.chat_send = true;
@@ -361,31 +366,38 @@ ProviderStatus openai_provider_status(bool signed_in, const std::string& email, 
     return s;
 }
 
-ProviderStatus claude_provider_status() {
+ProviderStatus openai_api_provider_status() {
     ProviderStatus s;
-    s.id = ProviderId::Claude;
-    s.display_name = "Claude";
-    s.caps.streaming = false;
+    s.id = ProviderId::OpenAiApi;
+    s.display_name = "OpenAI API";
+    s.caps.streaming = true;
     s.caps.file_context = false;
     s.caps.chat_send = false;
     std::wstring key;
-    if (claude_api_key_load(&key)) {
+    if (openai_api_key_load(&key)) {
         s.connected = true;
         s.caps.chat_send = true;
         s.auth_label = "API key";
-        if (key.size() > 12) {
-            s.detail = "sk-ant-…" + utf8(key.substr(key.size() - 4));
-        } else {
-            s.detail = "key saved";
-        }
-        return s;
+        s.detail = mask_key_hint(key, "sk-…");
+    } else {
+        s.connected = false;
+        s.auth_label = "Not connected";
     }
+    return s;
+}
+
+ProviderStatus claude_provider_status() {
+    ProviderStatus s;
+    s.id = ProviderId::Claude;
+    s.display_name = "Claude Account";
+    s.caps.streaming = false;
+    s.caps.file_context = false;
+    s.caps.chat_send = false;
 
     const ClaudeCodeSession sess = claude_code_session_status(false);
     if (sess.logged_in) {
         s.connected = true;
         s.caps.chat_send = true;
-        s.caps.streaming = false;
         s.caps.file_context = true;
         s.auth_label = sess.auth_method.empty() ? "Claude Code" : ("Claude Code · " + sess.auth_method);
         s.detail = sess.email;
@@ -414,17 +426,40 @@ ProviderStatus claude_provider_status() {
     return s;
 }
 
-bool claude_is_connected() {
-    if (claude_api_key_present()) {
-        g_claude_sticky_connected = true;
-        return true;
+ProviderStatus claude_api_provider_status() {
+    ProviderStatus s;
+    s.id = ProviderId::ClaudeApi;
+    s.display_name = "Claude API";
+    s.caps.streaming = true;
+    s.caps.file_context = false;
+    s.caps.chat_send = false;
+    std::wstring key;
+    if (claude_api_key_load(&key)) {
+        s.connected = true;
+        s.caps.chat_send = true;
+        s.auth_label = "API key";
+        s.detail = mask_key_hint(key, "sk-ant-…");
+    } else {
+        s.connected = false;
+        s.auth_label = "Not connected";
     }
+    return s;
+}
+
+bool claude_account_connected() {
     if (claude_code_session_status(false).logged_in) {
         g_claude_sticky_connected = true;
         return true;
     }
-    // Sticky: keep menu rows after a good OAuth probe even if a later CLI call flakes.
     return g_claude_sticky_connected;
+}
+
+bool claude_api_connected() {
+    return claude_api_key_present();
+}
+
+bool claude_is_connected() {
+    return claude_account_connected();
 }
 
 void claude_clear_connection_state() {
@@ -631,13 +666,18 @@ bool claude_code_print(const std::string& prompt_utf8, const std::string& model_
 }
 
 bool provider_can_send(ProviderId id) {
-    if (id == ProviderId::OpenAI) {
-        return true;
+    switch (id) {
+        case ProviderId::OpenAI:
+            return true;  // ChatGPT readiness checked by account.signed_in in UI
+        case ProviderId::OpenAiApi:
+            return openai_api_key_present();
+        case ProviderId::Claude:
+            return claude_account_connected();
+        case ProviderId::ClaudeApi:
+            return claude_api_connected();
+        default:
+            return false;
     }
-    if (id == ProviderId::Claude) {
-        return claude_is_connected();
-    }
-    return false;
 }
 
 }  // namespace scyllagpt

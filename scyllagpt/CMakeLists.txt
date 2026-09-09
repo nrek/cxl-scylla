@@ -45,8 +45,15 @@ set(SCYLLAGPT_SOURCES
     src/runtime/runtime.cpp
     src/domain/session.cpp
     src/domain/providers.cpp
+    src/domain/provider_http.cpp
     src/domain/keyring.cpp
     src/domain/project_environment.cpp
+    src/domain/project_connection.cpp
+    src/domain/connection_policy.cpp
+    src/domain/connection_broker.cpp
+    src/domain/ssh_query_executor.cpp
+    src/domain/broker_service.cpp
+    src/domain/broker_mcp.cpp
     src/domain/knowledge.cpp
     src/domain/strata_client.cpp
     src/domain/strata_bridge.cpp
@@ -64,13 +71,16 @@ set(SCYLLAGPT_SOURCES
     src/ui/ui_kit.cpp
     src/ui/ui_gallery.cpp
     src/ui/mcp_settings_ui.cpp
+    src/ui/providers_settings_ui.cpp
     src/ui/keyring_ui.cpp
     src/ui/environment_settings_ui.cpp
+    src/ui/connections_settings_ui.cpp
     src/ui/security_overview_ui.cpp
     src/ui/security_policy_ui.cpp
     src/ui/knowledge_settings_ui.cpp
     src/ui/strata_settings_ui.cpp
     src/ui/terminal_settings_ui.cpp
+    src/ui/chat_log_view.cpp
     src/ui/commands.cpp
     src/ui/window.cpp
     src/app/main.cpp
@@ -122,6 +132,11 @@ add_executable(scyllagpt-tests
     tests/test_framing.cpp
     tests/test_keyring.cpp
     tests/test_project_environment.cpp
+    tests/test_project_connection.cpp
+    tests/test_connection_policy.cpp
+    tests/test_connection_broker.cpp
+    tests/test_ssh_query_executor.cpp
+    tests/test_broker_transport.cpp
     tests/test_terminal_screen.cpp
     src/ui/terminal_host.cpp
     src/ui/terminal_session.cpp
@@ -134,6 +149,12 @@ add_executable(scyllagpt-tests
     src/platform/paths.cpp
     src/domain/keyring.cpp
     src/domain/project_environment.cpp
+    src/domain/project_connection.cpp
+    src/domain/connection_policy.cpp
+    src/domain/connection_broker.cpp
+    src/domain/ssh_query_executor.cpp
+    src/domain/broker_service.cpp
+    src/domain/broker_mcp.cpp
     src/domain/knowledge.cpp
     src/domain/strata_client.cpp
     src/domain/strata_bridge.cpp

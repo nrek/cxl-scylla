@@ -64,8 +64,15 @@ void KeyringUi::create(HWND parent, HFONT font, HFONT font_small, HFONT font_sem
     btn_delete_ = ui_kit::create_button(parent, inst, IdBtnDelete, L"Delete", ui_kit::ButtonKind::Danger, font);
 
     add_name_ = ui_kit::create_text_field(parent, inst, IdAddName, font);
-    add_value_ = ui_kit::create_text_field(parent, inst, IdAddValue, font, true);
+    add_value_ = ui_kit::create_text_area(parent, inst, IdAddValue, font);
     add_desc_ = ui_kit::create_text_field(parent, inst, IdAddDesc, font);
+    add_name_label_ = ui_kit::create_static(parent, inst, IdAddNameLabel, L"Key name",
+                                            font_small ? font_small : font, true);
+    add_value_label_ = ui_kit::create_static(parent, inst, IdAddValueLabel, L"Secret value",
+                                             font_small ? font_small : font, true);
+    add_desc_label_ = ui_kit::create_static(parent, inst, IdAddDescLabel,
+                                            L"Description (optional)",
+                                            font_small ? font_small : font, true);
     edit_desc_ = ui_kit::create_text_field(parent, inst, IdEditDescField, font);
 
     // These screens stack identical-looking boxes with no labels; the only explanation was a
@@ -74,7 +81,6 @@ void KeyringUi::create(HWND parent, HFONT font, HFONT font_small, HFONT font_sem
     ui_kit::set_placeholder(pass_confirm_, L"Confirm passphrase");
     ui_kit::set_placeholder(unlock_pass_, L"Keyring passphrase");
     ui_kit::set_placeholder(add_name_, L"Key name, e.g. openai_api_key");
-    ui_kit::set_placeholder(add_value_, L"Secret value (never shown to the agent)");
     ui_kit::set_placeholder(add_desc_, L"Description (optional)");
     ui_kit::set_placeholder(edit_desc_, L"Description");
 
@@ -94,7 +100,8 @@ void KeyringUi::destroy() {
                           strength_,      pass_,          pass_confirm_,   unlock_pass_,
                           btn_primary_,   btn_secondary_, btn_lock_,       btn_add_,
                           list_,          btn_copy_ref_,  btn_copy_value_, btn_edit_desc_,
-                          btn_delete_,    add_name_,      add_value_,      add_desc_,
+                          btn_delete_,    add_name_label_, add_name_,      add_value_label_, add_value_,
+                          add_desc_label_, add_desc_,
                           edit_desc_,     recipes_,       scope_global_,   scope_project_};
     for (HWND h : ctrls) {
         if (h && IsWindow(h)) {
@@ -105,6 +112,7 @@ void KeyringUi::destroy() {
     pass_ = pass_confirm_ = unlock_pass_ = nullptr;
     btn_primary_ = btn_secondary_ = btn_lock_ = btn_add_ = nullptr;
     list_ = btn_copy_ref_ = btn_copy_value_ = btn_edit_desc_ = btn_delete_ = nullptr;
+    add_name_label_ = add_value_label_ = add_desc_label_ = nullptr;
     add_name_ = add_value_ = add_desc_ = edit_desc_ = recipes_ = nullptr;
     scope_global_ = scope_project_ = nullptr;
     parent_ = nullptr;
@@ -116,7 +124,8 @@ void KeyringUi::set_fonts(HFONT font, HFONT font_small, HFONT font_semi) {
     font_semi_ = font_semi;
     for (HWND h : {subtitle_, message_, pass_, pass_confirm_, unlock_pass_, btn_primary_,
                    btn_secondary_, btn_lock_, btn_add_, list_, btn_copy_ref_, btn_copy_value_,
-                   btn_edit_desc_, btn_delete_, add_name_, add_value_, add_desc_, edit_desc_,
+                   btn_edit_desc_, btn_delete_, add_name_label_, add_name_, add_value_label_,
+                   add_value_, add_desc_label_, add_desc_, edit_desc_,
                    scope_global_, scope_project_}) {
         if (h) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
@@ -125,7 +134,7 @@ void KeyringUi::set_fonts(HFONT font, HFONT font_small, HFONT font_semi) {
     if (title_ && font_semi_) {
         SendMessageW(title_, WM_SETFONT, reinterpret_cast<WPARAM>(font_semi_), TRUE);
     }
-    for (HWND h : {warning_, strength_, recipes_}) {
+    for (HWND h : {warning_, strength_, recipes_, add_name_label_, add_value_label_, add_desc_label_}) {
         if (h && font_small_) {
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(font_small_), TRUE);
         }
@@ -200,7 +209,8 @@ void KeyringUi::hide_all() {
                    strength_,      pass_,          pass_confirm_,   unlock_pass_,
                    btn_primary_,   btn_secondary_, btn_lock_,       btn_add_,
                    list_,          btn_copy_ref_,  btn_copy_value_, btn_edit_desc_,
-                   btn_delete_,    add_name_,      add_value_,      add_desc_,
+                   btn_delete_,    add_name_label_, add_name_,      add_value_label_, add_value_,
+                   add_desc_label_, add_desc_,
                    edit_desc_,     recipes_,       scope_global_,   scope_project_}) {
         if (h) {
             ShowWindow(h, SW_HIDE);
@@ -417,10 +427,14 @@ void KeyringUi::apply_screen() {
             break;
 
         case KeyringUiScreen::AddKey:
-            set_msg(L"ADD KEY\r\nName is stored as scylla_… reference. Value is never shown to the agent.");
+            set_msg(L"ADD SECRET\r\nStores a protected value and returns only its scylla_… reference. "
+                    L"Approved workflows can bind that reference directly.");
             ShowWindow(message_, SW_SHOW);
+            ShowWindow(add_name_label_, SW_SHOW);
             ShowWindow(add_name_, SW_SHOW);
+            ShowWindow(add_value_label_, SW_SHOW);
             ShowWindow(add_value_, SW_SHOW);
+            ShowWindow(add_desc_label_, SW_SHOW);
             ShowWindow(add_desc_, SW_SHOW);
             ShowWindow(scope_global_, SW_SHOW);
             ShowWindow(scope_project_, SW_SHOW);
@@ -570,8 +584,11 @@ void KeyringUi::layout(const RECT& area) {
 
         case KeyringUiScreen::AddKey:
             place(message_, m.row_h * 2);
+            place(add_name_label_, sub_h, form_w);
             place(add_name_, m.row_h, form_w);
-            place(add_value_, m.row_h, form_w);
+            place(add_value_label_, sub_h, form_w);
+            place(add_value_, m.row_h * 5, form_w);
+            place(add_desc_label_, sub_h, form_w);
             place(add_desc_, m.row_h, form_w);
             place(scope_global_, m.row_h, form_w);
             place(scope_project_, m.row_h, form_w);
@@ -1106,7 +1123,8 @@ bool KeyringUi::owns_hwnd(HWND child) const {
                    strength_,      pass_,          pass_confirm_,   unlock_pass_,
                    btn_primary_,   btn_secondary_, btn_lock_,       btn_add_,
                    list_,          btn_copy_ref_,  btn_copy_value_, btn_edit_desc_,
-                   btn_delete_,    add_name_,      add_value_,      add_desc_,
+                   btn_delete_,    add_name_label_, add_name_,      add_value_label_, add_value_,
+                   add_desc_label_, add_desc_,
                    edit_desc_,     recipes_,       scope_global_,   scope_project_}) {
         if (h == child) {
             return true;

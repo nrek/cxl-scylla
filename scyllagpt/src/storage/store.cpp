@@ -125,6 +125,10 @@ Project* WorkspaceStore::active() {
     return by_id(active_project_id);
 }
 
+const Project* WorkspaceStore::active() const {
+    return by_id(active_project_id);
+}
+
 Project* WorkspaceStore::open_or_create(const std::wstring& folder) {
     const std::wstring root = canonicalize_path(folder);
     const std::wstring ident = file_identity(root);
@@ -134,6 +138,7 @@ Project* WorkspaceStore::open_or_create(const std::wstring& folder) {
             if (p.root != root) {
                 p.root = root;
             }
+            if (p.roots.empty()) p.roots.push_back(p.root);
             return &p;
         }
     }
@@ -144,12 +149,14 @@ Project* WorkspaceStore::open_or_create(const std::wstring& folder) {
                 p.identity = ident;
             }
             p.root = root;
+            if (p.roots.empty()) p.roots.push_back(p.root);
             return &p;
         }
     }
     Project p;
     p.id = make_uuid();
     p.root = root;
+    p.roots.push_back(root);
     p.identity = ident;
     p.name = root;
     const auto slash = root.find_last_of(L"\\/");
@@ -159,6 +166,32 @@ Project* WorkspaceStore::open_or_create(const std::wstring& folder) {
     projects.push_back(std::move(p));
     active_project_id = projects.back().id;
     return &projects.back();
+}
+
+bool WorkspaceStore::add_root(std::string_view project_id, const std::wstring& folder) {
+    Project* project = by_id(std::string(project_id));
+    if (!project) return false;
+    const std::wstring root = canonicalize_path(folder);
+    const DWORD attrs = GetFileAttributesW(root.c_str());
+    if (root.empty() || attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) return false;
+    if (project->roots.empty() && !project->root.empty()) project->roots.push_back(project->root);
+    const auto duplicate = std::find_if(project->roots.begin(), project->roots.end(), [&](const auto& existing) {
+        return _wcsicmp(canonicalize_path(existing).c_str(), root.c_str()) == 0;
+    });
+    if (duplicate != project->roots.end()) return false;
+    project->roots.push_back(root);
+    return true;
+}
+
+bool WorkspaceStore::remove_root(std::string_view project_id, const std::wstring& folder) {
+    Project* project = by_id(std::string(project_id));
+    if (!project || _wcsicmp(canonicalize_path(folder).c_str(), canonicalize_path(project->root).c_str()) == 0)
+        return false;
+    const auto before = project->roots.size();
+    project->roots.erase(std::remove_if(project->roots.begin(), project->roots.end(), [&](const auto& existing) {
+        return _wcsicmp(canonicalize_path(existing).c_str(), canonicalize_path(folder).c_str()) == 0;
+    }), project->roots.end());
+    return project->roots.size() != before;
 }
 
 Conversation* WorkspaceStore::by_thread(const std::string& thread_id) {
@@ -273,6 +306,12 @@ bool WorkspaceStore::load(const std::wstring& path) {
             p.id = it.at("id").as_string();
             p.name = utf16(it.at("name").as_string());
             p.root = utf16(it.at("root").as_string());
+            const Json& roots = it.at("roots");
+            if (roots.is_array()) for (const auto& root : roots.array_items()) {
+                const std::wstring value = utf16(root.as_string(""));
+                if (!value.empty()) p.roots.push_back(value);
+            }
+            if (p.roots.empty() && !p.root.empty()) p.roots.push_back(p.root);
             p.identity = utf16(it.at("identity").as_string());
             p.last_thread_id = it.at("last_thread_id").as_string("");
             p.files_w = static_cast<int>(it.at("files_w").as_int(220));
@@ -320,6 +359,9 @@ bool WorkspaceStore::save(const std::wstring& path) const {
         o["id"] = Json::string(p.id);
         o["name"] = Json::string(utf8(p.name));
         o["root"] = Json::string(utf8(p.root));
+        Json roots = Json::array();
+        for (const auto& root : p.roots) roots.push(Json::string(utf8(root)));
+        o["roots"] = std::move(roots);
         o["identity"] = Json::string(utf8(p.identity));
         o["last_thread_id"] = Json::string(p.last_thread_id);
         o["files_w"] = Json::number(p.files_w);

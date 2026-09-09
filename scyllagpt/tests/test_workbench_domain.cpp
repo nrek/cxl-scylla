@@ -4,6 +4,12 @@
 #include "scyllagpt/strata_bridge.h"
 #include "scyllagpt/strata_client.h"
 #include "scyllagpt/workflow.h"
+#include "scyllagpt/scylla_query_skill.h"
+#include "scyllagpt/composer_tokens.h"
+#include "scyllagpt/composer_metrics.h"
+#include "scyllagpt/chat_log_rows.h"
+#include "scyllagpt/history_merge.h"
+#include "scyllagpt/codex_thread_util.h"
 #include "scyllagpt/agent_files.h"
 #include "scyllagpt/chat_history.h"
 #include "scyllagpt/markdown.h"
@@ -108,6 +114,29 @@ int run_workbench_domain_tests() {
 
     {
         namespace fs = std::filesystem;
+        using namespace scyllagpt;
+        const fs::path base = fs::path(temp_file(L"multi_root")) / std::to_wstring(GetCurrentProcessId());
+        const fs::path first = base / L"synq-forge";
+        const fs::path second = base / L"synq-phalanx";
+        fs::create_directories(first);
+        fs::create_directories(second);
+        WorkspaceStore store;
+        Project* project = store.open_or_create(first.wstring());
+        expect(project && store.add_root(project->id, second.wstring()), "add peer repository root");
+        expect(project && project->roots.size() == 2, "project retains multiple roots");
+        const auto state = (base / L"store.json").wstring();
+        expect(store.save(state), "save multi-root project");
+        WorkspaceStore restored;
+        expect(restored.load(state) && restored.active() && restored.active()->roots.size() == 2,
+               "multi-root project roundtrip");
+        expect(restored.active() && !restored.remove_root(restored.active()->id, first.wstring()),
+               "primary project root cannot be removed");
+        std::error_code error;
+        fs::remove_all(base, error);
+    }
+
+    {
+        namespace fs = std::filesystem;
         const fs::path fixture = fs::path(temp_file(L"strata_discovery")) / std::to_wstring(GetCurrentProcessId());
         const auto shared = fixture / L"knowledge";
         const auto nested = shared / L"nested" / L"workspace";
@@ -192,6 +221,124 @@ int run_workbench_domain_tests() {
         const auto instructions = scyllagpt::workflow_instructions(scyllagpt::WorkflowMode::Plan, L"C:\\plans\\draft", "cxl-scylla");
         expect(instructions.find("C:\\plans\\draft") != std::string::npos && instructions.find("status: draft") != std::string::npos,
                "Plan instructions include destination and lifecycle");
+        {
+            std::wstring q = L"/scylla-query list tables on RO RDS";
+            expect(scyllagpt::consume_scylla_query_slash(&q), "scylla-query slash consumes");
+            expect(q == L"list tables on RO RDS", "scylla-query slash leaves body");
+            std::wstring keep = L"/scylla-querying no";
+            expect(!scyllagpt::consume_scylla_query_slash(&keep) && keep == L"/scylla-querying no",
+                   "scylla-query prefix alone does not match");
+            std::wstring mixed = L"/Scylla-Query\r\nSELECT 1";
+            expect(scyllagpt::consume_scylla_query_slash(&mixed) && mixed == L"SELECT 1",
+                   "scylla-query slash is case-insensitive");
+            const auto unavailable = scyllagpt::scylla_query_instructions("(none)\n", false);
+            expect(unavailable.find("NOT available") != std::string::npos,
+                   "skill says execution is unavailable when no tool is registered");
+            expect(unavailable.find("Do NOT emit a fenced scylla-query block") != std::string::npos,
+                   "skill forbids the unexecutable fenced block");
+            expect(unavailable.find("submitted") != std::string::npos,
+                   "skill forbids claiming submission");
+            expect(unavailable.find("scylla_query\n") == std::string::npos,
+                   "skill does not advertise a tool that is not registered");
+            const auto skill = scyllagpt::scylla_query_instructions("(none)\n", true);
+            expect(skill.find("scylla_query") != std::string::npos,
+                   "skill names the tool when it is registered");
+            expect(skill.find("connection_alias") != std::string::npos,
+                   "skill documents the alias argument");
+            expect(skill.find("role_map") == std::string::npos,
+                   "skill no longer asks for a per-call role map");
+            expect(skill.find("fabricate") != std::string::npos, "skill forbids fabricated values");
+            expect(skill.find("Never ask the user to paste secret VALUES") != std::string::npos,
+                   "scylla-query skill forbids secret values");
+            expect(skill.find("!scylla_NAME") != std::string::npos, "scylla-query skill documents bang keyring tokens");
+            const auto spans = scyllagpt::find_scylla_query_spans(L"hi /scylla-query now /scylla-querying no");
+            expect(spans.size() == 1 && spans[0].begin == 3 && spans[0].end == 16, "find /scylla-query span");
+            expect(scyllagpt::slash_skill_completion_for_token(L"/scylla-querying").empty(),
+                   "querying is not a skill completion");
+            expect(scyllagpt::slash_skill_completion_for_token(L"/scy") == L"/scylla-query",
+                   "/scy suggests /scylla-query");
+            expect(scyllagpt::normalize_bang_keyring_insert("RDS_HOST") == "!scylla_RDS_HOST",
+                   "bang insert normalizes scylla_ prefix");
+            expect(scyllagpt::normalize_bang_keyring_insert("scylla_RDS_HOST") == "!scylla_RDS_HOST",
+                   "bang insert keeps scylla_ prefix");
+            scyllagpt::SecretRef ref;
+            ref.name = "scylla_RDS_USER";
+            ref.description = "user";
+            const auto bang = scyllagpt::filter_keyring_bang_completions({ref}, L"!scy");
+            expect(bang.size() == 1 && bang[0].first == "!scylla_RDS_USER", "!scy filters keyring names");
+            scyllagpt::SecretRef hyphen;
+            hyphen.name = "rds-scylla-user";
+            expect(scyllagpt::filter_keyring_bang_completions({hyphen}, L"!scy").size() == 1,
+                   "!scy reaches hyphenated keyring names");
+            expect(scyllagpt::filter_keyring_bang_completions({hyphen}, L"!scylla_rds").size() == 1,
+                   "!scylla_rds matches through the inserted prefix");
+            expect(scyllagpt::filter_keyring_bang_completions({hyphen}, L"!user").size() == 1,
+                   "bare fragment matches keyring name");
+            expect(scyllagpt::filter_keyring_bang_completions({hyphen}, L"!nope").empty(),
+                   "unrelated fragment matches nothing");
+            expect(scyllagpt::composer_visible_lines(1) == 3, "composer rests at 3 lines");
+            expect(scyllagpt::composer_visible_lines(7) == 7, "composer grows with content");
+            expect(scyllagpt::composer_visible_lines(40) == 12, "composer caps at 12 lines");
+            const auto at_spans =
+                scyllagpt::find_at_file_spans(L"see @\"D:\\projects\\a.md\" and @readme.md end");
+            expect(at_spans.size() == 2 && at_spans[0].path == L"D:\\projects\\a.md",
+                   "@ quoted path span");
+            expect(at_spans[1].display == L"readme.md", "@ basename span");
+            expect(scyllagpt::composer_text_has_bang_keyring_token(L"use !scylla_RDS_HOST please"),
+                   "detect bang keyring token");
+            expect(!scyllagpt::keyring_bang_token_instructions().empty(), "bang token instructions");
+            std::string err;
+            const auto thread = scyllagpt::Json::parse(
+                R"({"turns":[{"id":"t1","status":"completed"},{"id":"t2","status":"inProgress"},{"id":"t3","status":"failed"}]})",
+                &err);
+            expect(err.empty() && scyllagpt::latest_in_progress_turn_id(thread) == "t2",
+                   "latest inProgress turn id from thread payload");
+            expect(scyllagpt::latest_in_progress_turn_id(scyllagpt::Json::object()).empty(),
+                   "missing turns yields empty inProgress id");
+        }
+
+        {
+            using scyllagpt::ChatRowAction;
+            const std::vector<std::wstring> shown{L"hello", L"working on it"};
+
+            const auto unchanged = scyllagpt::chat_log_plan_rows(shown, shown);
+            expect(unchanged.rows.size() == 2 && unchanged.rows[0] == ChatRowAction::Reuse &&
+                       unchanged.rows[1] == ChatRowAction::Reuse,
+                   "identical chat rows are reused");
+            expect(unchanged.destroy_from == 2, "identical chat rows destroy nothing");
+
+            const auto streamed =
+                scyllagpt::chat_log_plan_rows(shown, {L"hello", L"working on it a bit more"});
+            expect(streamed.rows[0] == ChatRowAction::Reuse && streamed.rows[1] == ChatRowAction::Retext,
+                   "a streaming delta only retexts the trailing row");
+
+            const auto grown = scyllagpt::chat_log_plan_rows(shown, {L"hello", L"working on it", L"next"});
+            expect(grown.rows.size() == 3 && grown.rows[2] == ChatRowAction::Create,
+                   "a new message creates exactly one row");
+
+            const auto shrunk = scyllagpt::chat_log_plan_rows(shown, {L"hello"});
+            expect(shrunk.rows.size() == 1 && shrunk.destroy_from == 1,
+                   "a shorter transcript destroys only the surplus rows");
+
+            struct Msg {
+                bool user;
+                std::string text;
+            };
+            const std::vector<Msg> local{{true, "u1"}, {false, "a1"}, {true, "u2"}};
+            const auto merged = scyllagpt::merge_provider_agent_messages(local, {{false, "a1"}, {false, "a2"}});
+            expect(merged.size() == 4, "merge appends only unseen provider assistant messages");
+            expect(merged[0].user && merged[0].text == "u1" && !merged[1].user && merged[1].text == "a1" &&
+                       merged[2].user && merged[2].text == "u2",
+                   "merge preserves local transcript order");
+            expect(!merged[3].user && merged[3].text == "a2", "unseen provider reply lands last");
+
+            const auto no_dupe = scyllagpt::merge_provider_agent_messages(local, {{false, "a1"}});
+            expect(no_dupe.size() == 3, "merge does not duplicate a known assistant message");
+
+            const auto ignores_users =
+                scyllagpt::merge_provider_agent_messages(local, {{true, "u9"}, {false, "a1"}});
+            expect(ignores_users.size() == 3, "merge ignores provider user messages");
+        }
         auto found = scyllagpt::discover_strata_workspaces(store, "project");
         expect(found.size() == 2 && fs::path(found[0]) == shared && fs::path(found[1]) == nested,
                "Strata discovers Knowledge subfolder databases breadth-first");

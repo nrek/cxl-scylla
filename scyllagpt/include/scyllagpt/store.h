@@ -16,6 +16,9 @@ struct Project {
     std::string id;
     std::wstring name;
     std::wstring root;
+    // The primary root remains the conversation/terminal cwd. Additional roots
+    // are peer repositories displayed and granted as part of this project.
+    std::vector<std::wstring> roots;
     std::wstring identity;
     std::string last_thread_id;
     int files_w = 220;
@@ -62,9 +65,12 @@ struct WorkspaceStore {
     bool save(const std::wstring& path) const;
 
     Project* open_or_create(const std::wstring& folder);
+    bool add_root(std::string_view project_id, const std::wstring& folder);
+    bool remove_root(std::string_view project_id, const std::wstring& folder);
     Project* by_id(const std::string& id);
     const Project* by_id(const std::string& id) const;
     Project* active();
+    const Project* active() const;
 
     Conversation* upsert_thread(const std::string& project_id, const std::string& account, const std::string& thread_id,
                                  const std::string& title, const std::string& preview);

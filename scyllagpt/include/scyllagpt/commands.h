@@ -31,6 +31,7 @@ enum class SecuritySubpage {
     Overview,
     Keyring,
     Environments,
+    Connections,
     Policy,
 };
 
@@ -262,6 +263,120 @@ enum CmdId : int {
 
     // Settings → Advanced / UI Gallery
     Cmd_UiGallery = 3900,
+
+    // Settings → Agent Providers (card UI)
+    Cmd_ProvOaManage = 3950,
+    Cmd_ProvOaRefresh,
+    Cmd_ProvOaDefault,
+    Cmd_ProvOaSearch,
+    Cmd_ProvOaModels,
+    Cmd_ProvOaEnableAll,
+    Cmd_ProvOaDisableAll,
+    Cmd_ProvOaDefaultFooter,
+    Cmd_ProvClManage,
+    Cmd_ProvClRefresh,
+    Cmd_ProvClDefault,
+    Cmd_ProvClSearch,
+    Cmd_ProvClModels,
+    Cmd_ProvClEnableAll,
+    Cmd_ProvClDisableAll,
+    Cmd_ProvClDefaultFooter,
+    Cmd_ProvCurConnect,
+    Cmd_ProvCurLearn,
+    Cmd_ProvActiveProvider,
+    Cmd_ProvActiveModel,
+    // OpenAI API (BYOK)
+    Cmd_ProvOaApiManage,
+    Cmd_ProvOaApiRefresh,
+    Cmd_ProvOaApiDefault,
+    Cmd_ProvOaApiSearch,
+    Cmd_ProvOaApiModels,
+    Cmd_ProvOaApiEnableAll,
+    Cmd_ProvOaApiDisableAll,
+    Cmd_ProvOaApiDefaultFooter,
+    Cmd_ProvOaApiConnect,
+    Cmd_ProvOaApiDisc,
+    // Claude API (BYOK)
+    Cmd_ProvClApiManage,
+    Cmd_ProvClApiRefresh,
+    Cmd_ProvClApiDefault,
+    Cmd_ProvClApiSearch,
+    Cmd_ProvClApiModels,
+    Cmd_ProvClApiEnableAll,
+    Cmd_ProvClApiDisableAll,
+    Cmd_ProvClApiDefaultFooter,
+    Cmd_ProvClApiConnect,
+    Cmd_ProvClApiDisc,
+
+    // Settings → Security → Connections. Explicitly based and contiguous so the page can claim the
+    // whole block with one range test, the way the Environments page does.
+    Cmd_ConnFirst = 4100,
+    Cmd_ConnTitle = Cmd_ConnFirst,
+    Cmd_ConnDesc,
+    Cmd_ConnProject,
+    Cmd_ConnList,
+    Cmd_ConnAdd,
+    Cmd_ConnManage,
+    Cmd_ConnDup,
+    Cmd_ConnDelete,
+    Cmd_ConnToggleEnabled,
+
+    // Detail chrome
+    Cmd_ConnBack,
+    Cmd_ConnDetailTitle,
+    Cmd_ConnStatus,
+    Cmd_ConnSecRoute,
+    Cmd_ConnSecCreds,
+    Cmd_ConnSecPolicy,
+    Cmd_ConnSave,
+    Cmd_ConnCancel,
+    Cmd_ConnTest,
+    Cmd_ConnUnlock,
+
+    // Route section
+    Cmd_ConnName,
+    Cmd_ConnAlias,
+    Cmd_ConnEnabled,
+    Cmd_ConnRoute,
+    Cmd_ConnSshHost,
+    Cmd_ConnSshHostRef,
+    Cmd_ConnSshPort,
+    Cmd_ConnSshPortRef,
+    Cmd_ConnSshUser,
+    Cmd_ConnSshUserRef,
+
+    // Credentials section
+    Cmd_ConnKeyRef,
+    Cmd_ConnPassphraseRef,
+    Cmd_ConnAuthRef,
+    Cmd_ConnHostKey,
+    Cmd_ConnEngine,
+    Cmd_ConnDbHost,
+    Cmd_ConnDbHostRef,
+    Cmd_ConnDbPort,
+    Cmd_ConnDbPortRef,
+    Cmd_ConnDbName,
+    Cmd_ConnDbUserRef,
+    Cmd_ConnDbPassRef,
+    Cmd_ConnTlsRef,
+
+    // Policy section
+    Cmd_ConnPolRead,
+    Cmd_ConnPolData,
+    Cmd_ConnPolSchema,
+    Cmd_ConnPolAdmin,
+    Cmd_ConnPolUnrestricted,
+    Cmd_ConnPolMultiStatement,
+    Cmd_ConnResVisibility,
+    Cmd_ConnResMaxRows,
+    Cmd_ConnResMaxBytes,
+    Cmd_ConnResTimeout,
+    Cmd_ConnResMaxText,
+    Cmd_ConnResBinary,
+    Cmd_ConnLast = Cmd_ConnResBinary,
+
+    // Security subpage tab
+    Cmd_SecTabConnections,
 };
 
 struct CommandUiState {

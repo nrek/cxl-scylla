@@ -211,6 +211,16 @@ int main() {
     g_fail += run_keyring_tests();
     extern int run_project_environment_tests();
     g_fail += run_project_environment_tests();
+    extern int run_project_connection_tests();
+    g_fail += run_project_connection_tests();
+    extern int run_connection_policy_tests();
+    g_fail += run_connection_policy_tests();
+    extern int run_connection_broker_tests();
+    g_fail += run_connection_broker_tests();
+    extern int run_ssh_query_executor_tests();
+    g_fail += run_ssh_query_executor_tests();
+    extern int run_broker_transport_tests();
+    g_fail += run_broker_transport_tests();
     extern int run_terminal_screen_tests();
     g_fail += run_terminal_screen_tests();
     extern int run_terminal_profile_tests();

@@ -94,11 +94,29 @@ Settings load_settings(const std::wstring& path) {
     s.files_mode = static_cast<int>(j.at("files_mode").as_int(0));
     s.history_mode = static_cast<int>(j.at("history_mode").as_int(0));
     s.focus_editor = j.at("focus_editor").as_bool(false);
-    s.default_provider = j.at("default_provider").as_string("openai");
-    if (s.default_provider != "claude") {
-        s.default_provider = "openai";
-    }
+    s.default_provider = coerce_default_provider(j.at("default_provider").as_string("openai"));
     s.selected_model = j.at("selected_model").as_string("");
+    s.model_enabled.clear();
+    const Json& me = j.at("model_enabled");
+    if (me.is_object()) {
+        for (const auto& prov : me.object_items()) {
+            if (prov.second.is_object()) {
+                for (const auto& m : prov.second.object_items()) {
+                    s.model_enabled[model_enable_key(prov.first, m.first)] = m.second.as_bool(true);
+                }
+            } else {
+                // Flat "openai/model" → bool (legacy-friendly).
+                s.model_enabled[prov.first] = prov.second.as_bool(true);
+            }
+        }
+    }
+    s.provider_default_model.clear();
+    const Json& pdm = j.at("provider_default_model");
+    if (pdm.is_object()) {
+        for (const auto& kv : pdm.object_items()) {
+            s.provider_default_model[kv.first] = kv.second.as_string("");
+        }
+    }
     s.word_wrap = j.at("word_wrap").as_bool(false);
     s.show_whitespace = j.at("show_whitespace").as_bool(false);
     s.terminal_h = static_cast<int>(j.at("terminal_h").as_int(220));
@@ -179,6 +197,30 @@ bool save_settings(const std::wstring& path, const Settings& s) {
     j["focus_editor"] = Json::boolean(s.focus_editor);
     j["default_provider"] = Json::string(s.default_provider);
     j["selected_model"] = Json::string(s.selected_model);
+    {
+        Json me = Json::object();
+        for (const auto& kv : s.model_enabled) {
+            const auto slash = kv.first.find('/');
+            if (slash == std::string::npos) {
+                me[kv.first] = Json::boolean(kv.second);
+                continue;
+            }
+            const std::string prov = kv.first.substr(0, slash);
+            const std::string mid = kv.first.substr(slash + 1);
+            if (!me[prov].is_object()) {
+                me[prov] = Json::object();
+            }
+            me[prov][mid] = Json::boolean(kv.second);
+        }
+        j["model_enabled"] = std::move(me);
+    }
+    {
+        Json pdm = Json::object();
+        for (const auto& kv : s.provider_default_model) {
+            pdm[kv.first] = Json::string(kv.second);
+        }
+        j["provider_default_model"] = std::move(pdm);
+    }
     j["word_wrap"] = Json::boolean(s.word_wrap);
     j["show_whitespace"] = Json::boolean(s.show_whitespace);
     j["terminal_h"] = Json::number(s.terminal_h);

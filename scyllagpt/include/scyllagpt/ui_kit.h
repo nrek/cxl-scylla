@@ -34,13 +34,39 @@ struct SelectItem {
 
 HWND create_button(HWND parent, HINSTANCE inst, UINT id, const wchar_t* text, ButtonKind kind, HFONT font);
 HWND create_text_field(HWND parent, HINSTANCE inst, UINT id, HFONT font, bool password = false);
+// Editable multiline text area with vertical scrolling. Enter inserts a line break; Esc still
+// posts WM_SK_FIELD_CANCEL to the owning form.
+HWND create_text_area(HWND parent, HINSTANCE inst, UINT id, HFONT font);
 // Scrollable, read-only multiline document body. Geometry is inset on resize.
 HWND create_document_view(HWND parent, HINSTANCE inst, UINT id, HFONT font);
 HWND create_markdown_view(HWND parent, HINSTANCE inst, UINT id, HFONT font);
+// Link over a character range of already-rendered body text (e.g. an @file mention).
+struct CharLinkSpan {
+    long begin = 0;
+    long end = 0;  // exclusive
+    std::wstring target;
+};
+
+// Colors and faces for a chat message body. Sizes are points, so RichEdit scales them per monitor.
+struct MessageBodyStyle {
+    COLORREF text = 0;
+    COLORREF bg = 0;
+    COLORREF link = 0;
+    COLORREF code_bg = 0;
+    int base_pt = 11;
+    const wchar_t* face = L"Segoe UI Variable";
+    const wchar_t* mono = L"Cascadia Mono";
+};
+
 void append_markdown(HWND view, const std::wstring& text);
 void set_markdown(HWND view, const std::wstring& text);
 std::wstring markdown_link_at(HWND view, long position);
 void trim_markdown_links(HWND view, long position);
+// Render |source| as styled Markdown (headings, bold, italic, strike, code, links) and return the
+// assembled plain text. Offsets into the result match RichEdit character positions.
+std::wstring set_markdown_body(HWND view, const std::wstring& source, const MessageBodyStyle& style);
+// Apply link formatting to ranges located in the text returned by set_markdown_body.
+void apply_link_spans(HWND view, const std::vector<CharLinkSpan>& spans, COLORREF link_color);
 HWND create_path_field(HWND parent, HINSTANCE inst, UINT id, HFONT font);
 
 // Re-apply single-line field formatting rect (vertical center + edge inset). Call after MoveWindow.

@@ -24,14 +24,18 @@ inline std::wstring file_search_key(std::wstring value) {
     return value;
 }
 inline std::vector<AgentFile> agent_file_catalog(const KnowledgeStore& knowledge, const std::string& project_id,
-                                               const std::wstring& project_root) {
+                                               const std::wstring& project_root,
+                                               const std::vector<std::wstring>& project_roots = {}) {
     namespace fs = std::filesystem;
     struct Root { fs::path path; std::wstring label; std::string source; };
     std::vector<Root> roots;
     // Give external workflow sources their own traversal budget, independent of repo size.
     for (const auto* s : knowledge.list_enabled_for_project(project_id))
         if (s->agent_available) roots.push_back({s->path, s->label.empty() ? fs::path(s->path).filename().wstring() : s->label, s->id});
-    if (!project_root.empty()) roots.push_back({project_root, L"Project", {}});
+    if (!project_roots.empty()) {
+        for (const auto& path : project_roots)
+            if (!path.empty()) roots.push_back({path, fs::path(path).filename().wstring(), {}});
+    } else if (!project_root.empty()) roots.push_back({project_root, L"Project", {}});
     std::vector<AgentFile> files;
     for (const auto& root : roots) {
         std::deque<fs::path> queue{root.path};
@@ -75,15 +79,22 @@ inline std::vector<AgentFile> match_agent_files(const std::vector<AgentFile>& fi
     return result;
 }
 inline std::string workflow_source_manifest(const std::vector<AgentFile>& files, const std::wstring& project_root,
-                                           const std::string& task) {
+                                           const std::string& task,
+                                           const std::vector<std::wstring>& project_roots = {}) {
     namespace fs = std::filesystem;
     struct Selected { AgentFile file; WorkflowSourceMetadata meta; int score; };
     std::vector<Selected> selected;
     std::vector<std::string> project_files;
     const fs::path root(project_root);
     for (const auto& file : files) {
-        const auto relative = fs::path(file.path).lexically_relative(root).generic_wstring();
-        if (!relative.empty() && !relative.starts_with(L"..")) project_files.push_back(utf8(file_search_key(relative)));
+        const auto roots = project_roots.empty() ? std::vector<std::wstring>{project_root} : project_roots;
+        for (const auto& root : roots) {
+            const auto relative = fs::path(file.path).lexically_relative(fs::path(root)).generic_wstring();
+            if (!relative.empty() && !relative.starts_with(L"..")) {
+                project_files.push_back(utf8(file_search_key(relative)));
+                break;
+            }
+        }
     }
     for (const auto& file : files) {
         const auto path = file_search_key(file.path);

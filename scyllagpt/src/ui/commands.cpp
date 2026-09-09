@@ -53,7 +53,7 @@ const wchar_t* content_view_title(ContentView view) {
 const wchar_t* settings_section_label(SettingsSection section) {
     switch (section) {
         case SettingsSection::Providers:
-            return L"AI Providers";
+            return L"Agent Providers";
         case SettingsSection::Editor:
             return L"Editor";
         case SettingsSection::Terminal:

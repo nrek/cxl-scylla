@@ -115,6 +115,29 @@ int run_settings_policy_tests() {
     pol_expect(clamped.execution_policy.agent_terminals == PolicyMode::Block,
                "agent allow is clamped to block");
 
+    // Four-provider BYOK: coerce + API models default disabled.
+    pol_expect(scyllagpt::coerce_default_provider("openai-api") == "openai-api", "coerce openai-api");
+    pol_expect(scyllagpt::coerce_default_provider("claude-api") == "claude-api", "coerce claude-api");
+    pol_expect(scyllagpt::coerce_default_provider("nope") == "openai", "coerce unknown -> openai");
+    pol_expect(scyllagpt::provider_id_from_string("openai-api") == scyllagpt::ProviderId::OpenAiApi,
+               "provider id openai-api");
+    pol_expect(scyllagpt::provider_id_from_string("claude-api") == scyllagpt::ProviderId::ClaudeApi,
+               "provider id claude-api");
+    Settings enable_s;
+    pol_expect(scyllagpt::settings_model_enabled(enable_s, "openai", "gpt-5"),
+               "account missing enable => on");
+    pol_expect(!scyllagpt::settings_model_enabled(enable_s, "openai-api", "gpt-5"),
+               "api missing enable => off");
+    pol_expect(!scyllagpt::settings_model_enabled(enable_s, "claude-api", "claude-opus-4-6"),
+               "claude-api missing enable => off");
+    enable_s.model_enabled[scyllagpt::model_enable_key("openai-api", "gpt-5")] = true;
+    pol_expect(scyllagpt::settings_model_enabled(enable_s, "openai-api", "gpt-5"),
+               "api explicit enable => on");
+
+    write_raw(path, "{\"default_provider\":\"openai-api\"}");
+    const Settings api_def = scyllagpt::load_settings(path);
+    pol_expect(api_def.default_provider == "openai-api", "load default_provider openai-api");
+
     DeleteFileW(path.c_str());
     return g_pol_fail;
 }

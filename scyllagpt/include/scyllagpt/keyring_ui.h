@@ -119,6 +119,9 @@ private:
         IdScopeGlobal,
         IdScopeProject,
         IdMigratePass,
+        IdAddNameLabel,
+        IdAddValueLabel,
+        IdAddDescLabel,
     };
 
     void hide_all();
@@ -167,6 +170,9 @@ private:
     HWND add_name_ = nullptr;
     HWND add_value_ = nullptr;
     HWND add_desc_ = nullptr;
+    HWND add_name_label_ = nullptr;
+    HWND add_value_label_ = nullptr;
+    HWND add_desc_label_ = nullptr;
     HWND edit_desc_ = nullptr;
     HWND recipes_ = nullptr;
     HWND scope_global_ = nullptr;

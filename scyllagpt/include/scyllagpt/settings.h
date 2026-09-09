@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scyllagpt/json.h"
+#include "scyllagpt/provider.h"
 
 #include <map>
 #include <string>
@@ -53,8 +54,15 @@ struct Settings {
     int files_mode = 0;    // 0 auto, 1 on, 2 off
     int history_mode = 0;
     bool focus_editor = false;
-    std::string default_provider = "openai";  // "openai" | "claude"
-    std::string selected_model;               // last model id (OpenAI or Claude)
+    // "openai" | "openai-api" | "claude" | "claude-api"
+    std::string default_provider = "openai";
+    std::string selected_model;  // last model id for active provider
+    // Per-model enable: key = "provider/model_id".
+    // Account providers (openai, claude): missing key ⇒ enabled (first-run parity).
+    // API providers (openai-api, claude-api): missing key ⇒ disabled (0 selected by default).
+    std::map<std::string, bool> model_enabled;
+    // Per-provider default model id. Empty ⇒ use catalog best among enabled.
+    std::map<std::string, std::string> provider_default_model;
     bool word_wrap = false;
     bool show_whitespace = false;
     int terminal_h = 220;
@@ -74,5 +82,23 @@ struct Settings {
 
 Settings load_settings(const std::wstring& path);
 bool save_settings(const std::wstring& path, const Settings& s);
+
+inline std::string model_enable_key(std::string_view provider, std::string_view model_id) {
+    std::string k;
+    k.reserve(provider.size() + model_id.size() + 1);
+    k.append(provider);
+    k.push_back('/');
+    k.append(model_id);
+    return k;
+}
+
+// Account providers: missing ⇒ enabled. API providers: missing ⇒ disabled.
+inline bool settings_model_enabled(const Settings& s, std::string_view provider, std::string_view model_id) {
+    const auto it = s.model_enabled.find(model_enable_key(provider, model_id));
+    if (it == s.model_enabled.end()) {
+        return !is_api_provider(provider);
+    }
+    return it->second;
+}
 
 }  // namespace scyllagpt

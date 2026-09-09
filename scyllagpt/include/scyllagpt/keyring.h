@@ -118,6 +118,10 @@ public:
     KeyringStatus copy_secret_value_to_clipboard(std::string_view name);
 
     KeyringStatus authorize_use(std::string_view name, std::string_view operation_id);
+    // Atomically authorize a complete credential set. Nothing is authorized when
+    // any reference is missing, preventing partially reusable operation grants.
+    KeyringStatus authorize_use_many(const std::vector<std::string_view>& names,
+                                     std::string_view operation_id);
     KeyringStatus inject_env_for_process(HANDLE process, std::string_view operation_id);
     KeyringStatus build_authorized_env_block(std::string_view operation_id,
                                              std::wstring& out_fragment);

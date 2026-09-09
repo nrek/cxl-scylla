@@ -86,7 +86,8 @@ void apply_dark_menus(HWND hwnd);  // native HMENU popups (Win10+)
 // Custom-draw the menubar strip (ForceDark does not recolor the bar itself).
 bool handle_dark_menubar_message(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam, LRESULT* result);
 void apply_dark_child(HWND hwnd);
-// Flat thin overlay scrollbars (VS Code–like thumb). track = panel fill behind the bar.
+// Shared owner-drawn Scylla scrollbars. The controller owns hover, drag, paging,
+// and paint while the host control retains its native content scroll range.
 void install_thin_scrollbar(HWND hwnd, COLORREF track);
 void refresh_thin_scrollbar(HWND hwnd);
 void fill_rect(HDC dc, const RECT& r, COLORREF c);
