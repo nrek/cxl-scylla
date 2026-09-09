@@ -6,6 +6,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -220,7 +225,7 @@ std::wstring build_environment_block(const std::vector<std::pair<std::wstring, s
     return block;
 }
 
-// Environment handed to ssh-add so it can obtain the passphrase without a console prompt.
+// Environment handed to ssh so it can obtain the private-key passphrase without a console prompt.
 // SSH_ASKPASS_REQUIRE=force is what makes this work even though a console may be attached; DISPLAY
 // is set as well because older OpenSSH builds refuse askpass without it.
 std::vector<std::pair<std::wstring, std::wstring>> askpass_environment(const std::string& passphrase) {
@@ -420,15 +425,22 @@ SshCommandPlan plan_ssh_mysql_command(const TrustedExecutionContext& context,
     plan.arguments = {
         L"-p", std::to_wstring(ssh_port),
         L"-T",                              // no pty: stdin stays a clean pipe
-        L"-o", L"BatchMode=yes",            // never prompt
         L"-o", L"StrictHostKeyChecking=yes",
         L"-o", L"PasswordAuthentication=no",
         L"-o", L"KbdInteractiveAuthentication=no",
         L"-o", L"PubkeyAuthentication=yes",
+        L"-o", L"PreferredAuthentications=publickey",
         L"-o", L"UserKnownHostsFile=" + known_hosts_path,
         L"-o", L"ConnectTimeout=" + std::to_wstring(timeout_seconds == 0 ? 30u : timeout_seconds),
         L"-i", key_path,
     };
+    // BatchMode disables passphrase querying. That is correct for unencrypted keys (never hang on a
+    // prompt), but it also blocks SSH_ASKPASS on some OpenSSH builds — including Windows — so an
+    // encrypted key must omit it and rely on askpass + the auth options above instead.
+    if (!plan.needs_askpass) {
+        plan.arguments.push_back(L"-o");
+        plan.arguments.push_back(L"BatchMode=yes");
+    }
     // Always pin authentication to the staged identity. Encrypted keys are decrypted by this ssh
     // process through askpass, so no shared-agent identity is needed or accepted.
     plan.arguments.push_back(L"-o");
@@ -478,21 +490,122 @@ std::string sanitize_execution_error(std::string_view standard_error) {
     // mysql and ssh both echo option text on failure. Keep only the recognizable, credential-free
     // diagnostics rather than forwarding raw stderr to the agent.
     static constexpr std::string_view kSafe[] = {
-        "Access denied", "Unknown database", "Unknown column", "Table", "syntax error",
-        "Host key verification failed", "Permission denied", "Connection timed out",
-        "Could not resolve hostname", "Connection refused", "command not found",
+        "Access denied",
+        "Unknown database",
+        "Unknown column",
+        "Table",
+        "syntax error",
+        "Host key verification failed",
+        "Permission denied",
+        "Connection timed out",
+        "Could not resolve hostname",
+        "Connection refused",
+        "command not found",
+        "Load key",
+        "incorrect passphrase",
+        "Bad permissions",
+        "UNPROTECTED PRIVATE KEY",
+        "No route to host",
+        "Network is unreachable",
+        "Name or service not known",
+        "mysql:",
+        "ERROR ",
     };
-    std::string first_line(standard_error.substr(0, standard_error.find('\n')));
-    for (const auto& safe : kSafe) {
-        if (first_line.find(safe) != std::string::npos) {
-            // Never echo a line that also contains an assignment; it may carry a value.
-            if (first_line.find("PWD=") != std::string::npos || first_line.find("password=") != std::string::npos) {
-                break;
+    auto looks_credentialed = [](std::string_view line) {
+        return line.find("PWD=") != std::string_view::npos ||
+               line.find("password=") != std::string_view::npos ||
+               line.find("SCYLLA_SSH_PASSPHRASE=") != std::string_view::npos;
+    };
+    auto score_line = [](std::string_view line) -> int {
+        // Prefer the actionable OpenSSH/MySQL diagnosis over an earlier, weaker "Load key ..." line.
+        if (line.find("Permission denied") != std::string_view::npos ||
+            line.find("Host key verification failed") != std::string_view::npos ||
+            line.find("Access denied") != std::string_view::npos ||
+            line.find("incorrect passphrase") != std::string_view::npos ||
+            line.find("Connection timed out") != std::string_view::npos ||
+            line.find("Could not resolve hostname") != std::string_view::npos) {
+            return 3;
+        }
+        if (line.find("Load key") != std::string_view::npos) return 1;
+        return 2;
+    };
+    std::string best;
+    int best_score = -1;
+    std::size_t start = 0;
+    while (start <= standard_error.size()) {
+        const std::size_t end = standard_error.find('\n', start);
+        std::string_view line = standard_error.substr(
+            start, end == std::string_view::npos ? standard_error.size() - start : end - start);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+        if (!line.empty() && !looks_credentialed(line)) {
+            for (const auto& safe : kSafe) {
+                if (line.find(safe) != std::string_view::npos) {
+                    const int score = score_line(line);
+                    if (score >= best_score) {
+                        best.assign(line);
+                        best_score = score;
+                    }
+                    break;
+                }
             }
-            return first_line;
+        }
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    if (!best.empty()) return best;
+    return "The remote command failed. See the Scylla connection log for details.";
+}
+
+// Appends a credential-free diagnostic to broker-run/connection.log so the generic sanitize message
+// is not a dead end. Never writes stdin, environment values, or key material.
+void append_connection_log(const std::wstring& work_dir, std::string_view heading,
+                           std::string_view standard_error, int exit_code) {
+    if (work_dir.empty() || !ensure_dir(work_dir)) return;
+    const std::wstring path = join_path(work_dir, L"connection.log");
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+
+    SYSTEMTIME utc{};
+    GetSystemTime(&utc);
+    char stamp[64]{};
+    sprintf_s(stamp, "%04u-%02u-%02uT%02u:%02u:%02uZ", utc.wYear, utc.wMonth, utc.wDay, utc.wHour,
+              utc.wMinute, utc.wSecond);
+
+    std::string body;
+    body.reserve(standard_error.size() + 128);
+    body += "---- ";
+    body += stamp;
+    body += " ";
+    body += heading;
+    body += " exit=";
+    body += std::to_string(exit_code);
+    body += " ----\n";
+    if (standard_error.empty()) {
+        body += "(no stderr captured)\n";
+    } else {
+        // Drop lines that look like they carry a value; everything else is useful for diagnosis.
+        std::size_t start = 0;
+        while (start <= standard_error.size()) {
+            const std::size_t end = standard_error.find('\n', start);
+            std::string_view line = standard_error.substr(
+                start, end == std::string_view::npos ? standard_error.size() - start : end - start);
+            if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+            const bool secretish = line.find("PWD=") != std::string_view::npos ||
+                                   line.find("password=") != std::string_view::npos ||
+                                   line.find("SCYLLA_SSH_PASSPHRASE=") != std::string_view::npos;
+            if (!secretish) {
+                body.append(line);
+                body.push_back('\n');
+            }
+            if (end == std::string_view::npos) break;
+            start = end + 1;
         }
     }
-    return "The remote command failed. See the Scylla connection log for details.";
+    body.push_back('\n');
+    DWORD written = 0;
+    WriteFile(file, body.data(), static_cast<DWORD>(body.size()), &written, nullptr);
+    CloseHandle(file);
 }
 
 SshQueryExecutor::SshQueryExecutor(std::wstring work_dir, ProcessRunner runner)
@@ -616,7 +729,11 @@ ConnectionResult SshQueryExecutor::execute(const TrustedExecutionContext& contex
         return result;
     }
     if (run.exit_code != 0) {
+        append_connection_log(work_dir_, "ssh/mysql failed", run.standard_error, run.exit_code);
         result.warning = sanitize_execution_error(run.standard_error);
+        if (result.warning.find("connection log") != std::string::npos) {
+            result.warning += " (" + utf8(join_path(work_dir_, L"connection.log")) + ")";
+        }
         forget();
         return result;
     }

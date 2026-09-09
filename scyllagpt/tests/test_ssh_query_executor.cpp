@@ -132,6 +132,10 @@ int run_ssh_query_executor_tests() {
     expect(with_passphrase.key_passphrase == "open-sesame", "plan carries the passphrase for askpass");
     expect(joined_arguments(with_passphrase).find("open-sesame") == std::string::npos,
            "passphrase never reaches argv");
+    expect(joined_arguments(with_passphrase).find("BatchMode=yes") == std::string::npos,
+           "BatchMode is omitted so askpass can supply the key passphrase");
+    expect(joined_arguments(with_passphrase).find("PreferredAuthentications=publickey") != std::string::npos,
+           "password prompts stay disabled without BatchMode");
     expect(joined_arguments(with_passphrase).find("IdentitiesOnly=yes") != std::string::npos,
            "encrypted keys remain pinned to the staged identity");
     auto unresolved_passphrase = context();
@@ -195,6 +199,13 @@ int run_ssh_query_executor_tests() {
            "unknown errors get a generic message");
     expect(sanitize_execution_error("Host key verification failed.").find("Host key") != std::string::npos,
            "host key failure is surfaced");
+    expect(sanitize_execution_error("Load key \"op.key\": incorrect passphrase\r\n"
+                                    "ubuntu@bastion: Permission denied (publickey).\r\n")
+               .find("Permission denied") != std::string::npos,
+           "later-line OpenSSH diagnostics are surfaced");
+    expect(sanitize_execution_error("Load key \"op.key\": error in libcrypto").find("Load key") !=
+               std::string::npos,
+           "key load failures are surfaced");
 
     // Whole-executor path with a fake runner: no ssh, no network.
     ProcessRunRequest captured;
@@ -252,6 +263,8 @@ int run_ssh_query_executor_tests() {
             expect(describe(spawns[0]).find("ssh.exe") != std::string::npos, "askpass is attached to ssh");
             expect(describe(spawns[0]).find("open-sesame") == std::string::npos,
                    "passphrase stays out of ssh argv");
+            expect(describe(spawns[0]).find("BatchMode=yes") == std::string::npos,
+                   "askpass ssh spawn omits BatchMode");
             bool askpass_points_at_us = false, forced = false, carries_passphrase = false;
             for (const auto& [key, value] : spawns[0].environment) {
                 if (key == L"SSH_ASKPASS") askpass_points_at_us = utf8(value).find(".exe") != std::string::npos;

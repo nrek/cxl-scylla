@@ -89,6 +89,12 @@ int run_connection_broker_tests() {
     expect(refused.context.credentials.values.empty(), "refused prepare carries no credentials");
     expect(broker.finish(std::move(refused)).status == BrokerStatus::KeyringLocked,
            "finish preserves the prepare failure");
+    // The earlier ready-but-failed finish already exercised the executor; clear the counter so this
+    // assertion is specifically about unready finish, not about prior cases.
+    executor.executions = 0;
+    auto refused_again = broker.prepare(read);
+    expect(broker.finish(std::move(refused_again)).status == BrokerStatus::KeyringLocked,
+           "second refused finish preserves status");
     expect(executor.executions == 0, "finish of an unready operation never executes");
     auto retry = broker.prepare(read);
     expect(!retry.ready && retry.response.status == BrokerStatus::KeyringLocked,
