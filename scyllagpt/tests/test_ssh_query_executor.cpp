@@ -79,7 +79,7 @@ int run_ssh_query_executor_tests() {
     expect(arguments.find("PasswordAuthentication=no") != std::string::npos, "password auth is refused");
     expect(arguments.find("IdentitiesOnly=yes") != std::string::npos, "agent identities are ignored");
     expect(arguments.find("C:\\tmp\\known_hosts") != std::string::npos, "known_hosts path is passed");
-    expect(!plan.needs_agent && plan.key_passphrase.empty(), "an unencrypted key needs no agent");
+    expect(!plan.needs_askpass && plan.key_passphrase.empty(), "an unencrypted key needs no askpass");
 
     // Hosts, ports, and usernames may themselves live in the Keyring, so nothing about the
     // infrastructure has to be stored in the connection file.
@@ -122,18 +122,18 @@ int run_ssh_query_executor_tests() {
     injected.credentials.values.emplace_back("scylla_DB_HOST", "hot.internal; curl evil.example");
     expect(!plan_ssh_mysql_command(injected, L"h", L"k").ok, "refuse a host carrying shell metacharacters");
 
-    // Passphrase-protected keys route through the OpenSSH agent instead of being refused.
+    // Passphrase-protected keys route through ssh askpass instead of a shared agent import.
     auto passphrase = context();
     passphrase.connection.ssh.key_passphrase_ref = "scylla_KEY_PASS";
     passphrase.credentials.values.emplace_back("scylla_KEY_PASS", "open-sesame");
     const auto with_passphrase = plan_ssh_mysql_command(passphrase, L"h", L"k");
     expect(with_passphrase.ok, "accept a passphrase-protected key");
-    expect(with_passphrase.needs_agent, "a passphrase-protected key requests an agent lease");
-    expect(with_passphrase.key_passphrase == "open-sesame", "plan carries the passphrase for the lease");
+    expect(with_passphrase.needs_askpass, "a passphrase-protected key requests askpass");
+    expect(with_passphrase.key_passphrase == "open-sesame", "plan carries the passphrase for askpass");
     expect(joined_arguments(with_passphrase).find("open-sesame") == std::string::npos,
            "passphrase never reaches argv");
-    expect(joined_arguments(with_passphrase).find("IdentitiesOnly=yes") == std::string::npos,
-           "agent identities stay usable when the key is encrypted");
+    expect(joined_arguments(with_passphrase).find("IdentitiesOnly=yes") != std::string::npos,
+           "encrypted keys remain pinned to the staged identity");
     auto unresolved_passphrase = context();
     unresolved_passphrase.connection.ssh.key_passphrase_ref = "scylla_KEY_PASS";
     expect(!plan_ssh_mysql_command(unresolved_passphrase, L"h", L"k").ok,
@@ -223,9 +223,9 @@ int run_ssh_query_executor_tests() {
                "spawned argv holds no password");
     }
 
-    // Agent lease lifecycle. The fake runner records every spawn so the order can be asserted:
-    // a pre-emptive eviction, the add, the query, then the eviction that closes the window.
-    if (!SshQueryExecutor::discover_ssh_client().empty() && !SshQueryExecutor::discover_ssh_add().empty()) {
+    // Encrypted keys are passed directly to ssh. This avoids legacy PEM compatibility problems in
+    // ssh-add while preserving the same noninteractive, secret-free argv contract.
+    if (!SshQueryExecutor::discover_ssh_client().empty()) {
         std::vector<ProcessRunRequest> spawns;
         auto recording_runner = [&spawns](const ProcessRunRequest& request) {
             spawns.push_back(request);
@@ -238,41 +238,29 @@ int run_ssh_query_executor_tests() {
         auto leased = context();
         leased.connection.ssh.key_passphrase_ref = "scylla_KEY_PASS";
         leased.credentials.values.emplace_back("scylla_KEY_PASS", "open-sesame");
-        SshQueryExecutor agent_executor(std::wstring(temp) + L"scylla-broker-test", recording_runner);
-        const ConnectionResult agent_result = agent_executor.execute(leased);
-        expect(agent_result.ok, "agent-leased execution succeeds");
+        SshQueryExecutor askpass_executor(std::wstring(temp) + L"scylla-broker-test", recording_runner);
+        const ConnectionResult askpass_result = askpass_executor.execute(leased);
+        expect(askpass_result.ok, "askpass execution succeeds");
 
         auto describe = [](const ProcessRunRequest& request) {
             std::string out = utf8(request.executable);
             for (const auto& argument : request.arguments) out += " " + utf8(argument);
             return out;
         };
-        expect(spawns.size() == 4, "lease spawns: purge, add, query, evict");
-        if (spawns.size() == 4) {
-            expect(describe(spawns[0]).find("ssh-add") != std::string::npos &&
-                       describe(spawns[0]).find(" -d ") != std::string::npos,
-                   "a stale copy of the key is evicted before adding");
-            expect(describe(spawns[1]).find("ssh-add") != std::string::npos &&
-                       describe(spawns[1]).find(" -d ") == std::string::npos,
-                   "the key is then added to the agent");
-            expect(describe(spawns[2]).find("ssh.exe") != std::string::npos, "the query runs after the lease");
-            expect(describe(spawns[3]).find("ssh-add") != std::string::npos &&
-                       describe(spawns[3]).find(" -d ") != std::string::npos,
-                   "the key is evicted once the query finishes");
-
-            // The passphrase reaches ssh-add only through the environment, and ssh never sees it.
-            std::string add_argv = describe(spawns[1]);
-            expect(add_argv.find("open-sesame") == std::string::npos, "passphrase stays out of ssh-add argv");
+        expect(spawns.size() == 1, "encrypted key requires only the ssh query process");
+        if (spawns.size() == 1) {
+            expect(describe(spawns[0]).find("ssh.exe") != std::string::npos, "askpass is attached to ssh");
+            expect(describe(spawns[0]).find("open-sesame") == std::string::npos,
+                   "passphrase stays out of ssh argv");
             bool askpass_points_at_us = false, forced = false, carries_passphrase = false;
-            for (const auto& [key, value] : spawns[1].environment) {
+            for (const auto& [key, value] : spawns[0].environment) {
                 if (key == L"SSH_ASKPASS") askpass_points_at_us = utf8(value).find(".exe") != std::string::npos;
                 if (key == L"SSH_ASKPASS_REQUIRE") forced = value == L"force";
                 if (key == kAskpassValueEnvVar) carries_passphrase = utf8(value) == "open-sesame";
             }
-            expect(askpass_points_at_us, "ssh-add is pointed at an askpass program");
+            expect(askpass_points_at_us, "ssh is pointed at an askpass program");
             expect(forced, "askpass is forced so no console prompt can appear");
-            expect(carries_passphrase, "the passphrase travels in the ssh-add environment");
-            expect(spawns[2].environment.empty(), "the ssh query inherits no passphrase");
+            expect(carries_passphrase, "the passphrase travels only in the ssh process environment");
         }
     }
     return failures;

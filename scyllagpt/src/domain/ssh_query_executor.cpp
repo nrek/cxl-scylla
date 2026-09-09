@@ -411,7 +411,7 @@ SshCommandPlan plan_ssh_mysql_command(const TrustedExecutionContext& context,
 
     const std::uint32_t timeout_seconds = connection.result_policy.timeout_seconds;
     plan.private_key_pem = key_pem;
-    plan.needs_agent = !passphrase.empty();
+    plan.needs_askpass = !passphrase.empty();
     plan.key_passphrase = passphrase;
     plan.known_hosts_line =
         (ssh_port == 22 ? ssh_host : "[" + ssh_host + "]:" + std::to_string(ssh_port)) + " " +
@@ -429,13 +429,10 @@ SshCommandPlan plan_ssh_mysql_command(const TrustedExecutionContext& context,
         L"-o", L"ConnectTimeout=" + std::to_wstring(timeout_seconds == 0 ? 30u : timeout_seconds),
         L"-i", key_path,
     };
-    // An encrypted key can only be used through the agent, and ssh must be allowed to match the
-    // agent's copy of it. An unencrypted key authenticates from the file alone, so identity use is
-    // pinned to that file and any unrelated agent key is ignored.
-    if (!plan.needs_agent) {
-        plan.arguments.push_back(L"-o");
-        plan.arguments.push_back(L"IdentitiesOnly=yes");
-    }
+    // Always pin authentication to the staged identity. Encrypted keys are decrypted by this ssh
+    // process through askpass, so no shared-agent identity is needed or accepted.
+    plan.arguments.push_back(L"-o");
+    plan.arguments.push_back(L"IdentitiesOnly=yes");
     plan.arguments.push_back(utf16(ssh_user + "@" + ssh_host));
     plan.arguments.push_back(utf16(remote_mysql_script(db_host, db_port, connection.database.database,
                                                       timeout_seconds)));
@@ -511,59 +508,6 @@ std::wstring SshQueryExecutor::discover_ssh_client() {
     return {};
 }
 
-std::wstring SshQueryExecutor::discover_ssh_add() {
-    wchar_t system_dir[MAX_PATH]{};
-    if (GetSystemDirectoryW(system_dir, MAX_PATH) == 0) return {};
-    const std::wstring candidate = join_path(system_dir, L"OpenSSH\\ssh-add.exe");
-    if (file_exists(candidate)) return candidate;
-    return {};
-}
-
-bool SshQueryExecutor::agent_add_key(const std::wstring& ssh_add, const std::wstring& key_path,
-                                    const std::string& passphrase, std::string* error) {
-    // Evict first. A previous run that died before teardown would have left this same public key in
-    // the agent under a different temp path, and ssh-add matches on the key, not the filename.
-    agent_remove_key(ssh_add, key_path, passphrase);
-
-    ProcessRunRequest request;
-    request.executable = ssh_add;
-    request.arguments = {key_path};
-    request.timeout_ms = 20000;
-    request.environment = askpass_environment(passphrase);
-    ProcessRunResult run = runner_(request);
-    wipe_environment(request.environment);
-
-    if (!run.spawned) {
-        if (error) *error = "Scylla could not start ssh-add to unlock the SSH key.";
-        return false;
-    }
-    if (run.timed_out || run.exit_code != 0) {
-        // ssh-add's own diagnostics are safe: they name the file and the agent, never the passphrase.
-        if (error) {
-            *error = run.timed_out
-                         ? "Unlocking the SSH key timed out."
-                         : "The SSH key could not be unlocked. Check the key passphrase in the Keyring, "
-                           "and that the OpenSSH Authentication Agent service is running.";
-        }
-        return false;
-    }
-    if (error) error->clear();
-    return true;
-}
-
-void SshQueryExecutor::agent_remove_key(const std::wstring& ssh_add, const std::wstring& key_path,
-                                        const std::string& passphrase) {
-    ProcessRunRequest request;
-    request.executable = ssh_add;
-    request.arguments = {L"-d", key_path};
-    request.timeout_ms = 15000;
-    // Older PEM keys need decrypting before their public half can be derived, so removal gets the
-    // same askpass path as adding. Failure is not actionable here; the caller reports it.
-    request.environment = askpass_environment(passphrase);
-    runner_(request);
-    wipe_environment(request.environment);
-}
-
 bool ssh_askpass_mode_requested() {
     wchar_t marker[8]{};
     return GetEnvironmentVariableW(kAskpassModeEnvVar, marker, 8) > 0 && marker[0] == L'1';
@@ -575,7 +519,7 @@ int run_ssh_askpass_helper() {
                                                  static_cast<DWORD>(value.size()));
     if (length == 0 || length >= value.size()) return 1;
     value.resize(length);
-    // ssh-add expects the passphrase on stdout, newline-terminated.
+    // OpenSSH expects the passphrase on stdout, newline-terminated.
     std::string out = utf8(value);
     SecureZeroMemory(value.data(), value.size() * sizeof(wchar_t));
     out.push_back('\n');
@@ -631,49 +575,28 @@ ConnectionResult SshQueryExecutor::execute(const TrustedExecutionContext& contex
     }
 
     // One teardown for everything this operation stages, so no early return, exception, or failure
-    // path can leave a key on disk or loaded in the shared agent. Order is deliberate: ssh-add -d
-    // derives the public key from the file, so eviction has to precede shredding.
+    // path can leave key material on disk or a passphrase in memory.
     struct OperationCleanup {
-        SshQueryExecutor* owner;
-        std::wstring ssh_add;
         std::wstring key_path;
         std::wstring hosts_path;
         std::string passphrase;
-        bool leased = false;
         ~OperationCleanup() {
-            if (leased) owner->agent_remove_key(ssh_add, key_path, passphrase);
             shred_file(key_path);
             shred_file(hosts_path);
             if (!passphrase.empty()) SecureZeroMemory(passphrase.data(), passphrase.size());
         }
-    } cleanup{this, {}, key_path, hosts_path, plan.key_passphrase};
-
-    // The Windows OpenSSH agent is a shared system service that refuses `ssh-add -t` lifetime
-    // constraints, so an encrypted key is leased for exactly this query and evicted above.
-    if (plan.needs_agent) {
-        cleanup.ssh_add = discover_ssh_add();
-        if (cleanup.ssh_add.empty()) {
-            result.warning = "ssh-add was not found, so a passphrase-protected SSH key cannot be used.";
-            forget();
-            return result;
-        }
-        std::string lease_error;
-        if (!agent_add_key(cleanup.ssh_add, key_path, plan.key_passphrase, &lease_error)) {
-            result.warning = lease_error;
-            forget();
-            return result;
-        }
-        cleanup.leased = true;
-    }
+    } cleanup{key_path, hosts_path, plan.key_passphrase};
 
     ProcessRunRequest request;
     request.executable = client;
     request.arguments = plan.arguments;
     request.stdin_text = plan.stdin_text;
     request.timeout_ms = context.timeout_ms;
+    if (plan.needs_askpass) request.environment = askpass_environment(plan.key_passphrase);
 
     const auto started = std::chrono::steady_clock::now();
     ProcessRunResult run = runner_(request);
+    wipe_environment(request.environment);
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started);
 
