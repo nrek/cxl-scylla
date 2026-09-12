@@ -8,7 +8,7 @@ import subprocess
 import unittest
 from unittest.mock import patch, MagicMock
 
-spec = importlib.util.spec_from_file_location("library", Path(__file__).parents[1] / "runtime/strata_workbench_bridge.py")
+spec = importlib.util.spec_from_file_location("library", Path(__file__).parents[1] / "runtime/strata_bridge_adapter.py")
 library = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(library)
 

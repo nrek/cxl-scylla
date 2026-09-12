@@ -49,6 +49,9 @@ public:
     void set_visible(bool visible);
 
     bool running() const;
+    // 0 = highlight copy (default), 1 = right-click copy, 2 = context menu.
+    void set_mouse_behavior(int mode) { mouse_behavior_ = mode >= 0 && mode <= 2 ? mode : 0; }
+    bool take_new_terminal_request() { bool requested = new_terminal_requested_; new_terminal_requested_ = false; return requested; }
     // True once the shell process has terminated, writing its exit code to |exit_code|.
     // False while the process is alive or when no process was ever started.
     bool exited(DWORD* exit_code) const;
@@ -77,6 +80,8 @@ private:
     void notify_output_ready();
 
     TerminalScreen screen_;
+    int mouse_behavior_ = 0;
+    bool new_terminal_requested_ = false;
     LONG cursor_position_ = 0;
     HWND hwnd_ = nullptr;
     HWND parent_ = nullptr;

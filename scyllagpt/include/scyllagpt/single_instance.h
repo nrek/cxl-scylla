@@ -4,7 +4,7 @@
 
 namespace scyllagpt {
 
-// Cross-SKU single instance for scylla.exe and scylla-workbench.exe.
+// Process coordination primitives used by Scylla.
 // Mutex name is fixed so either shell blocks the other.
 struct InstanceLock {
     void* handle = nullptr;  // HANDLE, opaque so headers stay light

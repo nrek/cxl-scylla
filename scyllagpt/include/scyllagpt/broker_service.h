@@ -1,6 +1,6 @@
 #pragma once
 
-// Workbench side of the broker: a per-launch local named pipe that the secret-free MCP helper
+// Scylla side of the broker: a per-launch local named pipe that the secret-free MCP helper
 // talks to. This process owns the Keyring; the helper never does.
 //
 // Threading contract:

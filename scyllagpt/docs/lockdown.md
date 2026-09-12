@@ -1,6 +1,6 @@
-# Scylla Workbench security controls
+# Scylla security controls
 
-Scylla Workbench is a native Codex and Claude Code client. These controls limit unrequested folder traversal and disable helper features that are outside Workbench's intended scope.
+Scylla is a native Codex and Claude Code client. These controls limit unrequested folder traversal and disable helper features that are outside Scylla's intended scope.
 
 Do not treat this file as an OS AppContainer or isolated-user sandbox. The former Scylla Cage CLI is archived and is not part of this product.
 
@@ -11,9 +11,9 @@ The header project selector is the **single folder** the agent may work in:
 | State | Agent sandbox |
 |-------|----------------|
 | Project selected (e.g. `example-project`) | `workspace-write` + `writableRoots = [that folder]` + **`shell_tool = true`** (sandboxed read/search/edit). Thread `cwd` is that folder |
-| No project | `read-only`, `shell_tool = false` on the isolated Workbench workspace |
+| No project | `read-only`, `shell_tool = false` on the isolated Scylla workspace |
 
-Managed `config.toml` is rewritten on launch **and** when the grant changes. If shell enablement flips while the app-server is running, Workbench **restarts** Codex so CreateProcess `--disable` flags match (shell is not hot-reloaded).
+Managed `config.toml` is rewritten on launch **and** when the grant changes. If shell enablement flips while the app-server is running, Scylla **restarts** Codex so CreateProcess `--disable` flags match (shell is not hot-reloaded).
 
 CreateProcess cwd stays `%LOCALAPPDATA%\ScyllaGPT\workspace` (process hygiene). Apps, hooks, web_search, notify helpers stay off.
 
@@ -30,7 +30,7 @@ CreateProcess cwd stays `%LOCALAPPDATA%\ScyllaGPT\workspace` (process hygiene). 
 | Control | Behavior |
 |---------|----------|
 | Isolated `CODEX_HOME` | `%LOCALAPPDATA%\ScyllaGPT\codex-home` — does not mutate `%USERPROFILE%\.codex` |
-| `config.toml` | **Overwritten every launch / grant change.** `auth.json` is never rewritten by Workbench |
+| `config.toml` | **Overwritten every launch / grant change.** `auth.json` is never rewritten by Scylla |
 | Process cwd | `%LOCALAPPDATA%\ScyllaGPT\workspace` |
 | Thread cwd + sandbox | Follow the project grant; existing thread keeps its project cwd if the dropdown switches mid-session |
 | `sandbox_mode` | `workspace-write` with grant; `read-only` without |

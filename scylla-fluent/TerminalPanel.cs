@@ -73,14 +73,18 @@ internal sealed partial class BottomPanelView
         _terminalTimer.Tick += (_, _) =>
         {
             bool changed = false;
+            bool newTerminal = false;
             foreach (var session in _terminals)
             {
+                NativeCore.TerminalSetMouseBehavior(session.Handle, (int)PanelPreferences.Current.TerminalMouse);
+                newTerminal |= NativeCore.TerminalTakeNewRequest(session.Handle) != 0;
                 NativeCore.TerminalPoll(session.Handle); // Drains ConPTY and renders its screen, including hidden sessions.
                 bool running = NativeCore.TerminalRunning(session.Handle) != 0;
                 changed |= session.Running != running;
                 session.Running = running;
             }
             if (changed) RefreshSessions();
+            if (newTerminal) CreateTerminal();
         };
         return header;
     }
@@ -184,6 +188,7 @@ internal sealed partial class BottomPanelView
             App.Log($"TerminalCreate profile={profileId} cwd={_cwd}");
             var handle = NativeCore.TerminalCreate(_hwndWindow, _hwndWindow, controlId, _cwd, out var error, profileId);
             if (handle == IntPtr.Zero) { ShowError(error); return; }
+            NativeCore.TerminalSetMouseBehavior(handle, (int)PanelPreferences.Current.TerminalMouse);
             NativeCore.TerminalSetVisible(handle, 0);
             var session = new TerminalSession { Handle = handle, ControlId = controlId, Label = string.IsNullOrWhiteSpace(label) ? "Terminal" : label };
             _terminals.Add(session);

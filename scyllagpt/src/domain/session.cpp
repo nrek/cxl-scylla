@@ -1671,7 +1671,7 @@ void Session::clear_orphaned_in_progress_turn(const std::string& thread_id, cons
     auto& running = thread_runtime_[thread_id];
     running.turn_id = orphan;
     turn_threads_[orphan] = thread_id;
-    // Live turns keep activity.busy true from send_user_to_thread. After a Workbench relaunch the
+    // Live turns keep activity.busy true from send_user_to_thread. After a Scylla relaunch the
     // map is empty so busy is false while Codex still lists inProgress — that blocks turn/start.
     if (running.activity.busy) {
         if (thread_id == active_thread_id) {

@@ -34,7 +34,7 @@ bool AcpClient::initialize() {
   Json p = Json::object();
   p["protocolVersion"] = Json::number(1);
   p["clientInfo"] =
-      Json::parse(R"({"name":"scylla-workbench","version":"0.1.0"})");
+        Json::parse(R"({"name":"scylla","version":"0.1.0"})");
   p["clientCapabilities"] = Json::parse(
       R"({"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false})");
   return request("initialize", std::move(p));

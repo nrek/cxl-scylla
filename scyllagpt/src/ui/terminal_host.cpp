@@ -755,8 +755,50 @@ LRESULT CALLBACK TerminalHost::edit_subclass_proc(HWND hwnd, UINT msg, WPARAM wP
             SendMessageW(hwnd, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&cr));
             if (cr.cpMin == cr.cpMax) {
                 self->scroll_to_end();
+            } else if (self->mouse_behavior_ == 0) {
+                SendMessageW(hwnd, WM_COPY, 0, 0);
             }
             return r;
+        }
+        // Suppress RichEdit's right-button selection changes so copy sees the
+        // highlighted range, even when the pointer is outside that range.
+        case WM_RBUTTONDOWN: return 0;
+        case WM_RBUTTONUP:
+            if (self->mouse_behavior_ == 2) {
+                POINT point{static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam))};
+                ClientToScreen(hwnd, &point);
+                SendMessageW(hwnd, WM_CONTEXTMENU, reinterpret_cast<WPARAM>(hwnd), MAKELPARAM(point.x, point.y));
+            } else {
+                CHARRANGE range{};
+                SendMessageW(hwnd, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&range));
+                if (self->mouse_behavior_ == 1 && range.cpMin != range.cpMax) {
+                    SendMessageW(hwnd, WM_COPY, 0, 0);
+                    self->scroll_to_end(); // The next right-click pastes.
+                } else SendMessageW(hwnd, WM_PASTE, 0, 0);
+            }
+            return 0;
+        case WM_CONTEXTMENU: {
+            CHARRANGE range{};
+            SendMessageW(hwnd, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&range));
+            HMENU menu = CreatePopupMenu();
+            if (!menu) return 0;
+            AppendMenuW(menu, MF_STRING | (range.cpMin == range.cpMax ? MF_GRAYED : 0), 1, L"Copy");
+            AppendMenuW(menu, MF_STRING | (IsClipboardFormatAvailable(CF_UNICODETEXT) ? 0 : MF_GRAYED), 2, L"Paste");
+            AppendMenuW(menu, MF_STRING, 3, L"Clear");
+            AppendMenuW(menu, MF_STRING, 4, L"New Terminal");
+            POINT point{static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam))};
+            if (lParam == -1) { point = {8, 8}; ClientToScreen(hwnd, &point); }
+            const UINT choice = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                                               point.x, point.y, 0, hwnd, nullptr);
+            DestroyMenu(menu);
+            if (choice == 1) SendMessageW(hwnd, WM_COPY, 0, 0);
+            else if (choice == 2) SendMessageW(hwnd, WM_PASTE, 0, 0);
+            else if (choice == 3) {
+                self->scroll_to_end();
+                self->append_output_utf8("\x1b[3J\x1b[2J\x1b[H");
+            }
+            else if (choice == 4) self->new_terminal_requested_ = true;
+            return 0;
         }
         case WM_CHAR: {
             // Return/Back/Tab/Esc are forwarded on WM_KEYDOWN (ES_READONLY often skips WM_CHAR

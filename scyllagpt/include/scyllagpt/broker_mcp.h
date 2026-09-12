@@ -4,7 +4,7 @@
 //
 // This runs in a *secret-free* helper process. It can name an alias and carry SQL or a command, but it
 // holds no Keyring, no credentials, and no database or SSH configuration. Everything it learns comes
-// back from the Workbench over the broker pipe, already bounded by policy.
+// back from Scylla over the broker pipe, already bounded by policy.
 
 #include "scyllagpt/broker_protocol.h"
 
@@ -28,7 +28,7 @@ struct McpReply {
 McpReply handle_mcp_message(std::string_view line, const BrokerCallFn& call_broker);
 
 // stdio server loop for the `--mcp-query-broker` process mode. Reads JSON-RPC from stdin, writes
-// replies to stdout, and forwards tool calls to the Workbench over the pipe named by
+// replies to stdout, and forwards tool calls to Scylla over the pipe named by
 // kBrokerPipeEnvVar, authenticating with kBrokerTokenEnvVar.
 int run_broker_mcp_helper();
 

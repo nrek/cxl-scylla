@@ -4,7 +4,7 @@
 //
 // Two hops share this file:
 //   agent → MCP helper   : tools/call arguments (parse_query_tool_arguments)
-//   helper → Workbench   : newline-delimited JSON over a local named pipe
+//   helper → Scylla      : newline-delimited JSON over a local named pipe
 //
 // Nothing here touches the Keyring. The helper process is secret-free by construction: it can
 // name a connection alias but can never read what that alias resolves to.

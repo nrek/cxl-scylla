@@ -284,8 +284,8 @@ int main() {
     g_fail += run_terminal_screen_tests();
     extern int run_terminal_profile_tests();
     g_fail += run_terminal_profile_tests();
-    extern int run_workbench_domain_tests();
-    g_fail += run_workbench_domain_tests();
+extern int run_runtime_domain_tests();
+g_fail += run_runtime_domain_tests();
     extern int run_mcp_oauth_tests();
     g_fail += run_mcp_oauth_tests();
     extern int run_settings_policy_tests();

@@ -19,8 +19,7 @@ internal sealed class ChatSendRequest : EventArgs
 
 internal static class ChatAttachments
 {
-    private static string AttachmentDirectory => System.IO.Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScyllaGPT", "attachments");
+    private static string AttachmentDirectory => WindowInstance.StatePath("attachments");
 
     private static readonly HashSet<string> ImageExtensions = new(StringComparer.OrdinalIgnoreCase)
     {

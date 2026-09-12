@@ -12,6 +12,7 @@ namespace Scylla;
 /// </summary>
 internal sealed class TitleChrome : UserControl
 {
+    public event EventHandler? NewWindowClicked;
     public event EventHandler? OpenFolderClicked;
     public event EventHandler? OpenFileClicked;
     public event EventHandler? SaveClicked;
@@ -104,6 +105,8 @@ internal sealed class TitleChrome : UserControl
         };
 
         var file = new MenuBarItem { Title = "File" };
+        file.Items.Add(Mk("New Window", () => NewWindowClicked?.Invoke(this, EventArgs.Empty)));
+        file.Items.Add(new MenuFlyoutSeparator());
         file.Items.Add(Mk("Open File…\tCtrl+O", () => OpenFileClicked?.Invoke(this, EventArgs.Empty)));
         file.Items.Add(Mk("Open Folder…\tCtrl+Shift+O", () => OpenFolderClicked?.Invoke(this, EventArgs.Empty)));
         file.Items.Add(Mk("Save\tCtrl+S", () => SaveClicked?.Invoke(this, EventArgs.Empty)));
@@ -339,6 +342,7 @@ internal sealed partial class BottomPanelView : UserControl
 
     public BottomPanelView()
     {
+        InitializePayloadMenu();
         Background = ThemeColors.Brush(ThemeColors.Panel);
         BorderBrush = ThemeColors.Brush(ThemeColors.BorderSubtle);
         BorderThickness = new Thickness(0);
@@ -457,7 +461,9 @@ internal sealed partial class BottomPanelView : UserControl
     public void SetPayload(string text)
     {
         var display = string.IsNullOrEmpty(text) ? "Agent payloads and replies will appear here." : text;
-        if (_output.Text != display) _output.Text = display;
+        if (_payloadDisplay == display) return;
+        _payloadDisplay = display;
+        RenderPayload();
     }
     public void DisposeTerminal()
     {

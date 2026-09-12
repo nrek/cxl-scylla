@@ -8,8 +8,7 @@ internal sealed class BrowserPreferences
     public List<string> AddedFolders { get; set; } = new();
     public List<string> HiddenKnowledgePaths { get; set; } = new();
     public List<string> PinnedTabs { get; set; } = new();
-    private static string FilePath => Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ScyllaGPT", "browser-folders.json");
+    private static string FilePath => WindowInstance.StatePath("browser-folders.json");
     public static BrowserPreferences Load()
     {
         try { return JsonSerializer.Deserialize<BrowserPreferences>(File.ReadAllText(FilePath)) ?? new(); }
@@ -19,7 +18,9 @@ internal sealed class BrowserPreferences
     public void Save()
     {
         Directory.CreateDirectory(Path.GetDirectoryName(FilePath)!);
-        File.WriteAllText(FilePath + ".tmp", JsonSerializer.Serialize(this));
-        File.Move(FilePath + ".tmp", FilePath, true);
+        var temporary = FilePath + "." + Environment.ProcessId + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        File.WriteAllText(temporary, JsonSerializer.Serialize(this));
+        try { File.Move(temporary, FilePath, true); }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 }

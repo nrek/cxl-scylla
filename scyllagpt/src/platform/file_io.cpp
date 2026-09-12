@@ -26,7 +26,9 @@ std::string read_file_bytes(const std::wstring& path) {
 }
 
 bool write_file_bytes_atomic(const std::wstring& path, const std::string& body) {
-    const std::wstring tmp = path + L".tmp";
+    static volatile LONG sequence = 0;
+    const std::wstring tmp = path + L"." + std::to_wstring(GetCurrentProcessId()) + L"." +
+                             std::to_wstring(InterlockedIncrement(&sequence)) + L".tmp";
     HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         return false;

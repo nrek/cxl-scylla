@@ -8,7 +8,7 @@ The box keeps partial-turn file results on completion, failure, or interruption,
 
 **Protocol foundation only; Cursor account connection and chat are not enabled.** Cursor is hidden from Settings → AI Providers until Scylla has a working process transport, authentication flow, and agent execution path. Executable discovery alone is not presented as a provider capability.
 
-`AcpClient` is a transport-independent JSON-RPC 2.0 client compiled into Workbench and tested with fixtures. It supports version negotiation, advertised authentication methods, session create/load, advertised model/mode selection, prompt text streaming, tool/plan activity, partial tool updates, cancellation, and disconnect/error states. Model IDs come from the server. Unsupported client requests receive errors; permissions and blocking Cursor extensions are cancelled. These replies and `clientCapabilities` are **not filesystem or shell isolation**. An empty `mcpServers` array also does not disable Cursor's native MCP configuration.
+`AcpClient` is a transport-independent JSON-RPC 2.0 client compiled into the Scylla native runtime and tested with fixtures. It supports version negotiation, advertised authentication methods, session create/load, advertised model/mode selection, prompt text streaming, tool/plan activity, partial tool updates, cancellation, and disconnect/error states. Model IDs come from the server. Unsupported client requests receive errors; permissions and blocking Cursor extensions are cancelled. These replies and `clientCapabilities` are **not filesystem or shell isolation**. An empty `mcpServers` array also does not disable Cursor's native MCP configuration.
 
 Still required before enabling Send: native process transport and bounded asynchronous auth/status checks; a versioned CLI handshake; verified configuration/environment and filesystem/shell controls; interactive permissions/questions/plans; provider/session/model persistence; model configuration updates; and end-to-end operator verification. The supplied full integration plan remains the governing reference. No account credentials, billing pools, or usage limits have been read or inferred.
 
@@ -19,8 +19,8 @@ Cursor's official [ACP documentation](https://cursor.com/docs/cli/acp) and [inst
 Build and run the focused tests from a Windows compiler environment:
 
 ```powershell
-cmake --build build --config Release --target scyllagpt scyllagpt-agent-tests
+cmake --build build --config Release --target scyllagpt-agent-tests
 & .\build\Release\scyllagpt-agent-tests.exe
 ```
 
-The tests cover proposed/failed/successful edits, deduplication, concurrent sub-agent state, interruption, cross-session events, partial ACP updates, permissions, cancellation, advertised authentication/modes, transport failure, and incompatible versions. The current Workbench build and focused tests pass. The broader existing suite is blocked by the unrelated `workflow_source_manifest` call at `tests/test_workbench_domain.cpp:113` needing updated arguments. Visual/DPI testing and live Cursor verification remain outstanding.
+The tests cover proposed/failed/successful edits, deduplication, concurrent sub-agent state, interruption, cross-session events, partial ACP updates, permissions, cancellation, advertised authentication/modes, transport failure, and incompatible versions. Visual/DPI testing and live Cursor verification remain outstanding.

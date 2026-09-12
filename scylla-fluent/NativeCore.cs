@@ -453,6 +453,12 @@ internal static class NativeCore
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "scylla_terminal_running")]
     public static extern int TerminalRunning(IntPtr term);
 
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "scylla_terminal_set_mouse_behavior")]
+    public static extern void TerminalSetMouseBehavior(IntPtr term, int mode);
+
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "scylla_terminal_take_new_request")]
+    public static extern int TerminalTakeNewRequest(IntPtr term);
+
     private static string? ReadBuf(Func<byte[], int, int> fn, int size = 1024)
     {
         var buf = new byte[size];

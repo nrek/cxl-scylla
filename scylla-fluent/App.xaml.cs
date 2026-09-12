@@ -11,12 +11,13 @@ public partial class App : Application
 {
     internal static bool UiStressMode => Environment.GetCommandLineArgs().Contains("--ui-stress-test");
     private Window? _window;
-    private static readonly string LogPath = UiStressMode ? Path.Combine(AppContext.BaseDirectory, "ui-stress.log") :
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "ScyllaGPT", "fluent-launch.log");
+    private static string LogPath => UiStressMode ? Path.Combine(AppContext.BaseDirectory, "ui-stress.log") :
+        WindowInstance.StatePath("fluent-launch.log");
 
     public App()
     {
+        try { WindowInstance.InitializeCurrentProcess(Environment.GetCommandLineArgs()); }
+        catch (Exception ex) { Log($"secondary state initialization: {ex}"); }
         InitializeComponent();
         UnhandledException += (_, e) =>
         {
@@ -59,15 +60,19 @@ public partial class App : Application
             }
             try
             {
-                var acquired = NativeCore.TryAcquireInstance();
-                Log($"TryAcquireInstance={acquired}");
-                if (acquired == 0)
+                if (!WindowInstance.IsSecondary)
                 {
-                    NativeCore.ActivateExisting();
-                    Log("ActivateExisting + Exit");
-                    Exit();
-                    return;
+                    var acquired = NativeCore.TryAcquireInstance();
+                    Log($"TryAcquireInstance={acquired}");
+                    if (acquired == 0)
+                    {
+                        NativeCore.ActivateExisting();
+                        Log("ActivateExisting + Exit");
+                        Exit();
+                        return;
+                    }
                 }
+                else Log($"Secondary window id={WindowInstance.CurrentId}");
             }
             catch (DllNotFoundException ex)
             {

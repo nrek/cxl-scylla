@@ -508,7 +508,7 @@ StrataBridgeLaunch discover_strata_bridge_launch() {
         launch.discovery_note = "bundled STRATA bridge";
         return launch;
     }
-    const auto adapter = std::filesystem::path(module).parent_path() / L"strata_workbench_bridge.py";
+    const auto adapter = std::filesystem::path(module).parent_path() / L"strata_bridge_adapter.py";
     if (file_exists_w(adapter.wstring())) {
         std::vector<std::wstring> candidates;
         std::wstring cli;
@@ -538,7 +538,7 @@ StrataBridgeLaunch discover_strata_bridge_launch() {
         for (const auto& python : candidates) {
             if (file_exists_w(python) && try_python_module(python, &launch)) {
                 launch.args = L"-u " + quote_arg(adapter.wstring());
-                launch.discovery_note = "STRATA Workbench library bridge";
+        launch.discovery_note = "STRATA Scylla library bridge";
                 return launch;
             }
         }

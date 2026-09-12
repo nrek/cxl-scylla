@@ -1276,7 +1276,39 @@ internal sealed class EditorPane : UserControl
             if (policy.SelectedItem is string s)
                 NativeCore.TerminalProfilesSave($"{{\"agent_terminal_policy\":\"{Escape(s)}\"}}", out string _);
         };
-        yield return SettingsCard(Row("Default agent policy", "Used by terminals without their own policy.", policy));
+        var mouse = new ComboBox
+        {
+            ItemsSource = new[] { "Highlight Copy", "Right Click Copy", "Right Click Menu" },
+            SelectedIndex = (int)PanelPreferences.Current.TerminalMouse,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        var mouseHelp = Design.Caption("");
+        void UpdateMouseHelp() => mouseHelp.Text = mouse.SelectedIndex switch
+        {
+            1 => "Right-click a selection to copy it. Right-click again to paste.",
+            2 => "Right-click for Copy, Paste, Clear, and New Terminal.",
+            _ => "Selecting text copies it. Right-click to paste.",
+        };
+        UpdateMouseHelp();
+        mouse.SelectionChanged += (_, _) =>
+        {
+            if (mouse.SelectedIndex < 0) return;
+            PanelPreferences.Current.TerminalMouse = (TerminalMouseBehavior)mouse.SelectedIndex;
+            UpdateMouseHelp();
+            try { PanelPreferences.Current.Save(); }
+            catch (Exception ex) { _crumb.Text = "Could not save terminal preferences: " + ex.Message; }
+        };
+        var top = new Grid { ColumnSpacing = Design.GapLg };
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        top.Children.Add(new StackPanel { Spacing = Design.GapSm, Children = {
+            new TextBlock { Text = "Default agent policy" }, policy,
+            Design.Caption("Used by terminals without their own policy.") } });
+        var mouseColumn = new StackPanel { Spacing = Design.GapSm, Children = {
+            new TextBlock { Text = "Terminal mouse behavior" }, mouse, mouseHelp } };
+        Grid.SetColumn(mouseColumn, 1);
+        top.Children.Add(mouseColumn);
+        yield return Design.Card(top, new Thickness(Design.GapLg));
         yield return Design.GhostButton("Refresh terminals", ReloadSettingsBody);
 
         if (string.IsNullOrWhiteSpace(json))

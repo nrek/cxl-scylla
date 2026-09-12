@@ -37,7 +37,7 @@ struct FolderPermissionOverride {
     AccessMode mode = AccessMode::Inherit;
 };
 
-// Workbench Knowledge & Skills source — folders outside the active repo tree.
+// Scylla Knowledge & Skills source — folders outside the active repo tree.
 struct KnowledgeSource {
     std::string id;
     std::wstring label;  // display name

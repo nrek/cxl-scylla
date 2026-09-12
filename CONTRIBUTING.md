@@ -8,11 +8,12 @@ Build from a Visual Studio 2022 Developer PowerShell at the repository root:
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release --target scyllagpt scyllagpt-tests
+cmake --build build --config Release --target scylla-core-shared scyllagpt-tests
+dotnet build .\scylla-fluent\Scylla.csproj --configuration Release -p:Platform=x64
 .\build\Release\scyllagpt-tests.exe
 ```
 
-Alternatively configure `scyllagpt` alone (`cmake -S scyllagpt -B scyllagpt/build …`). The product executable is `scylla-workbench.exe`.
+The product executable is the WinUI 3 `scylla.exe`. The `scyllagpt` directory contains its native runtime and tests; it no longer builds a separate desktop application.
 
 ## Pull requests
 

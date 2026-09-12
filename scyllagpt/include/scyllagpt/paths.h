@@ -34,6 +34,9 @@ struct CodexMcpServer {
 };
 
 Paths make_paths();
+// Returns a process-local state root for a validated 32-character hex window id.
+// Shared configuration continues to use appdata directly.
+std::wstring instance_data_root(const std::wstring& appdata, const std::wstring& instance_id);
 bool ensure_dir(const std::wstring& path);
 std::wstring file_version(const std::wstring& exe);
 std::wstring discover_codex_exe();

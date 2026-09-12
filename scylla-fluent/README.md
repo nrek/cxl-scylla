@@ -1,4 +1,4 @@
-# Scylla Fluent shell (primary `scylla.exe`)
+# Scylla desktop application (`scylla.exe`)
 
 C# / WinUI 3 unpackaged app. Workbench-class IDE over `scylla-core` (Files | Editor | Agent | History).
 
@@ -13,7 +13,6 @@ $cmake = 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\Co
   D:\projects\cxl-scylla\scylla-fluent\Scylla.csproj /p:Configuration=Release /p:Platform=x64 /restore
 
 $out = 'D:\projects\cxl-scylla\scylla-fluent\bin\x64\Release\net8.0-windows10.0.19041.0'
-# Close scylla-workbench first (shared single-instance mutex)
 & "$out\scylla.exe"
 ```
 
@@ -45,12 +44,7 @@ Right-click files and folders for open, find text/filenames, new file/folder, re
 
 Chat History offers confirmed local deletion. Deletion erases local title, preview, and messages, retains an identifier tombstone to suppress provider rediscovery, and leaves provider-side history untouched. Busy chats must be stopped first. Disconnected services expose Sign In in the composer selector and use their existing login/key connection flows.
 
-## Relation to Win32
-
-| Binary | Role |
-|--------|------|
-| `scylla.exe` | This project — primary Fluent IDE |
-| `scylla-workbench.exe` | Optional Win32 for runas / limited-user |
+`scylla.exe` is the only supported desktop application. The retired native Win32 Workbench is not part of the build or distribution.
 For brokered SSH commands, use Settings → Security → SSH Connections. Create an alias such as
 `ssh_synq`, choose an enabled WSL profile, and select the Keyring username, private key and optional
 key passphrase. Supply the pinned host public key. The selected distribution needs Python 3 and

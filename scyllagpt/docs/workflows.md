@@ -48,15 +48,15 @@ stripped from the visible transcript.
 Execution runs through a real agent-callable tool, not a text handoff:
 
 ```text
-agent → scylla_query (MCP, stdio helper) → named pipe → Workbench
+agent → scylla_query (MCP, stdio helper) → named pipe → Scylla
       → resolve alias → classify SQL → approve if required → authorize Keyring refs
       → ssh → mysql → bounded rows → agent
 ```
 
-The helper is `scylla-workbench.exe --mcp-query-broker`, registered automatically as
+The helper is `scylla-broker.exe`, registered automatically as
 `[mcp_servers.scylla-query]` in the isolated Codex home. It is **secret-free**: it receives only a
 per-launch session token, derives the pipe name from it, and never holds a Keyring. Credentials are
-resolved inside the Workbench process and authorized for exactly one operation.
+resolved inside the Scylla process and authorized for exactly one operation.
 
 The agent supplies only `connection_alias` and `sql`. The **saved connection** owns the credential
 mapping — SSH key reference, database username and password references, pinned host key, query
@@ -73,7 +73,7 @@ shell command, so both are character-restricted and a value carrying metacharact
 ### Passphrase-protected SSH keys
 
 An encrypted key is leased into the Windows OpenSSH agent for the length of one query. The passphrase
-reaches `ssh-add` through `SSH_ASKPASS` pointing back at `scylla-workbench.exe`, which prints the
+reaches `ssh-add` through `SSH_ASKPASS` pointing at `scylla-broker.exe`, which prints the
 value from its own environment in askpass mode — nothing is written to disk and nothing appears in
 argv. `ssh` itself still runs with `BatchMode=yes`, so it can never prompt.
 

@@ -179,7 +179,7 @@ int run_broker_mcp_helper() {
     const std::wstring pipe_name = utf16(std::string(kBrokerPipePrefix) + token);
 
     const BrokerCallFn call = [&pipe_name, &token](const QueryToolCall& request) {
-        // Generous: the Workbench may be waiting on the user to approve.
+        // Generous: Scylla may be waiting on the user to approve.
         return call_broker_over_pipe(pipe_name, token, request, 120000);
     };
 

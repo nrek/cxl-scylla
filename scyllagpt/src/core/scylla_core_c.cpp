@@ -1952,4 +1952,12 @@ int scylla_terminal_running(scylla_terminal* term) {
     return term->host->running() ? 1 : 0;
 }
 
+void scylla_terminal_set_mouse_behavior(scylla_terminal* term, int mode) {
+    if (term && term->host) term->host->set_mouse_behavior(mode);
+}
+
+int scylla_terminal_take_new_request(scylla_terminal* term) {
+    return term && term->host && term->host->take_new_terminal_request() ? 1 : 0;
+}
+
 }  // extern "C"

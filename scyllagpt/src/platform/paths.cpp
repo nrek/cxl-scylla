@@ -154,6 +154,16 @@ bool file_exists(const std::wstring& path) {
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
+std::wstring instance_data_root(const std::wstring& appdata, const std::wstring& instance_id) {
+    if (instance_id.size() != 32) return appdata;
+    for (const wchar_t c : instance_id) {
+        const bool hex = (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') ||
+                         (c >= L'A' && c <= L'F');
+        if (!hex) return appdata;
+    }
+    return join_path(join_path(appdata, L"windows"), instance_id);
+}
+
 bool ensure_dir(const std::wstring& path) {
     if (path.empty()) {
         return false;
@@ -182,21 +192,25 @@ std::wstring file_version(const std::wstring& exe) {
 Paths make_paths() {
     Paths p;
     p.appdata = join_path(local_appdata(), L"ScyllaGPT");
-    p.codex_home = join_path(p.appdata, L"codex-home");
-    p.workspace = join_path(p.appdata, L"workspace");
-    p.settings_path = join_path(p.appdata, L"settings.json");
-    p.store_path = join_path(p.appdata, L"workspace.json");
+    wchar_t instance_id[64]{};
+    GetEnvironmentVariableW(L"SCYLLA_WINDOW_ID", instance_id, static_cast<DWORD>(std::size(instance_id)));
+    const std::wstring state_root = instance_data_root(p.appdata, instance_id);
+    p.codex_home = join_path(state_root, L"codex-home");
+    p.workspace = join_path(state_root, L"workspace");
+    p.settings_path = join_path(state_root, L"settings.json");
+    p.store_path = join_path(state_root, L"workspace.json");
     p.knowledge_path = join_path(p.appdata, L"knowledge.json");
     p.strata_path = join_path(p.appdata, L"strata.json");
     p.mcp_path = join_path(p.appdata, L"mcp_connections.json");
     p.terminals_path = join_path(p.appdata, L"terminals.json");
     p.environments_path = join_path(p.appdata, L"environments.json");
     p.connections_path = join_path(p.appdata, L"connections.json");
-    p.recovery_dir = join_path(p.appdata, L"recovery");
-    p.attachments_dir = join_path(p.appdata, L"attachments");
-    p.stderr_log = join_path(p.appdata, L"runtime-stderr.log");
-    p.runtime_pin = join_path(p.appdata, L"runtime-pin.txt");
+    p.recovery_dir = join_path(state_root, L"recovery");
+    p.attachments_dir = join_path(state_root, L"attachments");
+    p.stderr_log = join_path(state_root, L"runtime-stderr.log");
+    p.runtime_pin = join_path(state_root, L"runtime-pin.txt");
     ensure_dir(p.appdata);
+    ensure_dir(state_root);
     ensure_dir(p.codex_home);
     ensure_dir(p.workspace);
     ensure_dir(p.recovery_dir);

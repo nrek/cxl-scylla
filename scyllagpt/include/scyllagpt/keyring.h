@@ -1,6 +1,6 @@
 #pragma once
 
-// Scylla App-Level Keyring — one encrypted vault for the Workbench (Phase 1).
+// Scylla App-Level Keyring — one encrypted vault for Scylla (Phase 1).
 //
 // Security invariants (API contract):
 // - There is NO get_secret_value() for the agent layer.
@@ -115,7 +115,7 @@ public:
                                                       std::string_view value,
                                                       std::string_view description);
 
-    // Human Workbench UI only — copies plaintext to the clipboard; never returns the value.
+// Human-facing Scylla UI only — copies plaintext to the clipboard; never returns the value.
     KeyringStatus copy_secret_value_to_clipboard(std::string_view name);
 
     KeyringStatus authorize_use(std::string_view name, std::string_view operation_id);

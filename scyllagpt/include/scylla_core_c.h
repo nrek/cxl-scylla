@@ -1,7 +1,7 @@
 #pragma once
 
 // Flat C ABI for scylla-core. Consumed by scylla.exe (C# P/Invoke) and by
-// scylla-workbench.exe (static link with SCYLLA_CORE_STATIC). Keep C89-compatible.
+// scylla.exe consumes this ABI from scylla-core.dll. Keep C89-compatible.
 
 #ifdef __cplusplus
 extern "C" {
@@ -151,6 +151,8 @@ SCYLLA_CORE_API int scylla_terminal_write_utf8(scylla_terminal* term, const char
 SCYLLA_CORE_API int scylla_terminal_poll(scylla_terminal* term, char* buf, int buf_len);
 SCYLLA_CORE_API int scylla_terminal_resize_pixels(scylla_terminal* term, int w, int h);
 SCYLLA_CORE_API int scylla_terminal_running(scylla_terminal* term);
+SCYLLA_CORE_API void scylla_terminal_set_mouse_behavior(scylla_terminal* term, int mode);
+SCYLLA_CORE_API int scylla_terminal_take_new_request(scylla_terminal* term);
 
 #ifdef __cplusplus
 }

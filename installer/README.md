@@ -2,6 +2,8 @@
 
 This WiX project creates a self-contained, per-user MSI containing Scylla and a standalone STRATA distribution. It installs beneath `%LOCALAPPDATA%\CXL\Scylla`, creates a Start menu shortcut, and passes safe base STRATA settings to Scylla's first launch. Existing `%LOCALAPPDATA%\ScyllaGPT\strata.json` settings are never overwritten.
 
+The MSI contains the WinUI 3 `scylla.exe` application only. Packaging rebuilds a clean application staging directory and rejects the retired `scylla-workbench.exe` before WiX runs.
+
 ## STRATA payload contract
 
 By default the build locates the sibling `cxl-strata` repository and runs its pinned PyInstaller build. You may instead supply `-StrataPayload` with a prebuilt release directory whose root contains `strata.exe`. Python is not required on the destination computer.
@@ -40,3 +42,4 @@ msiexec /i ScyllaSetup.msi STRATAENABLED=1 STRATAMODE=team STRATAENDPOINT=https:
 3. Launch Scylla, open **Settings → Strata**, and verify local search.
 4. Repair, upgrade, and uninstall; confirm user data under `%LOCALAPPDATA%\ScyllaGPT` remains intact.
 5. Sign the MSI and bundled executables in the release pipeline.
+6. Inspect the MSI file table and confirm no `scylla-workbench.exe` or legacy Workbench shortcut is present.

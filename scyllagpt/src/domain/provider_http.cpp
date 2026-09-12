@@ -20,8 +20,8 @@
 namespace scyllagpt {
 namespace {
 
-constexpr char kOpenAiUa[] = "Scylla-Workbench-OpenAI-API/1.0";
-constexpr char kAnthropicUa[] = "Scylla-Workbench-Claude-API/1.0";
+constexpr char kOpenAiUa[] = "Scylla-OpenAI-API/1.0";
+constexpr char kAnthropicUa[] = "Scylla-Claude-API/1.0";
 constexpr char kAnthropicVersion[] = "2023-06-01";
 
 struct HttpResult {

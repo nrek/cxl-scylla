@@ -4,6 +4,8 @@ Scylla is a Windows coding workspace for working with AI agents while keeping pr
 
 The primary application is `scylla.exe`, a C# and WinUI 3 desktop shell backed by the native `scylla-core.dll` library. Scylla is under active development and is not yet a finished IDE or a hardened security boundary.
 
+The former native Win32 Workbench has been retired. It is no longer built, packaged, installed, or supported; `scylla.exe` is the sole desktop application.
+
 > [!WARNING]
 > Scylla runs provider tools and approved commands as the signed-in Windows user. Review project grants, Knowledge access, connection policies, and terminal settings before using sensitive data. Application policy reduces accidental access; it does not make untrusted code safe.
 
@@ -152,7 +154,7 @@ Documentation should distinguish implemented behavior from planned installer beh
 
 ```text
 scylla-fluent/          Primary WinUI 3 application
-scyllagpt/              Native core, broker, platform integrations, and tests
+scyllagpt/              Native runtime, broker, platform integrations, and tests
 tests/                  Cross-layer fixtures and Fluent preview tests
 docs/                   Architecture, status, and implementation handoffs
 archive/                Historical prototypes retained for reference

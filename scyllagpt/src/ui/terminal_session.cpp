@@ -233,7 +233,7 @@ void TerminalSessionManager::layout_active(int x, int y, int w, int h) {
     if (!s || !s->host) {
         return;
     }
-    // Hosts are parented to WorkbenchPanel::content_hwnd(); coordinates are local to that
+// Hosts are parented to the native terminal content window; coordinates are local to that
     // content window (typically 0,0,w,h), not the main frame.
     s->host->move(x, y, w, h);
 

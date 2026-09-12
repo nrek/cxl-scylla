@@ -118,6 +118,11 @@ public sealed class WorkbenchWindow : Window
         Closed += OnClosed;
 
         App.Log("wire events");
+        _chrome.NewWindowClicked += (_, _) =>
+        {
+            if (!WindowInstance.StartNew(out var error))
+                _status.SetMessage("Could not open a new window: " + error);
+        };
         _chrome.OpenFolderClicked += async (_, _) => await OpenFolderAsync();
         _chrome.OpenFileClicked += async (_, _) => await OpenFileAsync();
         _chrome.ToggleFilesClicked += (_, _) => { CycleMode(ref _filesMode); Relayout(); PersistLayout(); };

@@ -6,7 +6,7 @@
 namespace scyllagpt {
 namespace {
 
-constexpr wchar_t kMutexName[] = L"Global\\ScyllaGPT.Workbench";
+constexpr wchar_t kMutexName[] = L"Global\\ScyllaGPT.App";
 constexpr wchar_t kWindowClassHint[] = L"ScyllaGPTWindow";
 
 }  // namespace

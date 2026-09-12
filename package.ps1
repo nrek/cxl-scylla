@@ -62,6 +62,7 @@ if (Test-Path -LiteralPath $vswhere -PathType Leaf) {
 $cmake = Find-CommandPath "cmake" $cmakeCandidates
 Add-ToolDirectory $dotnet
 Add-ToolDirectory $cmake
+$cmakeGenerator = if ($cmake -match '\\Microsoft Visual Studio\\18\\') { "Visual Studio 18 2026" } else { "Visual Studio 17 2022" }
 
 $strataRoot = (Resolve-Path -LiteralPath $StrataSource).Path
 $strataBuild = Join-Path $strataRoot "scripts\build-windows-standalone.ps1"
@@ -82,7 +83,7 @@ if (-not $StrataPayload) {
 $installerBuild = Join-Path $PSScriptRoot "installer\build-installer.ps1"
 Write-Host "Building Scylla MSI version $Version..."
 & $installerBuild -Version $Version -Configuration $Configuration -StrataSource $strataRoot `
-    -StrataPayload $StrataPayload -SkipApplicationBuild:$SkipApplicationBuild
+    -StrataPayload $StrataPayload -CMakeGenerator $cmakeGenerator -SkipApplicationBuild:$SkipApplicationBuild
 
 $msi = Join-Path $PSScriptRoot "installer\artifacts\ScyllaSetup.msi"
 if (-not (Test-Path -LiteralPath $msi -PathType Leaf)) { throw "Packaging completed without producing $msi" }

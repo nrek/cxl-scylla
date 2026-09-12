@@ -9,6 +9,8 @@
 - Added native discovery of bundled `strata\strata.exe bridge` before PATH/Python fallbacks.
 - Kept STRATA API keys out of MSI properties and directed users to Scylla's Credential Manager-backed settings.
 - Added the root `package` command, which discovers Python, uv, CMake, and .NET before running the complete STRATA and MSI pipeline.
+- Fixed PowerShell's case-insensitive `StrataPayload`/`strataPayload` collision so the built STRATA directory is not replaced by its not-yet-created staging destination.
+- Isolated packaging CMake output under `build/package`, selected the installed Visual Studio generator, and added explicit native-command exit checks.
 
 ## Payload dependency
 

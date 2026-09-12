@@ -30,7 +30,7 @@ namespace scyllagpt {
 namespace {
 
 constexpr wchar_t kCredPrefix[] = L"ScyllaGPT/MCP/";
-constexpr char kUserAgent[] = "Scylla-Workbench-MCP-OAuth/1.0";
+constexpr char kUserAgent[] = "Scylla-MCP-OAuth/1.0";
 
 struct ParsedUrl {
     bool https = false;
@@ -359,7 +359,7 @@ bool dynamic_register(const AuthServerMeta& as, const std::string& redirect_uri,
         return false;
     }
     Json body = Json::object();
-    body["client_name"] = Json::string("Scylla Workbench");
+    body["client_name"] = Json::string("Scylla");
     Json uris = Json::array();
     uris.push(Json::string(redirect_uri));
     body["redirect_uris"] = std::move(uris);
@@ -541,13 +541,13 @@ LoopbackResult accept_callback(SOCKET listen_sock, const std::string& expect_sta
                                 "Connection: close\r\n\r\n"
                                 "<!doctype html><title>Scylla</title>"
                                 "<body style='font-family:sans-serif;padding:2rem'>"
-                                "<h1>Signed in</h1><p>You can close this window and return to Scylla Workbench.</p>"
+        "<h1>Signed in</h1><p>You can close this window and return to Scylla.</p>"
                                 "</body>"
                               : "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html; charset=utf-8\r\n"
                                 "Connection: close\r\n\r\n"
                                 "<!doctype html><title>Scylla</title>"
                                 "<body style='font-family:sans-serif;padding:2rem'>"
-                                "<h1>Sign-in failed</h1><p>Return to Scylla Workbench and try again.</p>"
+        "<h1>Sign-in failed</h1><p>Return to Scylla and try again.</p>"
                                 "</body>";
     send(client, html, static_cast<int>(std::strlen(html)), 0);
     closesocket(client);

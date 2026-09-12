@@ -39,6 +39,14 @@ internal sealed class AgentPane : UserControl
         Foreground = ThemeColors.Brush(ThemeColors.Secondary),
         TextWrapping = TextWrapping.WrapWholeWords,
     };
+    private readonly ScrollViewer _activityScroll = new()
+    {
+        MaxHeight = 450,
+        VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+        HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        VerticalScrollMode = ScrollMode.Auto,
+        HorizontalScrollMode = ScrollMode.Disabled,
+    };
 
     private readonly StackPanel _chatTabs = new()
     {
@@ -114,7 +122,8 @@ internal sealed class AgentPane : UserControl
         _openPlan.Click += (_, _) => OpenPlanRequested?.Invoke(this, _lastPlanPath);
         Background = ThemeColors.Brush(ThemeColors.Surface);
 
-        _activityCard = Design.Card(_activity, new Thickness(Design.Gap, Design.GapSm, Design.Gap, Design.GapSm));
+        _activityScroll.Content = _activity;
+        _activityCard = Design.Card(_activityScroll, new Thickness(Design.Gap, Design.GapSm, Design.Gap, Design.GapSm));
         _activityCard.Visibility = Visibility.Collapsed;
 
         _send = BuildSendButton();

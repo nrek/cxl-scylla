@@ -5,7 +5,6 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of Scylla is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
-    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
     <Property Id="STRATAENABLED" Value="1" Secure="yes" />
     <Property Id="STRATAMODE" Value="solo" Secure="yes" />
     <Property Id="STRATAENDPOINT" Value="http://127.0.0.1:8765" Secure="yes" />
@@ -30,7 +29,7 @@
     </Feature>
 
     <ComponentGroup Id="ScyllaPayload" Directory="INSTALLFOLDER">
-      <Files Include="$(var.PublishDir)\**" Exclude="$(var.PublishDir)\strata\**" />
+      <Files Include="$(var.PublishDir)\**" />
     </ComponentGroup>
     <ComponentGroup Id="StrataPayload" Directory="STRATADIR">
       <Files Include="$(var.StrataDir)\**" />
