@@ -1,5 +1,6 @@
 #include "scyllagpt/store.h"
 
+#include "scyllagpt/file_io.h"
 #include "scyllagpt/utf.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -16,34 +17,11 @@ namespace scyllagpt {
 namespace {
 
 std::string read_all(const std::wstring& path) {
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
-                            nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return {};
-    }
-    LARGE_INTEGER sz{};
-    GetFileSizeEx(h, &sz);
-    if (sz.QuadPart <= 0 || sz.QuadPart > 8 * 1024 * 1024) {
-        CloseHandle(h);
-        return {};
-    }
-    std::string raw(static_cast<std::size_t>(sz.QuadPart), 0);
-    DWORD rd = 0;
-    ReadFile(h, raw.data(), static_cast<DWORD>(raw.size()), &rd, nullptr);
-    CloseHandle(h);
-    raw.resize(rd);
-    return raw;
+    return read_file_bytes(path);
 }
 
 bool write_all(const std::wstring& path, const std::string& body) {
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    DWORD wr = 0;
-    const BOOL ok = WriteFile(h, body.data(), static_cast<DWORD>(body.size()), &wr, nullptr);
-    CloseHandle(h);
-    return ok != 0;
+    return write_file_bytes_atomic(path, body);
 }
 
 std::wstring lower_copy(std::wstring s) {
@@ -229,6 +207,7 @@ Conversation* WorkspaceStore::upsert_thread(const std::string& project_id, const
         return nullptr;
     }
     if (auto* existing = by_thread(thread_id)) {
+        if (existing->deleted) return nullptr;
         if (!title.empty() && (existing->title.empty() || existing->title == thread_id)) {
             existing->title = title;
         }
@@ -252,17 +231,40 @@ Conversation* WorkspaceStore::upsert_thread(const std::string& project_id, const
     return &conversations.back();
 }
 
+std::vector<std::wstring> WorkspaceStore::open_roots() const {
+    const auto* project = active();
+    if (!project) return {};
+    auto roots = project->roots;
+    if (roots.empty() && !project->root.empty()) roots.push_back(project->root);
+    return roots;
+}
+
+bool WorkspaceStore::contains_open_path(const std::wstring& path) const {
+    if (path.empty()) return false;
+    const auto candidate = lower_copy(canonicalize_path(path));
+    for (const auto& root : open_roots()) {
+        const auto normalized = lower_copy(canonicalize_path(root));
+        if (candidate == normalized || candidate.starts_with(normalized + L"\\")) return true;
+    }
+    return false;
+}
+
+bool WorkspaceStore::contains_open_project(const std::string& project_id) const {
+    const auto* project = by_id(project_id);
+    return project && contains_open_path(project->root);
+}
+
 std::vector<Conversation*> WorkspaceStore::list_visible(const std::string& account, const std::wstring& search) {
     std::vector<Conversation*> out;
     std::wstring q = lower_copy(search);
     for (auto& c : conversations) {
-        if (c.archived) {
+        if (c.archived || c.deleted) {
             continue;
         }
         if (!account.empty() && !c.account.empty() && c.account != account) {
             continue;
         }
-        if (!history_all_projects && !active_project_id.empty() && c.project_id != active_project_id) {
+        if (!contains_open_project(c.project_id)) {
             continue;
         }
         if (!q.empty()) {
@@ -314,9 +316,9 @@ bool WorkspaceStore::load(const std::wstring& path) {
             if (p.roots.empty() && !p.root.empty()) p.roots.push_back(p.root);
             p.identity = utf16(it.at("identity").as_string());
             p.last_thread_id = it.at("last_thread_id").as_string("");
-            p.files_w = static_cast<int>(it.at("files_w").as_int(220));
-            p.agent_w = static_cast<int>(it.at("agent_w").as_int(400));
-            p.history_w = static_cast<int>(it.at("history_w").as_int(232));
+            p.files_w = static_cast<int>(it.at("files_w").as_int(300));
+            p.agent_w = static_cast<int>(it.at("agent_w").as_int(650));
+            p.history_w = static_cast<int>(it.at("history_w").as_int(300));
             if (!p.id.empty()) {
                 projects.push_back(std::move(p));
             }
@@ -340,6 +342,7 @@ bool WorkspaceStore::load(const std::wstring& path) {
             c.preview = it.at("preview").as_string("");
             c.pinned = it.at("pinned").as_bool(false);
             c.archived = it.at("archived").as_bool(false);
+            c.deleted = it.at("deleted").as_bool(false);
             c.resumable = it.at("resumable").as_bool(true);
             if (!c.id.empty()) {
                 conversations.push_back(std::move(c));
@@ -387,6 +390,7 @@ bool WorkspaceStore::save(const std::wstring& path) const {
         o["local_messages"] = c.local_messages;
         o["pinned"] = Json::boolean(c.pinned);
         o["archived"] = Json::boolean(c.archived);
+        o["deleted"] = Json::boolean(c.deleted);
         o["resumable"] = Json::boolean(c.resumable);
         ca.push(std::move(o));
     }

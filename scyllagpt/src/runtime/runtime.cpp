@@ -76,16 +76,15 @@ Runtime::~Runtime() {
 }
 
 bool Runtime::start(const std::wstring& exe, const std::wstring& codex_home, const std::wstring& workspace,
-                    const std::wstring& stderr_log, HWND notify, UINT msg, bool allow_shell, std::wstring* error) {
-    return start(exe, codex_home, workspace, stderr_log, notify, msg, allow_shell, {}, error);
+                    const std::wstring& stderr_log, LineSink on_line, bool allow_shell, std::wstring* error) {
+    return start(exe, codex_home, workspace, stderr_log, std::move(on_line), allow_shell, {}, error);
 }
 
 bool Runtime::start(const std::wstring& exe, const std::wstring& codex_home, const std::wstring& workspace,
-                    const std::wstring& stderr_log, HWND notify, UINT msg, bool allow_shell,
+                    const std::wstring& stderr_log, LineSink on_line, bool allow_shell,
                     const std::vector<std::pair<std::wstring, std::wstring>>& environment, std::wstring* error) {
     stop();
-    notify_ = notify;
-    notify_msg_ = msg;
+    on_line_ = std::move(on_line);
 
     if (workspace.empty() || !dir_exists(workspace)) {
         if (error) {
@@ -285,6 +284,12 @@ DWORD WINAPI Runtime::reader_proc(LPVOID self) {
     return 0;
 }
 
+void Runtime::emit_line(std::string line) {
+    if (on_line_) {
+        on_line_(std::move(line));
+    }
+}
+
 void Runtime::reader_loop() {
     JsonlDecoder dec;
     char buf[4096];
@@ -299,19 +304,11 @@ void Runtime::reader_loop() {
             break;
         }
         for (auto& line : lines) {
-            if (!notify_) {
-                continue;
-            }
-            auto* heap = new std::string(std::move(line));
-            if (!PostMessageW(notify_, notify_msg_, 0, reinterpret_cast<LPARAM>(heap))) {
-                delete heap;
-            }
+            emit_line(std::move(line));
         }
     }
-    if (!stop_ && notify_) {
-        auto* closed = new std::string("{\"method\":\"scylla/runtimeClosed\",\"params\":{\"pid\":" +
-                                      std::to_string(pid_) + "}}");
-        if (!PostMessageW(notify_, notify_msg_, 0, reinterpret_cast<LPARAM>(closed))) delete closed;
+    if (!stop_) {
+        emit_line("{\"method\":\"scylla/runtimeClosed\",\"params\":{\"pid\":" + std::to_string(pid_) + "}}");
     }
 }
 

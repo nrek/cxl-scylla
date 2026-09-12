@@ -6,9 +6,14 @@
 #include "scyllagpt/utf.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cwctype>
 #include <string>
 #include <vector>
+
+#include <commdlg.h>
+
+#pragma comment(lib, "comdlg32.lib")
 
 namespace scyllagpt {
 namespace {
@@ -83,6 +88,50 @@ bool read_number(HWND h, std::uint32_t& out) {
     }
     out = static_cast<std::uint32_t>(value);
     return true;
+}
+
+bool read_private_key_file(const std::wstring& path, std::string& out, std::wstring& error) {
+    constexpr DWORD kMaxPrivateKeyBytes = 1024u * 1024u;
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        error = L"The selected private-key file could not be opened.";
+        return false;
+    }
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > kMaxPrivateKeyBytes) {
+        CloseHandle(file);
+        error = L"The selected file is empty or larger than 1 MB.";
+        return false;
+    }
+    out.assign(static_cast<std::size_t>(size.QuadPart), '\0');
+    DWORD read = 0;
+    const BOOL ok = ReadFile(file, out.data(), static_cast<DWORD>(out.size()), &read, nullptr);
+    CloseHandle(file);
+    if (!ok || read != out.size()) {
+        if (!out.empty()) SecureZeroMemory(out.data(), out.size());
+        out.clear();
+        error = L"The selected private-key file could not be read completely.";
+        return false;
+    }
+    if (out.rfind("-----BEGIN ", 0) != 0 || out.find("PRIVATE KEY-----") == std::string::npos ||
+        out.find("-----END ") == std::string::npos) {
+        SecureZeroMemory(out.data(), out.size());
+        out.clear();
+        error = L"The selected file does not look like an OpenSSH or PEM private key.";
+        return false;
+    }
+    return true;
+}
+
+std::string imported_key_name(HWND alias) {
+    std::string stem = utf8(trimmed(get_text(alias)));
+    if (stem.empty()) stem = "imported";
+    for (char& ch : stem) {
+        const unsigned char c = static_cast<unsigned char>(ch);
+        if (!std::isalnum(c) && ch != '-' && ch != '_') ch = '-';
+    }
+    return "scylla_" + stem + "-ssh-private-key";
 }
 
 void fill_authority(HWND select, ConnectionAuthority current) {
@@ -189,6 +238,8 @@ bool ConnectionsSettingsUi::create(HWND parent, HINSTANCE inst, HFONT font, HFON
 
     // Credentials
     key_ref_ = select(Cmd_ConnKeyRef);
+    btn_key_import_ = ui_kit::create_button(parent_, inst_, Cmd_ConnKeyImport, L"Import from file…",
+                                            ui_kit::ButtonKind::Secondary, font_);
     passphrase_ref_ = select(Cmd_ConnPassphraseRef);
     auth_ref_ = select(Cmd_ConnAuthRef);
     host_key_ = field(Cmd_ConnHostKey);
@@ -207,7 +258,7 @@ bool ConnectionsSettingsUi::create(HWND parent, HINSTANCE inst, HFONT font, HFON
     ui_kit::set_placeholder(db_name_, L"optional default schema");
 
     cred_rows_ = {
-        {label(L"SSH private key"), key_ref_, nullptr, 1},
+        {label(L"SSH private key"), key_ref_, btn_key_import_, 1},
         {label(L"Key passphrase"), passphrase_ref_, nullptr, 1},
         {label(L"SSH password"), auth_ref_, nullptr, 1},
         {label(L"Pinned host key"), host_key_, nullptr, 1},
@@ -586,7 +637,7 @@ void ConnectionsSettingsUi::load_form(const ProjectConnection& c) {
     SetWindowTextW(ssh_user_, utf16(c.ssh.username).c_str());
     SetWindowTextW(host_key_, utf16(c.ssh.host_key).c_str());
 
-    ui_kit::select_set_items(engine_, {{L"MySQL", 0}, {L"PostgreSQL", 1}, {L"SQL Server", 2}});
+    ui_kit::select_set_items(engine_, {{L"MySQL", 0}, {L"PostgreSQL", 1}, {L"SQL Server", 2}, {L"MongoDB", 3}});
     ui_kit::select_set_index(engine_, static_cast<int>(c.database.engine));
     SetWindowTextW(db_host_, utf16(c.database.host).c_str());
     set_number(db_port_, c.database.port);
@@ -654,6 +705,7 @@ bool ConnectionsSettingsUi::read_form(const std::string& project_id, ProjectConn
     switch (ui_kit::select_get_index(engine_)) {
         case 1: out.database.engine = DatabaseEngine::PostgreSql; break;
         case 2: out.database.engine = DatabaseEngine::SqlServer; break;
+        case 3: out.database.engine = DatabaseEngine::MongoDb; break;
         default: out.database.engine = DatabaseEngine::MySql; break;
     }
     out.database.host = utf8(trimmed(get_text(db_host_)));
@@ -742,7 +794,8 @@ void ConnectionsSettingsUi::fill_landing(ProjectConnectionManager& mgr, Keyring&
         return true;
     };
 
-    const auto rows = mgr.for_project(project_id_);
+    auto rows = mgr.for_project(project_id_);
+    rows.erase(std::remove_if(rows.begin(), rows.end(), [](const auto* connection) { return connection->ssh_only; }), rows.end());
     if (rows.empty()) {
         landing_primary_.push_back(L"No connections configured");
         landing_secondary_.push_back(
@@ -1048,6 +1101,78 @@ bool ConnectionsSettingsUi::on_command(WORD id, WORD notify, HWND owner, Project
     }
     if (id == Cmd_ConnUnlock) {
         request_ = ConnUiRequest::OpenKeyring;
+        return true;
+    }
+    if (id == Cmd_ConnKeyImport) {
+        if (keyring_locked_ || vault_missing_) {
+            request_ = ConnUiRequest::OpenKeyring;
+            set_status(vault_missing_ ? L"Create the Keyring before importing a private key."
+                                      : L"Unlock the Keyring before importing a private key.",
+                       true);
+            return true;
+        }
+
+        wchar_t path[MAX_PATH]{};
+        OPENFILENAMEW dialog{};
+        dialog.lStructSize = sizeof(dialog);
+        dialog.hwndOwner = owner ? owner : parent_;
+        dialog.lpstrFile = path;
+        dialog.nMaxFile = MAX_PATH;
+        dialog.lpstrFilter = L"SSH private keys\0*.pem;*.key;id_*\0All files\0*.*\0";
+        dialog.lpstrTitle = L"Import SSH private key into Scylla Keyring";
+        dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (!GetOpenFileNameW(&dialog)) return true;
+
+        std::string private_key;
+        std::wstring read_error;
+        if (!read_private_key_file(path, private_key, read_error)) {
+            set_status(read_error, true);
+            MessageBoxW(dialog.hwndOwner, read_error.c_str(), L"Import SSH private key",
+                        MB_OK | MB_ICONWARNING);
+            return true;
+        }
+
+        const std::string secret_name = imported_key_name(alias_);
+        const auto refs = keyring.list_refs_for_ui(project_id);
+        const bool replacing = std::any_of(refs.begin(), refs.end(), [&](const SecretRef& ref) {
+            return ref.name == secret_name && ref.scope == SecretScope::Project &&
+                   ref.project_id == project_id;
+        });
+        if (replacing) {
+            const std::wstring prompt = L"Replace the existing project Keyring value named\n\n" +
+                                        utf16(secret_name) + L"\n\nwith the selected file?";
+            if (MessageBoxW(dialog.hwndOwner, prompt.c_str(), L"Import SSH private key",
+                            MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) {
+                SecureZeroMemory(private_key.data(), private_key.size());
+                return true;
+            }
+        }
+
+        std::wstring filename(path);
+        const std::size_t slash = filename.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) filename.erase(0, slash + 1);
+        const std::string description = "SSH private key imported from " + utf8(filename);
+        const KeyringStatus imported = keyring.add_secret(secret_name, private_key, description,
+                                                          SecretScope::Project, project_id);
+        SecureZeroMemory(private_key.data(), private_key.size());
+        private_key.clear();
+        if (imported != KeyringStatus::Ok) {
+            const std::wstring message = L"The private key could not be stored in the Keyring (" +
+                                         utf16(keyring_status_string(imported)) + L").";
+            set_status(message, true);
+            MessageBoxW(dialog.hwndOwner, message.c_str(), L"Import SSH private key",
+                        MB_OK | MB_ICONERROR);
+            return true;
+        }
+
+        std::vector<std::string> chosen;
+        chosen.reserve(ref_selects_.size());
+        for (HWND select : ref_selects_) chosen.push_back(ref_name_of(select));
+        refresh_secret_names(keyring);
+        for (std::size_t i = 0; i < ref_selects_.size(); ++i) {
+            fill_ref_select(ref_selects_[i], ref_selects_[i] == key_ref_ ? secret_name : chosen[i]);
+        }
+        set_status(L"Private key imported into the project Keyring and selected for this connection.", false);
         return true;
     }
     // Save and Test both refuse the same way, and both refusals used to land only in the muted status

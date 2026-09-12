@@ -6,9 +6,10 @@
 #include <vector>
 
 namespace scyllagpt {
+class Json;
 
 enum class ConnectionRouteType { RemoteExecution = 0, SshTunnel, Direct };
-enum class DatabaseEngine { MySql = 0, PostgreSql, SqlServer };
+enum class DatabaseEngine { MySql = 0, PostgreSql, SqlServer, MongoDb };
 enum class ConnectionAuthority { Auto = 0, Ask, Block };
 enum class ResultVisibility { AgentAndHuman = 0, AgentOnly, HumanOnly, MetadataOnly, AggregateOnly };
 
@@ -61,6 +62,9 @@ struct ConnectionResultPolicy {
 };
 
 struct ProjectConnection {
+    bool ssh_only = false;
+    std::string terminal_profile_id;
+    ConnectionAuthority command_authority = ConnectionAuthority::Ask;
     std::string id;
     std::string project_id;
     std::string name;
@@ -95,5 +99,9 @@ public:
 private:
     std::vector<ProjectConnection> connections_;
 };
+
+// Trusted settings serialization. Contains references, never credential values.
+Json project_connection_json(const ProjectConnection& connection);
+ProjectConnection project_connection_from_json(const Json& json);
 
 }  // namespace scyllagpt

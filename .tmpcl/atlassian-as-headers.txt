@@ -1,0 +1,16 @@
+HTTP/1.1 200 OK
+Date: Fri, 11 Sep 2026 18:14:43 GMT
+Content-Type: application/json
+Content-Length: 561
+Server: AtlassianEdge
+Cf-Ray: a398a75b1adfc12a-PDX
+Ge-Edge-Trusted-Cloudflare-Proxy: bWNwLWNsb3VkZmxhcmUK
+X-Content-Type-Options: nosniff
+X-Xss-Protection: 1; mode=block
+Atl-Traceid: 6c2ffe4a4a014dd99bc98d9f4733d76b
+Atl-Request-Id: 6c2ffe4a-4a01-4dd9-9bc9-8d9f4733d76b
+Strict-Transport-Security: max-age=63072000; preload
+Report-To: {"endpoints": [{"url": "https://dz8aopenkvv6s.cloudfront.net"}], "group": "endpoint-1", "include_subdomains": true, "max_age": 600}
+Nel: {"failure_fraction": 0.01, "include_subdomains": true, "max_age": 600, "report_to": "endpoint-1"}
+Server-Timing: atl-edge;dur=13,atl-edge-internal;dur=2,atl-edge-upstream;dur=11,atl-edge-pop;desc="aws-us-west-2"
+

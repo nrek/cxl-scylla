@@ -169,6 +169,20 @@ int run_keyring_tests() {
     }
 
     kr_expect(true, "no get_secret_value in public header");
+    {
+        Keyring app;
+        app.open(vault);
+        app.unlock("correct-horse-battery");
+        app.add_secret("SCOPE_TEST", "a", "first", SecretScope::Project, "project-a");
+        app.add_secret("SCOPE_TEST", "b", "second", SecretScope::Project, "project-b");
+        kr_expect(app.remove_secret("SCOPE_TEST", SecretScope::Project, "project-b") == KeyringStatus::Ok,
+                  "scoped deletion removes requested project value");
+        bool kept = false;
+        for (const auto& ref : app.list_refs_for_ui("project-a")) if (ref.name == "SCOPE_TEST") kept = true;
+        kr_expect(kept, "scoped deletion preserves same name in another project");
+        kr_expect(app.remove_secret("SCOPE_TEST", SecretScope::Project, "project-b") == KeyringStatus::NotFound,
+                  "scoped deletion cannot fall back to another project");
+    }
 
     DeleteFileW(vault.c_str());
     return g_kr_fail;

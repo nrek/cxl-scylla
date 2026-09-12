@@ -4,6 +4,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <wincred.h>
 #include <winhttp.h>
 
 #include <algorithm>
@@ -13,6 +14,29 @@
 
 namespace scyllagpt {
 namespace {
+
+constexpr wchar_t kStrataCredentialTarget[] = L"ScyllaGPT/STRATA Remote API Key";
+
+bool store_strata_credential(const std::wstring& value) {
+    if (value.empty()) return CredDeleteW(kStrataCredentialTarget, CRED_TYPE_GENERIC, 0) || GetLastError() == ERROR_NOT_FOUND;
+    CREDENTIALW credential{};
+    credential.Type = CRED_TYPE_GENERIC;
+    credential.TargetName = const_cast<wchar_t*>(kStrataCredentialTarget);
+    credential.CredentialBlobSize = static_cast<DWORD>(value.size() * sizeof(wchar_t));
+    credential.CredentialBlob = reinterpret_cast<LPBYTE>(const_cast<wchar_t*>(value.data()));
+    credential.Persist = CRED_PERSIST_LOCAL_MACHINE;
+    credential.UserName = const_cast<wchar_t*>(L"STRATA");
+    return CredWriteW(&credential, 0) != FALSE;
+}
+
+std::wstring load_strata_credential() {
+    PCREDENTIALW credential = nullptr;
+    if (!CredReadW(kStrataCredentialTarget, CRED_TYPE_GENERIC, 0, &credential) || !credential) return {};
+    std::wstring value(reinterpret_cast<const wchar_t*>(credential->CredentialBlob),
+                       credential->CredentialBlobSize / sizeof(wchar_t));
+    CredFree(credential);
+    return value;
+}
 
 std::string read_all(const std::wstring& path) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
@@ -270,11 +294,15 @@ bool StrataClient::load(const std::wstring& path) {
     if (!err.empty() || !j.is_object()) {
         return false;
     }
+    settings_.enabled = j.at("enabled").as_bool(false);
+    settings_.team = j.at("mode").as_string("solo") == "team";
     if (j.at("endpoint").is_string()) {
         settings_.endpoint = utf16(j.at("endpoint").as_string());
     }
-    if (j.at("bearer").is_string()) {
+    settings_.bearer = load_strata_credential();
+    if (settings_.bearer.empty() && j.at("bearer").is_string()) {
         settings_.bearer = utf16(j.at("bearer").as_string());
+        store_strata_credential(settings_.bearer); // migrate legacy plaintext on the next save
     }
     const Json& arr = j.at("bindings");
     if (arr.is_array()) {
@@ -297,10 +325,12 @@ bool StrataClient::load(const std::wstring& path) {
 }
 
 bool StrataClient::save(const std::wstring& path) const {
+    if (!store_strata_credential(settings_.bearer)) return false;
     Json j = Json::object();
-    j["version"] = Json::number(1);
+    j["version"] = Json::number(2);
+    j["enabled"] = Json::boolean(settings_.enabled);
+    j["mode"] = Json::string(settings_.team ? "team" : "solo");
     j["endpoint"] = Json::string(utf8(settings_.endpoint));
-    j["bearer"] = Json::string(utf8(settings_.bearer));
     Json arr = Json::array();
     for (const auto& b : bindings_) {
         Json bj = Json::object();
@@ -420,6 +450,20 @@ StrataSearchResult StrataClient::search(const std::string& query, int limit, con
                 wchar_t hex[8]{};
                 swprintf_s(hex, L"%%%02X", ch);
                 qpath += hex;
+            }
+        }
+        qpath += L"&limit=" + std::to_wstring(limit);
+        if (!project_filter.empty()) {
+            qpath += L"&project=";
+            for (unsigned char ch : project_filter) {
+                if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+                    (ch >= '0' && ch <= '9') || ch == '-' || ch == '_' || ch == '.' || ch == '~') {
+                    qpath.push_back(static_cast<wchar_t>(ch));
+                } else {
+                    wchar_t hex[8]{};
+                    swprintf_s(hex, L"%%%02X", ch);
+                    qpath += hex;
+                }
             }
         }
         HttpResult get = http_request(settings_, L"GET", qpath.c_str(), nullptr, 8000);

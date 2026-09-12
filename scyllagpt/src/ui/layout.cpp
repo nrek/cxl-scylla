@@ -1,6 +1,7 @@
 #include "scyllagpt/layout.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace scyllagpt {
 namespace {
@@ -21,9 +22,11 @@ PaneLayout compute_panes(int client_w, int files_pref, int agent_pref, int histo
                           int files_mode, int history_mode, int narrow_tab) {
     PaneLayout L;
     const int minF = 180;
+    const int maxF = 600;
     const int minE = 400;
-    const int minA = 320;
+    const int minA = 300;
     const int minH = 180;
+    const int maxH = 600;
     const int split = 4;
 
     L.narrow_tabs = !focus_editor && client_w < 860;
@@ -76,16 +79,16 @@ PaneLayout compute_panes(int client_w, int files_pref, int agent_pref, int histo
         avail = 1;
     }
 
-    auto take = [&](bool on, int pref, int mn) {
+    auto take = [&](bool on, int pref, int mn, int mx = (std::numeric_limits<int>::max)()) {
         if (!on) {
             return 0;
         }
-        return clamp(pref, mn, std::max(mn, avail));
+        return clamp(pref, mn, std::min(mx, std::max(mn, avail)));
     };
 
-    L.files = take(L.show_files, files_pref > 0 ? files_pref : 220, minF);
-    L.agent = take(L.show_agent, agent_pref > 0 ? agent_pref : 400, minA);
-    L.history = take(L.show_history, history_pref > 0 ? history_pref : 232, minH);
+    L.files = take(L.show_files, files_pref > 0 ? files_pref : 300, minF, maxF);
+    L.agent = take(L.show_agent, agent_pref > 0 ? agent_pref : 650, minA);
+    L.history = take(L.show_history, history_pref > 0 ? history_pref : 300, minH, maxH);
 
     int used = (L.show_files ? L.files : 0) + (L.show_agent ? L.agent : 0) + (L.show_history ? L.history : 0);
     int remain = avail - used;

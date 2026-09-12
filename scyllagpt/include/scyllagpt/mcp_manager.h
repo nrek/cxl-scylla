@@ -47,6 +47,9 @@ struct McpConnection {
     std::string agent_alias;         // optional, without @; [a-zA-Z0-9_-]+
     McpTransportKind transport_kind = McpTransportKind::Http;
     std::wstring endpoint_or_cmd;
+    std::vector<std::string> oauth_scopes;
+    bool scopes_selected = false; // Explicit provider-consent choice may have an empty list.
+    bool has_authenticated = false;
     std::vector<std::wstring> arguments;
     std::vector<std::pair<std::wstring, std::wstring>> environment;
     bool enabled = true;
@@ -85,6 +88,7 @@ public:
     const std::vector<McpConnection>& connections() const { return connections_; }
 
     static std::vector<McpServiceTemplate> known_templates();
+    static std::vector<std::string> suggested_oauth_scopes(const std::string& service);
     static McpConnection from_template(const McpServiceTemplate& t, const std::wstring& account_label);
 
     static bool is_valid_alias(const std::string& alias_without_at);

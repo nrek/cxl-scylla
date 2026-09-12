@@ -2,6 +2,7 @@
 
 #include "scyllagpt/json.h"
 #include "scyllagpt/utf.h"
+#include "scyllagpt/async_snapshot.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -64,9 +65,7 @@ std::string mask_key_hint(const std::wstring& key, const char* prefix) {
     return "key saved";
 }
 
-ClaudeCodeSession g_claude_session_cache{};
-DWORD g_claude_session_cache_tick = 0;
-constexpr DWORD kClaudeSessionCacheMs = 2500;
+AsyncSnapshot<ClaudeCodeSession> g_claude_session_cache(std::chrono::seconds(30));
 bool g_claude_sticky_connected = false;
 std::vector<ClaudeModelRow> g_claude_models_cache;
 DWORD g_claude_models_tick = 0;
@@ -261,24 +260,16 @@ bool claude_code_login_launch(std::wstring* error) {
     }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    g_claude_session_cache_tick = 0;  // invalidate cache
+    g_claude_session_cache.invalidate();
     return true;
 }
 
-ClaudeCodeSession claude_code_session_status(bool force) {
-    const DWORD now = GetTickCount();
-    if (!force && g_claude_session_cache_tick != 0 && (now - g_claude_session_cache_tick) < kClaudeSessionCacheMs) {
-        return g_claude_session_cache;
-    }
-
-    const ClaudeCodeSession prev = g_claude_session_cache;
+static ClaudeCodeSession probe_claude_session(ClaudeCodeSession prev) {
     const bool had_good = prev.logged_in;
 
     ClaudeCodeSession s;
     if (discover_claude_cli().empty()) {
         // No CLI — keep prior OAuth only if we still have an API key path elsewhere.
-        g_claude_session_cache = s;
-        g_claude_session_cache_tick = now;
         return s;
     }
 
@@ -288,11 +279,8 @@ ClaudeCodeSession claude_code_session_status(bool force) {
         // Transient CLI failure must not wipe a known-good OAuth session (that was dropping
         // Claude rows from the agent menu right after Settings showed connected).
         if (had_good) {
-            g_claude_session_cache_tick = now;
             return prev;
         }
-        g_claude_session_cache = s;
-        g_claude_session_cache_tick = now;
         return s;
     }
 
@@ -300,22 +288,16 @@ ClaudeCodeSession claude_code_session_status(bool force) {
     const auto brace = out.find('{');
     if (brace == std::string::npos) {
         if (had_good) {
-            g_claude_session_cache_tick = now;
             return prev;
         }
-        g_claude_session_cache = s;
-        g_claude_session_cache_tick = now;
         return s;
     }
     std::string parse_err;
     Json j = Json::parse(out.substr(brace), &parse_err);
     if (!parse_err.empty()) {
         if (had_good) {
-            g_claude_session_cache_tick = now;
             return prev;
         }
-        g_claude_session_cache = s;
-        g_claude_session_cache_tick = now;
         return s;
     }
     s.logged_in = j.at("loggedIn").as_bool(false);
@@ -323,20 +305,19 @@ ClaudeCodeSession claude_code_session_status(bool force) {
     s.org_name = j.at("orgName").as_string("");
     s.auth_method = j.at("authMethod").as_string("");
     s.subscription = j.at("subscriptionType").as_string("");
-    if (s.logged_in) {
-        g_claude_sticky_connected = true;
-    } else {
-        g_claude_sticky_connected = false;
-    }
-    g_claude_session_cache = s;
-    g_claude_session_cache_tick = now;
+
     return s;
 }
 
+ClaudeCodeSession claude_code_session_status(bool force) {
+    auto status = g_claude_session_cache.get(probe_claude_session, force);
+    g_claude_sticky_connected = status.logged_in;
+    return status;
+}
+
 bool claude_code_logout(std::wstring* error) {
-    g_claude_session_cache_tick = 0;
     g_claude_sticky_connected = false;
-    g_claude_session_cache = {};
+    g_claude_session_cache.invalidate(true);
     std::string out;
     return run_claude_cli(L"auth logout", &out, error, 20000);
 }
@@ -464,8 +445,7 @@ bool claude_is_connected() {
 
 void claude_clear_connection_state() {
     g_claude_sticky_connected = false;
-    g_claude_session_cache = {};
-    g_claude_session_cache_tick = 0;
+    g_claude_session_cache.invalidate(true);
     g_claude_models_cache.clear();
     g_claude_models_tick = 0;
 }

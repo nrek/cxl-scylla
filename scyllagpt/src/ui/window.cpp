@@ -86,6 +86,8 @@ namespace {
 
 constexpr UINT WM_SCYLLA_LINE = WM_APP + 41;
 constexpr UINT WM_SCYLLA_CLOSE_SEL = WM_APP + 42;
+constexpr UINT WM_SCYLLA_CLAUDE_DONE = WM_APP + 43;
+constexpr UINT WM_SCYLLA_CLAUDE_MODELS = WM_APP + 44;
 constexpr UINT WM_SCYLLA_PICK_SEL = WM_APP + 45;
 constexpr UINT WM_SCYLLA_OPEN_SEL = WM_APP + 46;
 constexpr UINT WM_SCYLLA_TERMINAL_OUT = WM_APP + 40;
@@ -98,6 +100,10 @@ constexpr UINT WM_SCYLLA_RELAYOUT = WM_APP + 48;
 constexpr UINT WM_SCYLLA_BROKER_PREPARE = WM_APP + 49;
 // Posted by the connection-test worker with an owned result string once the SSH round trip returns.
 constexpr UINT WM_SCYLLA_TEST_RESULT = WM_APP + 50;
+// Posted from the composer's EN_CHANGE when the draft needs a taller or shorter box. Must not run
+// layout() synchronously inside EN_CHANGE — MoveWindow on a focused RichEdit mid-edit drops focus
+// and scrolls the caret out of the visible page.
+constexpr UINT WM_SCYLLA_COMPOSER_GROW = WM_APP + 51;
 constexpr WPARAM kRelayoutEnsurePanel = 1;
 constexpr wchar_t kSelectorClass[] = L"ScyllaGPTSelectorPopup";
 
@@ -234,7 +240,7 @@ struct TreeNode {
     std::wstring path;
     bool dir = false;
     bool loaded = false;
-    enum class Kind { Project, KnowledgeHeader, KnowledgeSource, KnowledgeEntry };
+    enum class Kind { Project, KnowledgeHeader, KnowledgeSource, KnowledgeEntry, Strata };
     Kind kind = Kind::Project;
     std::string source_id;
 };
@@ -247,6 +253,7 @@ struct OpenDoc {
     std::uint64_t hash = 0;
     bool dirty = false;
     bool preview = true;
+    bool pinned = false;
     bool readonly = false;
     EditorViewState view{};
     IndentInfo indent{};
@@ -315,6 +322,7 @@ struct Ui {
     std::wstring activity_text;
     HWND composer = nullptr;
     int composer_lines = kComposerMinLines;  // visible text lines; grows with the draft
+    bool composer_grow_pending = false;      // coalesce WM_SCYLLA_COMPOSER_GROW while typing
     HWND send = nullptr;
     HWND cancel = nullptr;
     HWND hdr_history = nullptr;
@@ -390,6 +398,7 @@ struct Ui {
     bool focus_restore_files = false;
     bool focus_restore_history = false;
     std::wstring editor_path;
+    std::wstring editor_tab_tooltip;
     std::vector<std::string> thread_ids;
     std::vector<std::wstring> chat_groups;
     bool restore_chat_pending = true;
@@ -482,6 +491,26 @@ void center_single_line_edit(HWND edit, HFONT font);
 
 int dip(HWND hwnd, int v) {
     return MulDiv(v, static_cast<int>(GetDpiForWindow(hwnd)), 96);
+}
+
+LineSink win32_line_sink(HWND hwnd) {
+    return [hwnd](std::string line) {
+        if (!hwnd) return;
+        auto* heap = new std::string(std::move(line));
+        if (!PostMessageW(hwnd, WM_SCYLLA_LINE, 0, reinterpret_cast<LPARAM>(heap))) {
+            delete heap;
+        }
+    };
+}
+
+ClaudeDoneSink win32_claude_done_sink(HWND hwnd) {
+    return [hwnd](ClaudePrintResult result) {
+        if (!hwnd) return;
+        auto* heap = new ClaudePrintResult(std::move(result));
+        if (!PostMessageW(hwnd, WM_SCYLLA_CLAUDE_DONE, 0, reinterpret_cast<LPARAM>(heap))) {
+            delete heap;
+        }
+    };
 }
 
 // Whether the agent can actually call scylla_query this session. The /scylla-query skill keys every
@@ -1142,6 +1171,16 @@ void rebuild_tree(Ui* ui) {
     // Separate KNOWLEDGE / SKILLS sections — never merge into project src tree. Disabled sources
     // are configuration only and stay out of the explorer entirely.
     const std::string pid = ui->session.store.active_project_id;
+    {
+        auto* strata = new TreeNode{};
+        strata->loaded = true;
+        strata->kind = TreeNode::Kind::Strata;
+        const bool enabled = ui->strata.settings().enabled;
+        const bool ready = enabled && ui->strata_ui.chrome_summary() == L"Library ready";
+        insert_tree_item(ui->knowledge_tree, TVI_ROOT,
+                         ready ? L"🟢 STRATA" : (enabled ? L"🟡 STRATA" : L"🔴 STRATA"),
+                         strata, false);
+    }
     const auto sources = ui->knowledge.list_enabled_for_project(pid);
     std::vector<const KnowledgeSource*> knowledge_sources;
     std::vector<const KnowledgeSource*> skills_sources;
@@ -1349,22 +1388,15 @@ void refresh_tabs(Ui* ui) {
     TabCtrl_DeleteAllItems(ui->tabs);
     for (std::size_t i = 0; i < ui->docs.size(); ++i) {
         std::wstring title = folder_name(ui->docs[i].path);
-        bool duplicate = false;
-        for (std::size_t j = 0; j < ui->docs.size(); ++j) {
-            if (i != j && _wcsicmp(title.c_str(), folder_name(ui->docs[j].path).c_str()) == 0) {
-                duplicate = true;
-                break;
-            }
-        }
-        if (duplicate) {
-            const auto slash = ui->docs[i].path.find_last_of(L"\\/");
-            if (slash != std::wstring::npos) {
-                title += L"  ·  " + folder_name(ui->docs[i].path.substr(0, slash));
-            }
+        if (title.size() > 20) {
+            std::size_t keep = 19;
+            if (title[keep - 1] >= 0xD800 && title[keep - 1] <= 0xDBFF) --keep;
+            title = title.substr(0, keep) + L"…";
         }
         if (ui->docs[i].dirty) {
             title += L"*";
         }
+        if (ui->docs[i].pinned) title = L"● " + title;
         if (ui->docs[i].preview) {
             title += L" ·";
         }
@@ -1376,7 +1408,7 @@ void refresh_tabs(Ui* ui) {
     if (ui->active_doc >= 0) {
         TabCtrl_SetCurSel(ui->tabs, ui->active_doc);
         auto& d = ui->docs[ui->active_doc];
-        SetWindowTextW(ui->hdr_editor, breadcrumbs(d.path).c_str());
+        SetWindowTextW(ui->hdr_editor, L"");
         InvalidateRect(ui->hdr_editor, nullptr, TRUE);
         ui->editor_path = d.path;
     }
@@ -3074,6 +3106,10 @@ void close_tab(Ui* ui, int i) {
     if (i < 0 || i >= static_cast<int>(ui->docs.size())) {
         return;
     }
+    if (ui->docs[i].pinned) {
+        SetWindowTextW(ui->status, L"Unpin this tab before closing it.");
+        return;
+    }
     pull_editor(ui);
     if (ui->docs[i].dirty) {
         const int choice = MessageBoxW(ui->wnd, L"Save this file before closing?", L"Scylla",
@@ -3104,6 +3140,25 @@ void close_tab(Ui* ui, int i) {
         return;
     }
     show_doc(ui, std::min(i, static_cast<int>(ui->docs.size()) - 1));
+}
+
+void toggle_tab_pin(Ui* ui, int index) {
+    if (!ui || index < 0 || index >= static_cast<int>(ui->docs.size())) return;
+    pull_editor(ui);
+    const std::wstring active_path = ui->docs[index].path;
+    ui->docs[index].pinned = !ui->docs[index].pinned;
+    ui->docs[index].preview = false;
+    std::stable_partition(ui->docs.begin(), ui->docs.end(), [](const OpenDoc& doc) { return doc.pinned; });
+    ui->session.settings.pinned_tabs.clear();
+    for (const auto& doc : ui->docs)
+        if (doc.pinned) ui->session.settings.pinned_tabs.push_back(doc.path);
+    save_settings(ui->session.paths.settings_path, ui->session.settings);
+    for (std::size_t i = 0; i < ui->docs.size(); ++i) {
+        if (_wcsicmp(ui->docs[i].path.c_str(), active_path.c_str()) == 0) {
+            show_doc(ui, static_cast<int>(i));
+            break;
+        }
+    }
 }
 
 void do_find(Ui* ui) {
@@ -4179,7 +4234,7 @@ void layout(Ui* ui) {
         ShowWindow(ui->empty_open_file, has_doc ? SW_HIDE : SW_SHOW);
         ShowWindow(ui->empty_open_folder, has_doc ? SW_HIDE : SW_SHOW);
         ShowWindow(ui->tabs, has_doc ? SW_SHOW : SW_HIDE);
-        ShowWindow(ui->hdr_editor, has_doc ? SW_SHOW : SW_HIDE);
+        ShowWindow(ui->hdr_editor, SW_HIDE);
         ShowWindow(ui->find_toggle, has_doc ? SW_SHOW : SW_HIDE);
         ShowWindow(ui->find, (has_doc && ui->find_open) ? SW_SHOW : SW_HIDE);
         ShowWindow(ui->save, has_doc ? SW_SHOW : SW_HIDE);
@@ -4304,6 +4359,9 @@ void layout(Ui* ui) {
         MoveWindow(ui->composer_cue, box.left + inner + 4, text_top + 2, dip(ui->wnd, 320), dip(ui->wnd, 20), TRUE);
         MoveWindow(ui->workflow, box.left + inner, box.bottom - foot, dip(ui->wnd, 100), dip(ui->wnd, 26), TRUE);
         MoveWindow(ui->send, box.right - inner - send_s, box.bottom - foot - 2, send_s, send_s, TRUE);
+        MoveWindow(ui->add_file, box.right - inner - send_s * 2 - dip(ui->wnd, 6),
+                   box.bottom - foot - 2, send_s, send_s, TRUE);
+        ShowWindow(ui->add_file, SW_SHOW);
         const bool cue = get_window_text(ui->composer).empty();
         ShowWindow(ui->composer_cue, cue ? SW_SHOW : SW_HIDE);
         cx += ww;
@@ -4837,7 +4895,7 @@ void browse_codex(Ui* ui) {
         save_settings(ui->session.paths.settings_path, ui->session.settings);
         std::wstring err;
         ui->session.stop_runtime();
-        if (!ui->session.start_runtime(ui->wnd, WM_SCYLLA_LINE, &err)) {
+        if (!ui->session.start_runtime(win32_line_sink(ui->wnd), win32_claude_done_sink(ui->wnd), &err)) {
             MessageBoxW(ui->wnd, err.c_str(), L"Scylla", MB_ICONERROR);
         }
     }
@@ -5390,6 +5448,10 @@ void refresh_composer_token_styles(Ui* ui) {
     const auto text = mention_composer_text(ui->composer);
     CHARRANGE caret{};
     SendMessageW(ui->composer, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&caret));
+    // Hide the all-text selection and freeze redraw so this recolor never scrolls the caret out of
+    // the visible page or flashes the whole buffer — that used to look like typing "out of frame".
+    SendMessageW(ui->composer, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(ui->composer, EM_HIDESELECTION, TRUE, FALSE);
     CHARRANGE all{0, -1};
     SendMessageW(ui->composer, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&all));
     CHARFORMAT2W base{};
@@ -5409,6 +5471,9 @@ void refresh_composer_token_styles(Ui* ui) {
         SendMessageW(ui->composer, EM_SETCHARFORMAT, SCF_SELECTION, reinterpret_cast<LPARAM>(&amber));
     }
     SendMessageW(ui->composer, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&caret));
+    SendMessageW(ui->composer, EM_HIDESELECTION, FALSE, FALSE);
+    SendMessageW(ui->composer, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(ui->composer, nullptr, FALSE);
 }
 
 LRESULT CALLBACK composer_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -5433,6 +5498,11 @@ LRESULT CALLBACK composer_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam
             try_paste_composer_image(ui);
             return 0;
         }
+    }
+    // Resolve pasted mentions too: they may not have an open completion popup.
+    if (msg == WM_KEYDOWN && wparam == VK_TAB && !ui->ime_composing &&
+        !(GetKeyState(VK_CONTROL) & 0x8000) && !(GetKeyState(VK_SHIFT) & 0x8000)) {
+        update_mcp_alias_popup(ui);
     }
     if (msg == WM_KEYDOWN && ui->mcp_alias_popup && !ui->ime_composing) {
         if (wparam == VK_UP || wparam == VK_DOWN) {
@@ -5639,7 +5709,7 @@ void create_controls(Ui* ui, HWND hwnd) {
     ui->hdr_editor = mk(hwnd, L"STATIC", L"", SS_OWNERDRAW, ID_HDR_EDITOR);
     ui->tabs = mk(hwnd, WC_TABCONTROLW, L"",
                   WS_TABSTOP | TCS_SINGLELINE | TCS_FOCUSNEVER | TCS_OWNERDRAWFIXED | TCS_FIXEDWIDTH | TCS_BUTTONS |
-                      TCS_FLATBUTTONS,
+                      TCS_FLATBUTTONS | TCS_TOOLTIPS,
                   ID_TABS);
     ui->find = mk(hwnd, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL | ES_MULTILINE | ES_AUTOVSCROLL, ID_FIND);
     ui->find_toggle = mk(hwnd, L"BUTTON", L"Find", btn, ID_TOGGLE_FIND);
@@ -5692,6 +5762,7 @@ void create_controls(Ui* ui, HWND hwnd) {
                       ID_MCP_ADD_NAME, ID_MCP_ADD_ALIAS, ID_MCP_ADD_ENDPOINT, ID_MCP_ADD_SAVE, ID_MCP_ADD_CANCEL);
     // Project-scope picker reads the live store, so opening Manage after a new folder is opened
     // lists it without needing a settings reload.
+    ui->mcp_ui.set_active_project_provider([ui]() { return ui->session.store.active_project_id; });
     ui->mcp_ui.set_project_provider([ui]() {
         McpSettingsUi::ProjectList out;
         for (const auto& p : ui->session.store.projects) {
@@ -6011,6 +6082,17 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             ui->mcp.load(ui->session.paths.mcp_path);
             ui->session.set_mcp_manager(&ui->mcp);
             ui->strata.load(ui->session.paths.strata_path);
+            for (const auto& pinned_path : ui->session.settings.pinned_tabs) {
+                if (!open_document(ui, pinned_path, true)) continue;
+                const std::wstring canonical = canonicalize_path(pinned_path);
+                for (auto& doc : ui->docs) {
+                    if (_wcsicmp(doc.path.c_str(), canonical.c_str()) == 0) {
+                        doc.pinned = true;
+                        break;
+                    }
+                }
+            }
+            refresh_tabs(ui);
             ui->environments.load(ui->session.paths.environments_path);
             ui->connections.load(ui->session.paths.connections_path);
             start_query_broker(ui);
@@ -6024,7 +6106,7 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             apply_editor_prefs(ui);
             SetWindowTextW(ui->composer, utf16(ui->session.draft_for(ui->session.settings.last_thread_id)).c_str());
             std::wstring err;
-            if (!ui->session.start_runtime(hwnd, WM_SCYLLA_LINE, &err)) {
+            if (!ui->session.start_runtime(win32_line_sink(hwnd), win32_claude_done_sink(hwnd), &err)) {
                 SetWindowTextW(ui->status, err.c_str());
             }
             // Store is loaded inside start_runtime; Knowledge was loaded above — expand
@@ -6227,11 +6309,11 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
                 const int x = GET_X_LPARAM(lparam);
                 const int dx = px_to_dip(hwnd, x - ui->drag_origin);
                 if (ui->drag == 1) {
-                    ui->session.settings.files_w = std::max(180, ui->files_w0 + dx);
+                    ui->session.settings.files_w = std::clamp(ui->files_w0 + dx, 180, 600);
                 } else if (ui->drag == 2) {
-                    ui->session.settings.agent_w = std::max(320, ui->agent_w0 - dx);
+                    ui->session.settings.agent_w = std::max(300, ui->agent_w0 - dx);
                 } else if (ui->drag == 3) {
-                    ui->session.settings.history_w = std::max(180, ui->history_w0 - dx);
+                    ui->session.settings.history_w = std::clamp(ui->history_w0 - dx, 180, 600);
                 }
                 layout(ui);
                 return 0;
@@ -6498,6 +6580,24 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         case WM_CONTEXTMENU: {
             HWND from = reinterpret_cast<HWND>(wparam);
+            if (from == ui->tabs) {
+                POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+                if (point.x == -1 && point.y == -1) GetCursorPos(&point);
+                POINT client = point;
+                ScreenToClient(ui->tabs, &client);
+                TCHITTESTINFO hit{};
+                hit.pt = client;
+                const int index = TabCtrl_HitTest(ui->tabs, &hit);
+                if (index >= 0 && index < static_cast<int>(ui->docs.size())) {
+                    HMENU menu = CreatePopupMenu();
+                    AppendMenuW(menu, MF_STRING, 1, ui->docs[index].pinned ? L"Unpin Tab" : L"Pin Tab");
+                    const int action = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_RIGHTBUTTON,
+                                                       point.x, point.y, 0, hwnd, nullptr);
+                    DestroyMenu(menu);
+                    if (action == 1) toggle_tab_pin(ui, index);
+                }
+                return 0;
+            }
             if (from == ui->knowledge_tree) {
                 POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
                 if (point.x == -1 && point.y == -1) {
@@ -6583,6 +6683,13 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         }
         case WM_NOTIFY: {
             auto* hdr = reinterpret_cast<NMHDR*>(lparam);
+            if (hdr->code == TTN_GETDISPINFOW && hdr->hwndFrom == TabCtrl_GetToolTips(ui->tabs)) {
+                auto* tip = reinterpret_cast<NMTTDISPINFOW*>(lparam);
+                const auto index = static_cast<std::size_t>(hdr->idFrom);
+                ui->editor_tab_tooltip = index < ui->docs.size() ? folder_name(ui->docs[index].path) : L"";
+                tip->lpszText = ui->editor_tab_tooltip.data();
+                return 0;
+            }
             if (hdr->code == EN_LINK) {
                 const auto* link = reinterpret_cast<ENLINK*>(lparam);
                 if (link->msg != WM_LBUTTONUP) return 0;
@@ -6680,7 +6787,9 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             if ((hdr->hwndFrom == ui->tree || hdr->hwndFrom == ui->knowledge_tree) && hdr->code == TVN_SELCHANGEDW) {
                 auto* nmtv = reinterpret_cast<NMTREEVIEWW*>(lparam);
                 auto* node = reinterpret_cast<TreeNode*>(nmtv->itemNew.lParam);
-                if (node && !node->dir && !node->path.empty()) {
+                if (node && node->kind == TreeNode::Kind::Strata) {
+                    show_content_view(ui, ContentView::Settings, SettingsSection::Strata);
+                } else if (node && !node->dir && !node->path.empty()) {
                     open_document(ui, node->path, false);
                 }
             }
@@ -6804,9 +6913,17 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
             } else if (id == ID_COMPOSER && code == EN_CHANGE) {
                 ShowWindow(ui->composer_cue, get_window_text(ui->composer).empty() ? SW_SHOW : SW_HIDE);
                 refresh_composer_token_styles(ui);
-                // Grow before the popup is placed; the popup anchors to the composer rect.
-                if (sync_composer_growth(ui)) layout(ui);
-                update_mcp_alias_popup(ui);
+                // Never layout() here: MoveWindow on this RichEdit while it is still inside EN_CHANGE
+                // drops focus and scrolls the caret off-page. Coalesce a deferred grow instead.
+                if (sync_composer_growth(ui) && !ui->composer_grow_pending) {
+                    ui->composer_grow_pending = true;
+                    PostMessageW(hwnd, WM_SCYLLA_COMPOSER_GROW, 0, 0);
+                }
+                // While a grow is queued the popup would anchor to the old rect; the grow handler
+                // repositions it after layout.
+                if (!ui->composer_grow_pending) {
+                    update_mcp_alias_popup(ui);
+                }
             } else if (id == ID_MCP_ALIAS_POPUP && (code == LBN_SELCHANGE || code == LBN_DBLCLK)) {
                 apply_mcp_alias_popup(ui);
             } else if (reinterpret_cast<HWND>(lparam) == ui->composer_cue && code == STN_CLICKED) {
@@ -7279,6 +7396,27 @@ LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
         case WM_SCYLLA_BROKER_PREPARE:
             broker_prepare_on_ui(ui, reinterpret_cast<BrokerPrepareBridge*>(lparam));
             return 0;
+        case WM_SCYLLA_COMPOSER_GROW: {
+            ui->composer_grow_pending = false;
+            if (!ui->composer) return 0;
+            // More keystrokes may have landed while this message was queued; re-measure so we
+            // settle on the final height in one pass rather than posting again.
+            sync_composer_growth(ui);
+            const bool keep_focus = GetFocus() == ui->composer;
+            CHARRANGE caret{};
+            if (keep_focus) {
+                SendMessageW(ui->composer, EM_EXGETSEL, 0, reinterpret_cast<LPARAM>(&caret));
+            }
+            layout(ui);
+            if (keep_focus) {
+                SetFocus(ui->composer);
+                SendMessageW(ui->composer, EM_EXSETSEL, 0, reinterpret_cast<LPARAM>(&caret));
+                SendMessageW(ui->composer, EM_SCROLLCARET, 0, 0);
+            }
+            // Popup anchors to the composer rect — place it after the box has moved.
+            update_mcp_alias_popup(ui);
+            return 0;
+        }
         case WM_SCYLLA_RELAYOUT: {
             if (wparam == kRelayoutEnsurePanel) {
                 ensure_terminal_panel(ui);

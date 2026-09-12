@@ -1,0 +1,12 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputName>ScyllaSetup</OutputName>
+    <OutputType>Package</OutputType>
+    <Platform>x64</Platform>
+    <PublishDir Condition="'$(PublishDir)' == ''">$(MSBuildThisFileDirectory)payload\scylla</PublishDir>
+    <StrataDir Condition="'$(StrataDir)' == ''">$(MSBuildThisFileDirectory)payload\strata</StrataDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+  </ItemGroup>
+</Project>

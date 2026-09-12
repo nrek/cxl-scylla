@@ -22,6 +22,7 @@ struct ConnectionQueryRequest {
     std::string alias;
     std::string sql;
     bool approved = false;
+    bool ssh_command = false;
 };
 
 enum class BrokerStatus {

@@ -800,6 +800,7 @@ LRESULT CALLBACK thin_sb_subclass(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lpa
             break;
     }
     if (msg == WM_NCDESTROY) {
+        RemovePropW(hwnd, L"ScyllaOwnsScrollbars");
         RemovePropW(hwnd, kThinSbTrackingProp);
         RemovePropW(hwnd, kThinSbHoverProp);
         RemovePropW(hwnd, kThinSbGrabProp);
@@ -820,7 +821,8 @@ void install_thin_scrollbar(HWND hwnd, COLORREF track) {
     RemovePropW(hwnd, kThinSbTrackingProp);
     RemovePropW(hwnd, kThinSbHoverProp);
     RemovePropW(hwnd, kThinSbGrabProp);
-    SetWindowSubclass(hwnd, thin_sb_subclass, kThinSbSubclassId, static_cast<DWORD_PTR>(track));
+    if (SetWindowSubclass(hwnd, thin_sb_subclass, kThinSbSubclassId, static_cast<DWORD_PTR>(track)))
+        SetPropW(hwnd, L"ScyllaOwnsScrollbars", reinterpret_cast<HANDLE>(1));
     refresh_thin_scrollbar(hwnd);
 }
 

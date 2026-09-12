@@ -159,7 +159,7 @@ bool TerminalHost::create(HWND parent, HWND notify, int control_id, HINSTANCE in
     // Do not apply DarkMode_Explorer to RICHEDIT50W — it leaves transparent/ghost strips on the
     // left edge when the host is parented under an owner-draw content HWND.
     SetWindowTheme(hwnd_, L"", L"");
-    install_thin_scrollbar(hwnd_, theme().panel);
+    install_thin_scrollbar(hwnd_, theme().app_bg);
 
     font_ = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Cascadia Mono");
@@ -168,7 +168,7 @@ bool TerminalHost::create(HWND parent, HWND notify, int control_id, HINSTANCE in
     }
     SendMessageW(hwnd_, EM_SETTEXTMODE, TM_PLAINTEXT | TM_MULTILEVELUNDO, 0);
     SendMessageW(hwnd_, EM_SETLIMITTEXT, 0, 4 * 1024 * 1024);
-    const COLORREF bg = theme().panel;
+    const COLORREF bg = theme().app_bg;
     SendMessageW(hwnd_, EM_SETBKGNDCOLOR, 0, bg);
     CHARFORMAT2W cf{};
     cf.cbSize = sizeof(cf);
@@ -315,7 +315,11 @@ void TerminalHost::move(int x, int y, int w, int h) {
 
 void TerminalHost::set_visible(bool visible) {
     if (hwnd_) {
-        ShowWindow(hwnd_, visible ? SW_SHOW : SW_HIDE);
+        // Never HWND_TOP / activating ShowWindow here: raising the ConPTY RICHEDIT
+        // sibling over WinUI's DesktopChildSiteBridge has STOW-crashed Fluent on
+        // load (0xc000027b / E_POINTER) when LayoutUpdated repositions repeatedly.
+        // Visibility comes from the shared island cutout; SW_SHOWNA keeps z-order.
+        ShowWindow(hwnd_, visible ? SW_SHOWNA : SW_HIDE);
     }
 }
 

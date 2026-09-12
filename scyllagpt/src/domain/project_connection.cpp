@@ -61,6 +61,7 @@ const char* engine_name(DatabaseEngine value) {
     switch (value) {
         case DatabaseEngine::PostgreSql: return "postgresql";
         case DatabaseEngine::SqlServer: return "sql-server";
+        case DatabaseEngine::MongoDb: return "mongodb";
         default: return "mysql";
     }
 }
@@ -68,6 +69,7 @@ const char* engine_name(DatabaseEngine value) {
 DatabaseEngine engine_from(std::string_view value) {
     if (value == "postgresql") return DatabaseEngine::PostgreSql;
     if (value == "sql-server") return DatabaseEngine::SqlServer;
+    if (value == "mongodb") return DatabaseEngine::MongoDb;
     return DatabaseEngine::MySql;
 }
 
@@ -112,6 +114,9 @@ std::uint32_t bounded_u32(const Json& value, std::uint32_t fallback, std::uint32
 
 Json connection_to_json(const ProjectConnection& connection) {
     Json root = Json::object();
+    root["kind"] = Json::string(connection.ssh_only ? "ssh" : "database");
+    root["terminalProfileId"] = Json::string(connection.terminal_profile_id);
+    root["commandAuthority"] = Json::string(authority_name(connection.command_authority));
     root["id"] = Json::string(connection.id);
     root["projectId"] = Json::string(connection.project_id);
     root["name"] = Json::string(connection.name);
@@ -168,6 +173,9 @@ Json connection_to_json(const ProjectConnection& connection) {
 ProjectConnection connection_from_json(const Json& root) {
     ProjectConnection connection;
     connection.id = root.at("id").as_string("");
+    connection.ssh_only = root.at("kind").as_string("database") == "ssh";
+    connection.terminal_profile_id = root.at("terminalProfileId").as_string("");
+    connection.command_authority = authority_from(root.at("commandAuthority").as_string("ask"), ConnectionAuthority::Ask);
     connection.project_id = root.at("projectId").as_string("");
     connection.name = root.at("name").as_string("");
     connection.alias = ProjectConnectionManager::normalize_alias(root.at("alias").as_string(""));
@@ -218,6 +226,9 @@ ProjectConnection connection_from_json(const Json& root) {
 
 }  // namespace
 
+Json project_connection_json(const ProjectConnection& connection) { return connection_to_json(connection); }
+ProjectConnection project_connection_from_json(const Json& json) { return connection_from_json(json); }
+
 std::string ProjectConnectionManager::make_id() {
     UUID uuid{};
     UuidCreate(&uuid);
@@ -250,7 +261,7 @@ bool ProjectConnectionManager::validate(const ProjectConnection& connection, std
     if (connection.project_id.empty()) return fail("project binding is required");
     if (connection.name.empty()) return fail("connection name is required");
     if (!is_valid_alias(connection.alias)) return fail("alias must be 1-48 letters, numbers, dashes, or underscores");
-    if (connection.route_type != ConnectionRouteType::Direct) {
+    if (connection.ssh_only || connection.route_type != ConnectionRouteType::Direct) {
         // Either a literal host or a Keyring name that resolves to one; the same for the username.
         if (connection.ssh.host.empty() && connection.ssh.host_ref.empty()) return fail("SSH host is required");
         if (connection.ssh.port == 0 && connection.ssh.port_ref.empty()) return fail("SSH port is invalid");
@@ -262,11 +273,15 @@ bool ProjectConnectionManager::validate(const ProjectConnection& connection, std
         // without it StrictHostKeyChecking cannot be enforced.
         if (connection.ssh.host_key.empty()) return fail("pinned SSH host public key is required");
     }
-    if (connection.database.host.empty() && connection.database.host_ref.empty())
+    if (connection.ssh_only) {
+        if (connection.terminal_profile_id.empty()) return fail("select a terminal profile");
+        if (connection.ssh.private_key_ref.empty()) return fail("an SSH private key reference is required");
+    }
+    if (!connection.ssh_only && connection.database.host.empty() && connection.database.host_ref.empty())
         return fail("database host is required");
-    if (connection.database.port == 0 && connection.database.port_ref.empty())
+    if (!connection.ssh_only && connection.database.port == 0 && connection.database.port_ref.empty())
         return fail("database port is invalid");
-    if (connection.database.username_ref.empty() || connection.database.password_ref.empty())
+    if (!connection.ssh_only && (connection.database.username_ref.empty() || connection.database.password_ref.empty()))
         return fail("database credential references are required");
     if (connection.result_policy.max_rows == 0 || connection.result_policy.max_bytes == 0 ||
         connection.result_policy.timeout_seconds == 0) return fail("result limits must be greater than zero");

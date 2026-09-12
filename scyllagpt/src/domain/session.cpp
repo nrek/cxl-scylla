@@ -2,6 +2,11 @@
 #include "scyllagpt/chat_history.h"
 #include "scyllagpt/codex_thread_util.h"
 #include "scyllagpt/history_merge.h"
+#include "scyllagpt/chat_mode.h"
+#include "scyllagpt/file_io.h"
+#include "scyllagpt/knowledge.h"
+#include "scyllagpt/project_context.h"
+#include <filesystem>
 
 #include "scyllagpt/lockdown.h"
 #include "scyllagpt/mcp_oauth.h"
@@ -62,6 +67,44 @@ std::string normalized_item_type(std::string type) {
         if (std::isalnum(ch)) normalized.push_back(static_cast<char>(std::tolower(ch)));
     }
     return normalized;
+}
+
+bool is_thread_missing_error(std::string err) {
+    for (char& ch : err) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return err.find("no rollout found") != std::string::npos ||
+           err.find("rollout not found") != std::string::npos ||
+           err.find("unknown thread") != std::string::npos ||
+           err.find("thread not found") != std::string::npos ||
+           err.find("no such thread") != std::string::npos ||
+           err.find("failed to find rollout") != std::string::npos;
+}
+
+std::string thread_path_field(const Json& t) {
+    for (const char* key : {"path", "filePath", "rolloutPath", "rollout_path"}) {
+        if (t.has(key) && t.at(key).is_string()) {
+            const std::string p = t.at(key).as_string();
+            if (!p.empty()) return p;
+        }
+    }
+    return {};
+}
+
+std::wstring find_rollout_file(const std::wstring& codex_home, const std::string& thread_id) {
+    if (codex_home.empty() || thread_id.empty()) return {};
+    const std::wstring needle = utf16(thread_id);
+    const std::filesystem::path root = std::filesystem::path(codex_home) / L"sessions";
+    std::error_code ec;
+    if (!std::filesystem::exists(root, ec)) return {};
+    for (std::filesystem::recursive_directory_iterator it(root, ec), end; it != end; it.increment(ec)) {
+        if (ec) break;
+        if (!it->is_regular_file(ec)) continue;
+        const auto name = it->path().filename().wstring();
+        if (name.find(needle) == std::wstring::npos) continue;
+        const auto ext = it->path().extension().wstring();
+        if (_wcsicmp(ext.c_str(), L".jsonl") == 0 || _wcsicmp(ext.c_str(), L".json") == 0)
+            return it->path().wstring();
+    }
+    return {};
 }
 
 bool is_supported_gpt_generation(const std::string& id) {
@@ -156,6 +199,45 @@ const wchar_t* state_label(AppState s) {
     return L"Unknown";
 }
 
+void Session::log_payload(const std::string& direction, const std::string& payload) {
+    // Called on the session/UI thread. Never write traffic to disk.
+    auto value = Json::parse(payload);
+    std::function<Json(const Json&)> redact = [&](const Json& v) -> Json {
+        if (v.is_object()) {
+            auto out = Json::object();
+            for (const auto& [key, child] : v.object_items()) {
+                std::string lower = key;
+                for (auto& c : lower) if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+                const bool secret = lower.find("token") != std::string::npos ||
+                    lower.find("secret") != std::string::npos || lower.find("password") != std::string::npos ||
+                    lower.find("apikey") != std::string::npos || lower.find("api_key") != std::string::npos ||
+                    lower == "authorization" || lower == "headers" || lower == "env" ||
+                    lower == "environment" || lower == "private_key";
+                out[key] = secret ? Json::string("[redacted]") : redact(child);
+            }
+            return out;
+        }
+        if (v.is_array()) {
+            auto out = Json::array();
+            for (const auto& child : v.array_items()) out.push(redact(child));
+            return out;
+        }
+        return v;
+    };
+    std::string preview = value.is_null() ? Json::string(payload).dump() : redact(value).dump();
+    if (preview.size() > 2048) {
+        size_t end = 2048;
+        while (end && (static_cast<unsigned char>(preview[end]) & 0xc0) == 0x80) --end;
+        preview.resize(end);
+        preview += " ... [truncated]";
+    }
+    SYSTEMTIME now{};
+    GetSystemTime(&now);
+    char stamp[32]{};
+    snprintf(stamp, sizeof(stamp), "%02u:%02u:%02u.%03uZ", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
+    payload_log.push_back(std::string(stamp) + " " + direction + " " + preview);
+    while (payload_log.size() > 200) payload_log.pop_front();
+}
 std::int64_t Session::send_req(const char* method, Json params) {
     const std::int64_t id = next_id_++;
     Json msg = Json::object();
@@ -164,6 +246,7 @@ std::int64_t Session::send_req(const char* method, Json params) {
     if (!params.is_null()) {
         msg["params"] = std::move(params);
     }
+    log_payload("OUT", msg.dump());
     if (!runtime_.write_line(msg.dump())) {
         last_error = "Runtime connection closed";
         set_state(AppState::Failed, L"Runtime connection closed");
@@ -176,6 +259,7 @@ void Session::send_notify(const char* method, Json params) {
     Json msg = Json::object();
     msg["method"] = Json::string(method);
     msg["params"] = params.is_null() ? Json::object() : std::move(params);
+    log_payload("OUT", msg.dump());
     runtime_.write_line(msg.dump());
 }
 
@@ -183,6 +267,7 @@ void Session::send_result(const Json& id, Json result) {
     Json msg = Json::object();
     msg["id"] = id;
     msg["result"] = std::move(result);
+    log_payload("OUT", msg.dump());
     runtime_.write_line(msg.dump());
 }
 
@@ -198,9 +283,13 @@ void Session::set_state(AppState s, const std::wstring& text) {
     }
 }
 
-bool Session::start_runtime(HWND hwnd, UINT line_msg, std::wstring* error) {
-    hwnd_ = hwnd;
-    line_msg_ = line_msg;
+bool Session::start_runtime(LineSink on_line, ClaudeDoneSink on_claude_done, std::wstring* error) {
+    // Starting an already-live session must preserve its loaded threads and callbacks.
+    // Runtime::start replaces the process, leaving active_thread_id stale.
+    if (runtime_.running()) return true;
+    account_loaded = false;
+    on_line_ = std::move(on_line);
+    on_claude_done_ = std::move(on_claude_done);
     paths = make_paths();
     store.load(paths.store_path);
     if (auto* p = store.active()) {
@@ -254,7 +343,7 @@ bool Session::start_runtime(HWND hwnd, UINT line_msg, std::wstring* error) {
     runtime_path = settings.codex_path;
     runtime_version = file_version(settings.codex_path);
     set_state(AppState::Connecting, L"Starting Codex app-server");
-    if (!runtime_.start(settings.codex_path, paths.codex_home, paths.workspace, paths.stderr_log, hwnd, line_msg,
+    if (!runtime_.start(settings.codex_path, paths.codex_home, paths.workspace, paths.stderr_log, on_line_,
                         allow_shell, mcp_runtime.environment, error)) {
         set_state(AppState::Failed, error ? *error : L"Runtime start failed");
         return false;
@@ -338,6 +427,8 @@ void Session::refresh_openai_api_models() {
         pairs.emplace_back(r.id, r.display);
     }
     merge_http_provider_models("openai-api", pairs);
+    settings.verbose_agent_progress = load_settings(paths.settings_path).verbose_agent_progress;
+    save_settings(paths.settings_path, settings);
     finalize_model_catalog();
 }
 
@@ -361,12 +452,15 @@ void Session::refresh_claude_api_models() {
         pairs.emplace_back(r.id, r.display);
     }
     merge_http_provider_models("claude-api", pairs);
+    settings.verbose_agent_progress = load_settings(paths.settings_path).verbose_agent_progress;
+    save_settings(paths.settings_path, settings);
     finalize_model_catalog();
 }
 
 void Session::set_default_provider(const std::string& provider) {
     settings.default_provider = coerce_default_provider(provider);
     ensure_selected_model();
+    reset_reasoning_effort_for_selected_model();
 }
 
 bool Session::is_model_enabled(const std::string& provider_id, const std::string& model_id) const {
@@ -427,7 +521,34 @@ void Session::set_provider_default_model(const std::string& provider_id, const s
     if (settings.default_provider == provider_id && !model_id.empty()) {
         selected_model = model_id;
         settings.selected_model = model_id;
+        reset_reasoning_effort_for_selected_model();
     }
+}
+
+void Session::reset_reasoning_effort_for_selected_model() {
+    settings.reasoning_effort.clear();
+    const auto choices = models_for_provider(settings.default_provider, false);
+    const auto model = std::find_if(choices.begin(), choices.end(), [&](const auto& m) {
+        return m.id == selected_model;
+    });
+    if (model == choices.end() || model->reasoning_efforts.empty()) return;
+    const auto medium = std::find(model->reasoning_efforts.begin(), model->reasoning_efforts.end(), "medium");
+    if (medium != model->reasoning_efforts.end()) settings.reasoning_effort = *medium;
+    else if (std::find(model->reasoning_efforts.begin(), model->reasoning_efforts.end(),
+        model->default_reasoning_effort) != model->reasoning_efforts.end())
+        settings.reasoning_effort = model->default_reasoning_effort;
+    else settings.reasoning_effort = model->reasoning_efforts[(model->reasoning_efforts.size() - 1) / 2];
+}
+
+void Session::apply_reasoning_effort(Json& turn_params) const {
+    if (settings.reasoning_effort.empty()) return;
+    const auto choices = models_for_provider(settings.default_provider, false);
+    const auto model = std::find_if(choices.begin(), choices.end(), [&](const auto& candidate) {
+        return candidate.id == selected_model;
+    });
+    if (model != choices.end() && std::find(model->reasoning_efforts.begin(),
+        model->reasoning_efforts.end(), settings.reasoning_effort) != model->reasoning_efforts.end())
+        turn_params["effort"] = Json::string(settings.reasoning_effort);
 }
 
 void Session::request_models(const std::string& cursor) {
@@ -496,7 +617,13 @@ void Session::merge_http_provider_models(const std::string& provider_id,
     models.erase(std::remove_if(models.begin(), models.end(),
                                 [&](const ModelChoice& m) { return m.provider_id == provider_id; }),
                  models.end());
+    const std::string prefix = provider_id + "/";
+    const bool first_setup = std::none_of(settings.model_enabled.begin(), settings.model_enabled.end(),
+        [&](const auto& entry) { return entry.first.starts_with(prefix); });
+    std::size_t rank = 0;
     for (const auto& row : rows) {
+        if (first_setup) settings.model_enabled[prefix + row.first] = rank < 3;
+        ++rank;
         ModelChoice c;
         c.id = row.first;
         c.display = row.second.empty() ? row.first : row.second;
@@ -549,6 +676,7 @@ void Session::finalize_model_catalog() {
         if (pa != pb) {
             return pa < pb;
         }
+        if (is_api_provider(a.provider_id)) return false; // Preserve API discovery order (newest first).
         const int ra = model_sort_rank(a.id, a.provider_id);
         const int rb = model_sort_rank(b.id, b.provider_id);
         if (ra != rb) {
@@ -568,6 +696,11 @@ void Session::finalize_model_catalog() {
         sig.push_back('\0');
         sig.append(m.display);
         sig.push_back('\0');
+        sig.append(m.default_reasoning_effort);
+        sig.push_back('\0');
+        sig.append(m.specialty);
+        sig.push_back(m.is_default ? '\1' : '\0');
+        for (const auto& effort : m.reasoning_efforts) { sig.append(effort); sig.push_back('\0'); }
         sig.push_back(m.hidden ? '\1' : '\0');
     }
     sig.append(selected_model);
@@ -597,6 +730,7 @@ void Session::ensure_selected_model() {
     auto best_for = [&](const std::string& provider) -> const ModelChoice* {
         const ModelChoice* exact = nullptr;
         const ModelChoice* preferred = nullptr;
+        const ModelChoice* catalog_default = nullptr;
         const ModelChoice* best = nullptr;
         int best_rank = 0x7fffffff;
         const auto pdm = settings.provider_default_model.find(provider);
@@ -615,6 +749,9 @@ void Session::ensure_selected_model() {
             if (!preferred_id.empty() && m.id == preferred_id) {
                 preferred = &m;
             }
+            if (m.is_default && !catalog_default) {
+                catalog_default = &m;
+            }
             const int rank = model_sort_rank(m.id, m.provider_id);
             if (!best || rank < best_rank) {
                 best = &m;
@@ -626,6 +763,9 @@ void Session::ensure_selected_model() {
         }
         if (preferred) {
             return preferred;
+        }
+        if (catalog_default) {
+            return catalog_default;
         }
         return best;
     };
@@ -679,6 +819,18 @@ void Session::ingest_models(const Json& result, bool replace) {
                 continue;
             }
             c.hidden = m.at("hidden").as_bool(false);
+            c.specialty = m.at("modelSpecialty").as_string("");
+            c.is_default = m.at("isDefault").as_bool(false);
+            c.default_reasoning_effort = m.at("defaultReasoningEffort").as_string("");
+            const Json& efforts = m.at("supportedReasoningEfforts");
+            if (efforts.is_array()) {
+                for (const auto& effort : efforts.array_items()) {
+                    const std::string value = effort.is_string()
+                        ? effort.as_string("") : effort.at("reasoningEffort").as_string("");
+                    if (!value.empty() && std::find(c.reasoning_efforts.begin(), c.reasoning_efforts.end(), value) == c.reasoning_efforts.end())
+                        c.reasoning_efforts.push_back(value);
+                }
+            }
             bool dup = false;
             for (const auto& existing : models) {
                 if (existing.provider_id == c.provider_id && existing.id == c.id) {
@@ -780,7 +932,7 @@ void Session::set_knowledge_accessible_paths(std::vector<std::wstring> paths) {
 
 std::string Session::knowledge_grant_preamble() const {
     if (knowledge_accessible_paths_.empty()) {
-        return {};
+        return scoped_knowledge_context(store, {});
     }
     std::ostringstream oss;
     oss << "Knowledge folders granted for this turn (absolute paths; not limited to the project cwd):\n";
@@ -790,7 +942,7 @@ std::string Session::knowledge_grant_preamble() const {
     oss << "Under a .md root, handoffs are in handoff/ (singular) and blueprints in blueprints/. "
            "workspace_index.sqlite is a binary SQLite index — do not treat it as empty markdown; "
            "read the .md files under those folders (or use STRATA if available).\n";
-    return oss.str();
+    return oss.str() + scoped_knowledge_context(store, knowledge_accessible_paths_);
 }
 
 bool Session::sync_lockdown_config() {
@@ -824,13 +976,13 @@ bool Session::sync_lockdown_config() {
         }
     }
     // Shell enablement is baked into CreateProcess args — restart when grant flips.
-    if (ok && runtime_.running() && allow_shell != runtime_allow_shell_ && hwnd_ && line_msg_ &&
+    if (ok && runtime_.running() && allow_shell != runtime_allow_shell_ && on_line_ &&
         !settings.codex_path.empty()) {
         runtime_.stop();
         runtime_allow_shell_ = false;
         set_state(AppState::Connecting, L"Restarting Codex for project grant…");
         std::wstring err;
-        if (!runtime_.start(settings.codex_path, paths.codex_home, paths.workspace, paths.stderr_log, hwnd_, line_msg_,
+        if (!runtime_.start(settings.codex_path, paths.codex_home, paths.workspace, paths.stderr_log, on_line_,
                             allow_shell, mcp_runtime.environment, &err)) {
             set_state(AppState::Failed, err.empty() ? L"Runtime restart failed" : err);
             return false;
@@ -860,6 +1012,7 @@ void Session::new_conversation() {
     active_turn_id.clear();
     stream_buffer.clear();
     history_messages.clear();
+    send_repair_fresh_used_ = false;
     if (account.signed_in) set_state(AppState::Ready, L"Ready");
     if (thread_start_id_ >= 0) return;
     Json p = Json::object();
@@ -874,40 +1027,155 @@ void Session::new_conversation() {
     thread_start_id_ = send_req("thread/start", std::move(p));
 }
 
-void Session::send_user(const std::string& text) {
+void Session::send_user(const std::string& text, const std::string& mode) {
+    log_payload("USER " + settings.default_provider + " " + mode, text);
     if (settings.default_provider == "claude") {
+        if (claude_busy_) return;
         activity.begin();
         send_claude_user(text);
         return;
     }
     if (settings.default_provider == "openai-api" || settings.default_provider == "claude-api") {
+        if (claude_busy_) return;
         activity.begin();
         send_api_user(settings.default_provider, text);
         return;
+    }
+    // Stale ChatGPT threads (rollout deleted / different CODEX_HOME) must not resume.
+    if (!active_thread_id.empty()) {
+        if (auto* c = store.by_thread(active_thread_id);
+            c && (!c->resumable || (c->provider_id != "openai" && !c->provider_id.empty() &&
+                                    c->provider_id != "chatgpt"))) {
+            active_thread_id.clear();
+        }
     }
     if (active_thread_id.empty()) {
         if (thread_start_id_ < 0) new_conversation();
         if (thread_start_id_ >= 0) {
             pending_thread_prompts_[thread_start_id_] = text;
+            pending_thread_modes_[thread_start_id_] = mode;
             activity.begin();
             activity.phase = "Starting conversation";
         }
         return;
     }
-    send_user_to_thread(text, active_thread_id, true);
+    send_user_to_thread(text, active_thread_id, true, mode, {}, true, SendRepairStep::InitialResume);
 }
 
-void Session::send_user_to_thread(const std::string& text, const std::string& thread_id, bool foreground) {
+void Session::fail_send_repair(PendingResumedPrompt prompt, const std::string& error) {
+    last_error = error.empty() ? std::string("Turn could not start") : error;
+    auto& running = thread_runtime_[prompt.thread_id];
+    running.activity.finish(AgentActivity::label("Failed: " + last_error));
+    if (prompt.foreground || prompt.thread_id == active_thread_id) {
+        activity = running.activity;
+        set_state(AppState::Failed, utf16("Turn could not start: " + last_error));
+    }
+}
+
+void Session::begin_fresh_send(PendingResumedPrompt prompt, const wchar_t* status) {
+    if (send_repair_fresh_used_) {
+        fail_send_repair(std::move(prompt),
+                         last_error.empty() ? "Chat repair already tried a new conversation" : last_error);
+        return;
+    }
+    send_repair_fresh_used_ = true;
+    if (auto* c = store.by_thread(prompt.thread_id)) {
+        c->resumable = false;
+        store.save(paths.store_path);
+    }
+    if (active_thread_id == prompt.thread_id) active_thread_id.clear();
+    if (thread_start_id_ >= 0) {
+        // A start is already in flight — queue onto it (still only one fresh attempt).
+        pending_thread_prompts_[thread_start_id_] = prompt.text;
+        pending_thread_modes_[thread_start_id_] = prompt.mode;
+        activity.begin();
+        activity.phase = "Starting conversation";
+        last_error.clear();
+        set_state(AppState::Generating, status ? status : L"Starting a new conversation…");
+        return;
+    }
+    // Do not clear send_repair_fresh_used_ here — new_conversation() would reset it.
+    activity = {};
+    active_thread_id.clear();
+    active_turn_id.clear();
+    stream_buffer.clear();
+    history_messages.clear();
+    if (account.signed_in) set_state(AppState::Ready, L"Ready");
+    Json p = Json::object();
+    if (!selected_model.empty()) p["model"] = Json::string(selected_model);
+    const std::wstring cwd = conversation_cwd();
+    p["cwd"] = Json::string(utf8(cwd));
+    p["approvalPolicy"] = Json::string("on-request");
+    p["sandbox"] = Json::string(has_project_grant() ? "workspace-write" : "read-only");
+    p["serviceName"] = Json::string("scylla_gpt");
+    thread_start_id_ = send_req("thread/start", std::move(p));
+    if (thread_start_id_ < 0) {
+        fail_send_repair(std::move(prompt), "Could not start a replacement conversation");
+        return;
+    }
+    pending_thread_prompts_[thread_start_id_] = prompt.text;
+    pending_thread_modes_[thread_start_id_] = prompt.mode;
+    activity.begin();
+    activity.phase = "Starting conversation";
+    last_error.clear();
+    set_state(AppState::Generating, status ? status : L"Prior chat unavailable — starting a new one…");
+}
+
+void Session::advance_send_repair(PendingResumedPrompt prompt) {
+    if (prompt.repair_step == SendRepairStep::FreshThread) {
+        fail_send_repair(std::move(prompt), last_error);
+        return;
+    }
+    last_error.clear();
+    if (prompt.repair_step == SendRepairStep::InitialResume) {
+        prompt.repair_step = SendRepairStep::AfterListLookup;
+        activity.phase = "Looking up conversation";
+        set_state(AppState::Generating, L"Looking up conversation…");
+        Json p = Json::object();
+        p["limit"] = Json::number(100);
+        repair_list_id_ = send_req("thread/list", std::move(p));
+        if (repair_list_id_ < 0) {
+            prompt.repair_step = SendRepairStep::AfterListLookup;
+        } else {
+            pending_repair_prompts_[repair_list_id_] = std::move(prompt);
+            return;
+        }
+    }
+
+    if (prompt.repair_step == SendRepairStep::AfterListLookup) {
+        const std::wstring found = find_rollout_file(paths.codex_home, prompt.thread_id);
+        if (!found.empty()) {
+            activity.phase = "Reloading conversation";
+            set_state(AppState::Generating, L"Reloading conversation from disk…");
+            send_user_to_thread(prompt.text, prompt.thread_id, prompt.foreground, prompt.mode, utf8(found),
+                               !prompt.recorded_local, SendRepairStep::AfterPathResume, false);
+            return;
+        }
+        begin_fresh_send(std::move(prompt), L"Conversation not in Codex — starting a new one…");
+        return;
+    }
+
+    // AfterPathResume (or unknown): one fresh start max, then stop.
+    begin_fresh_send(std::move(prompt), L"Prior chat unavailable — starting a new one…");
+}
+
+void Session::send_user_to_thread(const std::string& text, const std::string& thread_id, bool foreground,
+                                  const std::string& mode, const std::string& resume_path, bool record_user,
+                                  SendRepairStep repair_step, bool skip_resume) {
+    thread_modes_[thread_id] = mode;
+    final_plan_text_.erase(thread_id);
     std::string payload = text;
     auto* naming_chat = store.by_thread(thread_id);
     if (naming_chat) {
         naming_chat->updated_at = std::time(nullptr);
         if (!naming_chat->title_manual && !naming_chat->title_generated &&
-            (naming_chat->title.empty() || naming_chat->title == "New Chat"))
-            naming_chat->title = short_chat_title(chat_title_seed);
+            (naming_chat->title.empty() || naming_chat->title == "New Chat")) {
+            const std::string seed = chat_title_seed.empty() ? text : chat_title_seed;
+            naming_chat->title = short_chat_title(seed);
+        }
         store.save(paths.store_path);
     }
-    const std::string grant = knowledge_grant_preamble() + chat_title_request(naming_chat);
+    const std::string grant = knowledge_grant_preamble() + chat_review_request() + chat_title_request(naming_chat);
     const std::string ctx = snapshot_context(context_chips);
     if (!grant.empty() || !ctx.empty()) {
         std::string head;
@@ -922,11 +1190,19 @@ void Session::send_user_to_thread(const std::string& text, const std::string& th
         }
         payload = head + "\n---\n" + text;
     }
+    payload = std::string(chat_mode_instructions(mode)) + "\n" + payload;
     Json input = Json::array();
     Json item = Json::object();
     item["type"] = Json::string("text");
     item["text"] = Json::string(payload);
     input.push(std::move(item));
+    for (const auto& attachment : parse_user_display(text).attachments) {
+        if (!attachment.image || attachment.path.empty()) continue;
+        Json image = Json::object();
+        image["type"] = Json::string("localImage");
+        image["path"] = Json::string(attachment.path);
+        input.push(std::move(image));
+    }
     Json p = Json::object();
     p["threadId"] = Json::string(thread_id);
     p["input"] = std::move(input);
@@ -939,8 +1215,6 @@ void Session::send_user_to_thread(const std::string& text, const std::string& th
         sand["networkAccess"] = Json::boolean(false);
         Json roots = Json::array();
         roots.push(Json::string(utf8(cwd)));
-        // Knowledge sources (e.g. D:\projects\.md) sit outside the project folder;
-        // without these roots the agent cannot list handoff/blueprints under the grant.
         for (const auto& kpath : knowledge_accessible_paths_) {
             if (kpath.empty()) {
                 continue;
@@ -956,16 +1230,41 @@ void Session::send_user_to_thread(const std::string& text, const std::string& th
         sand["networkAccess"] = Json::boolean(false);
     }
     p["sandboxPolicy"] = std::move(sand);
+    apply_chat_mode_policy(p, mode);
     if (!selected_model.empty()) {
         p["model"] = Json::string(selected_model);
     }
-    turn_start_id_ = send_req("turn/start", std::move(p));
-    if (turn_start_id_ < 0) return;
-    turn_start_threads_[turn_start_id_] = thread_id;
+    apply_reasoning_effort(p);
+
+    PendingResumedPrompt pending{text, mode, thread_id, foreground, repair_step, true};
     auto& running = thread_runtime_[thread_id];
     running.activity.begin();
     running.stream.clear();
-    if (naming_chat) {
+
+    if (skip_resume || repair_step == SendRepairStep::FreshThread) {
+        // thread/start already loaded this thread in Codex — resume would race/fail and loop.
+        pending.repair_step = SendRepairStep::FreshThread;
+        running.activity.phase = "Generating";
+        turn_start_id_ = send_req("turn/start", std::move(p));
+        if (turn_start_id_ < 0) {
+            fail_send_repair(std::move(pending), "Runtime connection closed");
+            return;
+        }
+        turn_start_threads_[turn_start_id_] = thread_id;
+        pending_resumed_prompts_[turn_start_id_] = pending;
+    } else {
+        Json resume = Json::object();
+        resume["threadId"] = Json::string(thread_id);
+        if (!resume_path.empty()) resume["path"] = Json::string(resume_path);
+        turn_start_id_ = send_req("thread/resume", std::move(resume));
+        if (turn_start_id_ < 0) return;
+        pending_resumed_turns_[turn_start_id_] = std::move(p);
+        pending_resumed_prompts_[turn_start_id_] = pending;
+        turn_start_threads_[turn_start_id_] = thread_id;
+        running.activity.phase = resume_path.empty() ? "Resolving conversation" : "Reloading conversation";
+    }
+
+    if (record_user && naming_chat) {
         if (!naming_chat->local_messages.is_array()) naming_chat->local_messages = Json::array();
         Json message = Json::object();
         message["user"] = Json::boolean(true);
@@ -975,9 +1274,12 @@ void Session::send_user_to_thread(const std::string& text, const std::string& th
     }
     if (foreground) {
         activity = running.activity;
-        history_messages.push_back({true, text});
+        if (record_user) history_messages.push_back({true, text});
         stream_buffer.clear();
-        set_state(AppState::Generating, L"Generating");
+        set_state(AppState::Generating,
+                  skip_resume || repair_step == SendRepairStep::FreshThread
+                      ? L"Generating"
+                      : (resume_path.empty() ? L"Resolving conversation…" : L"Reloading conversation…"));
     }
 }
 
@@ -1046,7 +1348,7 @@ void Session::send_claude_user(const std::string& text) {
             naming_chat->title = short_chat_title(chat_title_seed);
         store.save(paths.store_path);
     }
-    const std::string grant = knowledge_grant_preamble() + chat_title_request(naming_chat);
+    const std::string grant = knowledge_grant_preamble() + chat_review_request() + chat_title_request(naming_chat);
     const std::string ctx = snapshot_context(context_chips);
     if (!grant.empty() || !ctx.empty()) {
         std::string head;
@@ -1066,7 +1368,9 @@ void Session::send_claude_user(const std::string& text) {
         oss << "Conversation so far:\n";
         const std::size_t start = history_messages.size() > 12 ? history_messages.size() - 12 : 0;
         for (std::size_t i = start; i < history_messages.size(); ++i) {
-            oss << (history_messages[i].user ? "User: " : "Assistant: ") << history_messages[i].text << "\n";
+            const auto& message = history_messages[i];
+            oss << (message.user ? "User: " : "Assistant: ")
+                << (message.user ? visible_user_text(message.text) : visible_chat_text(message.text)) << "\n";
         }
         oss << "\nUser: " << payload << "\nAssistant:";
         payload = oss.str();
@@ -1086,27 +1390,27 @@ void Session::send_claude_user(const std::string& text) {
     claude_busy_ = true;
     claude_cancel_ = false;
     set_state(AppState::Generating, L"Claude generating…");
+    print_thread_id_ = active_thread_id;
+    thread_runtime_[print_thread_id_].activity = activity;
 
     const std::string model = selected_model.empty() ? "claude-sonnet-4-6" : selected_model;
     const std::wstring cwd = conversation_cwd();
-    HWND hwnd = hwnd_;
-    std::thread([this, payload, model, cwd, hwnd]() {
+    auto done = on_claude_done_;
+    std::thread([this, payload, model, cwd, done]() {
         std::string result;
         std::wstring err;
         const bool ok = !claude_cancel_ && claude_code_print(payload, model, cwd, &result, &err, 300000);
-        auto* r = new ClaudePrintResult{};
+        ClaudePrintResult r{};
         if (claude_cancel_) {
-            r->ok = false;
-            r->error = L"Cancelled";
+            r.ok = false;
+            r.error = L"Cancelled";
         } else {
-            r->ok = ok;
-            r->text = std::move(result);
-            r->error = std::move(err);
+            r.ok = ok;
+            r.text = std::move(result);
+            r.error = std::move(err);
         }
-        if (hwnd) {
-            PostMessageW(hwnd, WM_SCYLLA_CLAUDE_DONE, 0, reinterpret_cast<LPARAM>(r));
-        } else {
-            delete r;
+        if (done) {
+            done(std::move(r));
         }
     }).detach();
 }
@@ -1142,7 +1446,7 @@ void Session::send_api_user(const std::string& provider_id, const std::string& t
         store.save(paths.store_path);
     }
     std::string payload = text;
-    const std::string grant = knowledge_grant_preamble() + chat_title_request(naming_chat);
+    const std::string grant = knowledge_grant_preamble() + chat_review_request() + chat_title_request(naming_chat);
     const std::string ctx = snapshot_context(context_chips);
     if (!grant.empty() || !ctx.empty()) {
         std::string head;
@@ -1161,7 +1465,8 @@ void Session::send_api_user(const std::string& provider_id, const std::string& t
     std::vector<HttpChatMessage> msgs;
     const std::size_t start = history_messages.size() > 12 ? history_messages.size() - 12 : 0;
     for (std::size_t i = start; i < history_messages.size(); ++i) {
-        msgs.push_back({history_messages[i].user, history_messages[i].text});
+        const auto& message = history_messages[i];
+        msgs.push_back({message.user, message.user ? visible_user_text(message.text) : visible_chat_text(message.text)});
     }
     msgs.push_back({true, payload});
 
@@ -1180,10 +1485,12 @@ void Session::send_api_user(const std::string& provider_id, const std::string& t
     claude_busy_ = true;
     claude_cancel_ = false;
     set_state(AppState::Generating, openai ? L"OpenAI API generating…" : L"Claude API generating…");
+    print_thread_id_ = active_thread_id;
+    thread_runtime_[print_thread_id_].activity = activity;
 
     const std::string model = selected_model;
-    HWND hwnd = hwnd_;
-    std::thread([this, openai, msgs, model, hwnd]() {
+    auto done = on_claude_done_;
+    std::thread([this, openai, msgs, model, done]() {
         std::string result;
         std::wstring err;
         bool ok = false;
@@ -1194,25 +1501,46 @@ void Session::send_api_user(const std::string& provider_id, const std::string& t
         } else {
             ok = claude_api_chat(model, msgs, &result, &err, 300000);
         }
-        auto* r = new ClaudePrintResult{};
+        ClaudePrintResult r{};
         if (claude_cancel_) {
-            r->ok = false;
-            r->error = L"Cancelled";
+            r.ok = false;
+            r.error = L"Cancelled";
         } else {
-            r->ok = ok;
-            r->text = std::move(result);
-            r->error = std::move(err);
+            r.ok = ok;
+            r.text = std::move(result);
+            r.error = std::move(err);
         }
-        if (hwnd) {
-            PostMessageW(hwnd, WM_SCYLLA_CLAUDE_DONE, 0, reinterpret_cast<LPARAM>(r));
-        } else {
-            delete r;
+        if (done) {
+            done(std::move(r));
         }
     }).detach();
 }
 
 void Session::complete_claude_print(bool ok, const std::string& text, const std::wstring& error) {
+    log_payload(ok ? "REPLY" : "ERROR", ok ? text : utf8(error));
+    const auto completed_id = print_thread_id_;
+    print_thread_id_.clear();
     claude_busy_ = false;
+    const std::string phase = claude_cancel_ ? "Interrupted" : ok ? "Completed" : "Failed";
+    auto& completed = thread_runtime_[completed_id];
+    completed.activity.finish(phase);
+    if (ok && !claude_cancel_) completed.stream = text;
+    if (completed_id != active_thread_id) {
+        if (ok && !claude_cancel_) {
+            completed.stream = text;
+            if (auto* conv = store.by_thread(completed_id)) {
+                Json item = Json::object();
+                item["user"] = Json::boolean(false);
+                item["text"] = Json::string(text);
+                conv->local_messages.push(std::move(item));
+                conv->updated_at = std::time(nullptr);
+                accept_chat_title(*conv, text);
+                conv->preview = text.substr(0, 120);
+                store.save(paths.store_path);
+            }
+        }
+        return;
+    }
     if (claude_cancel_) {
         activity.finish("Interrupted");
         set_state(AppState::Interrupted, L"Interrupted");
@@ -1241,15 +1569,46 @@ void Session::complete_claude_print(bool ok, const std::string& text, const std:
     set_state(AppState::Ready, L"Ready");
 }
 
+bool Session::delete_thread(const std::string& id, std::string* error) {
+    auto fail = [&](const char* message) { if (error) *error = message; return false; };
+    if (id.empty()) return fail("No chat selected.");
+    if (thread_busy(id) || (id == active_thread_id && (claude_busy_ || state == AppState::Generating ||
+        state == AppState::AwaitingAction))) return fail("Stop this chat before deleting it.");
+    auto next = store;
+    auto* row = next.by_thread(id);
+    if (!row) {
+        const auto remote = std::find_if(threads.begin(), threads.end(), [&](const auto& t) { return t.id == id; });
+        if (remote == threads.end()) return fail("Chat no longer exists.");
+        row = next.upsert_thread(next.active_project_id, account_scope(), id, "", "");
+    }
+    row->deleted = true;
+    row->title.clear();
+    row->preview.clear();
+    row->local_messages = Json::array();
+    row->resumable = false;
+    for (auto& project : next.projects) if (project.last_thread_id == id) project.last_thread_id.clear();
+    if (!next.save(paths.store_path)) return fail("Could not save chat deletion.");
+    store = std::move(next);
+    threads.erase(std::remove_if(threads.begin(), threads.end(), [&](const auto& t) { return t.id == id; }), threads.end());
+    thread_runtime_.erase(id);
+    if (settings.last_thread_id == id) settings.last_thread_id.clear();
+    set_draft(id, "");
+    if (active_thread_id == id) {
+        active_thread_id.clear(); active_turn_id.clear(); history_messages.clear(); stream_buffer.clear();
+        activity = {}; transcript_replace = true; last_plan_path.clear();
+        set_state(AppState::Ready, L"Ready");
+    }
+    ++chats_epoch;
+    return true;
+}
 void Session::open_thread(const std::string& id) {
+    if (const auto* row = store.by_thread(id); row && row->deleted) return;
     active_thread_id = id;
     select_thread_runtime(id);
     settings.last_thread_id = id;
     if (auto* c = store.by_thread(id)) {
-        if (auto* p = store.by_id(c->project_id)) {
-            project_root = p->root;
-            settings.project_folder = p->root;
-        }
+        // Resuming a peer-root chat must not replace the open workspace.
+        // conversation_cwd() already resolves this conversation's own root.
         history_messages.clear();
         if (c->local_messages.is_array()) for (const auto& message : c->local_messages.array_items())
             history_messages.push_back({message.at("user").as_bool(false), message.at("text").as_string()});
@@ -1263,6 +1622,13 @@ void Session::open_thread(const std::string& id) {
             history_messages.push_back({message.at("user").as_bool(false), message.at("text").as_string()});
         stream_buffer.clear();
         transcript_replace = true;
+        return;
+    }
+    // Local-only ChatGPT rows (missing Codex rollout) stay viewable without resume.
+    if (auto* c = store.by_thread(id); c && !c->resumable) {
+        settings.default_provider = "openai";
+        stream_buffer.clear();
+        set_state(AppState::Ready, L"Ready — prior Codex session unavailable");
         return;
     }
     settings.default_provider = "openai";
@@ -1321,8 +1687,19 @@ void Session::clear_orphaned_in_progress_turn(const std::string& thread_id, cons
 }
 
 void Session::cancel_turn() {
+    for (auto pending = pending_resumed_turns_.begin(); pending != pending_resumed_turns_.end(); ++pending) {
+        if (pending->second.at("threadId").as_string() != active_thread_id) continue;
+        turn_start_threads_.erase(pending->first);
+        pending_resumed_prompts_.erase(pending->first);
+        pending_resumed_turns_.erase(pending);
+        auto& waiting = thread_runtime_[active_thread_id];
+        waiting.activity.finish("Interrupted");
+        activity = waiting.activity;
+        set_state(AppState::Interrupted, L"Interrupted");
+        return;
+    }
     if (activity.busy) activity.phase = "Cancelling";
-    if (claude_busy_) {
+    if (claude_busy_ && print_thread_id_ == active_thread_id) {
         claude_cancel_ = true;
         set_state(AppState::Interrupted, L"Cancelling Claude…");
         return;
@@ -1348,25 +1725,53 @@ bool Session::thread_busy(const std::string& thread_id) const {
     return found != thread_runtime_.end() && found->second.activity.busy;
 }
 
+const AgentActivity* Session::thread_activity(const std::string& thread_id) const {
+    if (thread_id == active_thread_id && activity.visible) return &activity;
+    const auto found = thread_runtime_.find(thread_id);
+    return found == thread_runtime_.end() ? nullptr : &found->second.activity;
+}
+
+void Session::reconcile_idle_activity() {
+    if (state == AppState::Generating || state == AppState::AwaitingAction || claude_busy_) return;
+    if (!pending_resumed_turns_.empty()) return;
+    auto waiting_turn_start = [&](const std::string& tid) {
+        for (const auto& [req, waiting] : turn_start_threads_) {
+            if (waiting == tid) return true;
+        }
+        return false;
+    };
+    for (auto& [tid, rt] : thread_runtime_) {
+        if (!rt.activity.busy) continue;
+        if (!rt.turn_id.empty() || waiting_turn_start(tid)) continue;
+        rt.activity.finish("Completed");
+    }
+    if (activity.busy && active_turn_id.empty()) activity.finish("Completed");
+}
+
 void Session::select_thread_runtime(const std::string& thread_id) {
+    const auto* chat = store.by_thread(thread_id);
+    const bool local_provider = chat && (chat->provider_id == "claude" || chat->provider_id == "claude-api"
+        || chat->provider_id == "openai-api");
     const auto found = thread_runtime_.find(thread_id);
     if (found == thread_runtime_.end()) {
         activity = {};
         active_turn_id.clear();
         stream_buffer.clear();
-        if (account.signed_in) set_state(AppState::Ready, L"Ready");
+        if (account.signed_in || local_provider) set_state(AppState::Ready, L"Ready");
         return;
     }
     activity = found->second.activity;
     active_turn_id = found->second.turn_id;
     stream_buffer = found->second.stream;
-    if (account.signed_in) set_state(activity.busy ? AppState::Generating : AppState::Ready,
+    if (account.signed_in || local_provider) set_state(activity.busy ? AppState::Generating : AppState::Ready,
                                      activity.busy ? L"Generating" : L"Ready");
 }
 
-void Session::refresh_threads() {
+void Session::refresh_threads(const std::string& cursor) {
+    if (cursor.empty()) threads.clear();
     Json p = Json::object();
-    p["limit"] = Json::number(40);
+    p["limit"] = Json::number(100);
+    if (!cursor.empty()) p["cursor"] = Json::string(cursor);
     thread_list_id_ = send_req("thread/list", std::move(p));
 }
 
@@ -1442,6 +1847,8 @@ void Session::handle_server_request(const Json& msg) {
     const Json& id = msg.at("id");
     const std::string request_thread = msg.at("params").at("threadId").as_string();
     const bool foreground = request_thread.empty() || request_thread == active_thread_id;
+    const auto mode = thread_modes_.find(request_thread.empty() ? active_thread_id : request_thread);
+    const bool read_only_mode = mode != thread_modes_.end() && mode->second != "execute";
     if (foreground) set_state(AppState::AwaitingAction, utf16("Approval: " + method));
 
     // Under a project grant: accept file/patch and sandboxed shell so the agent can
@@ -1449,7 +1856,7 @@ void Session::handle_server_request(const Json& msg) {
     if (method == "item/fileChange/requestApproval" || method == "applyPatchApproval" ||
         method == "item/commandExecution/requestApproval" || method == "execCommandApproval") {
         Json result = Json::object();
-        if (has_project_grant()) {
+        if (has_project_grant() && !read_only_mode) {
             result["decision"] = Json::string("accept");
             send_result(id, std::move(result));
             if (foreground) {
@@ -1459,7 +1866,7 @@ void Session::handle_server_request(const Json& msg) {
         } else {
             result["decision"] = Json::string("decline");
             send_result(id, std::move(result));
-            if (foreground) last_error = "Declined " + method + " (no project grant — agent is read-only).";
+            if (foreground) last_error = "Declined " + method + " (agent is read-only).";
         }
         return;
     }
@@ -1470,7 +1877,26 @@ void Session::handle_server_request(const Json& msg) {
         last_error = "Denied extra permissions request.";
         return;
     }
-    if (method == "mcpServer/elicitation/request" || method == "item/tool/requestUserInput") {
+    if (method == "mcpServer/elicitation/request") {
+        const std::string server_name = msg.at("params").at("serverName").as_string();
+        Json result = Json::object();
+        // The query MCP is an in-process Scylla capability backed by a per-session authenticated
+        // named pipe. Let Codex invoke it; ConnectionBroker remains the authority for SQL class,
+        // saved-alias availability, Keyring authorization, and any write approval. Never extend
+        // this acceptance to an arbitrary MCP server.
+        const bool internal_query_broker = !read_only_mode && broker_mcp_server_registered() &&
+                                           server_name == broker_mcp_server_.name &&
+                                           server_name == "scylla-query";
+        result["action"] = Json::string(internal_query_broker ? "accept" : "decline");
+        result["content"] = Json::null();
+        send_result(id, std::move(result));
+        if (foreground && internal_query_broker) {
+            set_state(AppState::Generating, L"Running Scylla broker query");
+            last_error.clear();
+        }
+        return;
+    }
+    if (method == "item/tool/requestUserInput") {
         Json result = Json::object();
         result["action"] = Json::string("decline");
         result["content"] = Json::null();
@@ -1483,15 +1909,47 @@ void Session::handle_server_request(const Json& msg) {
     Json msg_err = Json::object();
     msg_err["id"] = id;
     msg_err["error"] = std::move(err);
+    log_payload("OUT", msg_err.dump());
     runtime_.write_line(msg_err.dump());
+}
+
+void Session::save_knowledge_plan(const std::string& thread_id, const std::string& text) {
+    const auto* chat = store.by_thread(thread_id);
+    if (!chat) { last_error = "Cannot save plan: conversation has no project."; return; }
+    try {
+        const auto project_key = std::to_wstring(fnv1a64(chat->project_id.data(), chat->project_id.size()));
+        const auto folder = join_path(join_path(paths.appdata, L"knowledge-plans"), project_key);
+        std::filesystem::create_directories(folder);
+        const auto file = join_path(folder, L"plan-" + std::to_wstring(std::time(nullptr)) + L"-" + std::to_wstring(GetTickCount64()) + L".md");
+        if (!write_file_bytes_atomic(file, visible_chat_text(text))) {
+            last_error = "Could not save Knowledge plan."; return;
+        }
+        KnowledgeStore knowledge;
+        knowledge.load(paths.knowledge_path);
+        if (!knowledge.source_for_path(file, chat->project_id)) {
+            if (!knowledge.add_source(L"Project plans", folder, SourceType::Knowledge, AccessMode::ReadOnly,
+                                      true, {chat->project_id}) || !knowledge.save(paths.knowledge_path)) {
+                last_error = "Plan saved, but Knowledge registration failed: " + utf8(file); return;
+            }
+        }
+        last_plan_path = utf8(file);
+    } catch (const std::exception& error) { last_error = "Could not save Knowledge plan: " + std::string(error.what()); }
 }
 
 void Session::handle_notification(const Json& msg) {
     const std::string method = msg.at("method").as_string();
     const Json& p = msg.at("params");
     if (method == "scylla/runtimeClosed") {
-        if (p.at("pid").as_int() == runtime_.pid() && settings.default_provider != "claude")
-            set_state(AppState::Failed, L"Runtime disconnected");
+        if (p.at("pid").as_int() == runtime_.pid()) {
+            for (auto& [id, turn] : thread_runtime_) {
+                if (id != print_thread_id_ && turn.activity.busy) {
+                    turn.activity.finish("Disconnected");
+                    turn.turn_id.clear();
+                }
+            }
+            if (settings.default_provider != "claude" && active_thread_id != print_thread_id_)
+                set_state(AppState::Failed, L"Runtime disconnected");
+        }
         return;
     }
     std::string thread_id = p.at("threadId").as_string();
@@ -1517,10 +1975,16 @@ void Session::handle_notification(const Json& msg) {
         return;
     }
     if (method == "account/updated") {
+        account_loaded = true;
         account.type = p.at("authMode").as_string("");
         account.plan = p.at("planType").as_string("");
         account.signed_in = account.type == "chatgpt";
         return;
+    }
+    if (method == "item/completed" && p.at("item").at("type").as_string() == "agentMessage") {
+        if (!thread_id.empty() && thread_modes_[thread_id] == "plan"
+            && p.at("item").at("phase").as_string() != "commentary")
+            final_plan_text_[thread_id] = item_text(p.at("item"));
     }
     if (method == "item/agentMessage/delta") {
         if (!running) return;
@@ -1557,6 +2021,13 @@ void Session::handle_notification(const Json& msg) {
             store.save(paths.store_path);
         }
         const std::string st = p.at("turn").at("status").as_string();
+        if (st == "completed" && thread_modes_[thread_id] == "plan") {
+            const auto final = final_plan_text_.find(thread_id);
+            if (final != final_plan_text_.end() && !final->second.empty())
+                save_knowledge_plan(thread_id, final->second);
+            else last_error = "The plan has no final response to save. Ask for a complete final plan.";
+        }
+        final_plan_text_.erase(thread_id);
         turn.activity.finish(st == "interrupted" ? "Interrupted" : st == "failed" ? "Failed" : "Completed");
         if (!turn.turn_id.empty()) turn_threads_.erase(turn.turn_id);
         turn.turn_id.clear();
@@ -1595,7 +2066,45 @@ void Session::handle_notification(const Json& msg) {
 void Session::handle_response(const Json& msg) {
     const std::int64_t id = msg.at("id").as_int(-1);
     if (msg.has("error")) {
+        PendingResumedPrompt recovered_prompt;
+        const bool had_pending_prompt = [&] {
+            const auto it = pending_resumed_prompts_.find(id);
+            if (it == pending_resumed_prompts_.end()) return false;
+            recovered_prompt = it->second;
+            pending_resumed_prompts_.erase(it);
+            return true;
+        }();
+        pending_resumed_turns_.erase(id);
         last_error = msg.at("error").at("message").as_string("request error");
+        const bool missing_thread = is_thread_missing_error(last_error);
+
+        if (missing_thread && had_pending_prompt) {
+            turn_start_threads_.erase(id);
+            if (id == turn_start_id_) turn_start_id_ = 0;
+            if (recovered_prompt.repair_step == SendRepairStep::FreshThread) {
+                fail_send_repair(std::move(recovered_prompt), last_error);
+                return;
+            }
+            advance_send_repair(std::move(recovered_prompt));
+            return;
+        }
+        if (had_pending_prompt && recovered_prompt.repair_step == SendRepairStep::FreshThread) {
+            turn_start_threads_.erase(id);
+            if (id == turn_start_id_) turn_start_id_ = 0;
+            fail_send_repair(std::move(recovered_prompt), last_error);
+            return;
+        }
+
+        if (const auto repair = pending_repair_prompts_.find(id); repair != pending_repair_prompts_.end()) {
+            PendingResumedPrompt prompt = repair->second;
+            pending_repair_prompts_.erase(repair);
+            if (id == repair_list_id_) repair_list_id_ = 0;
+            // List failed — try disk path, then fresh chat.
+            prompt.repair_step = SendRepairStep::AfterListLookup;
+            advance_send_repair(std::move(prompt));
+            return;
+        }
+
         if (const auto pending = pending_thread_prompts_.find(id); pending != pending_thread_prompts_.end()) {
             pending_thread_prompts_.erase(pending);
             if (id == thread_start_id_) thread_start_id_ = -1;
@@ -1613,6 +2122,16 @@ void Session::handle_response(const Json& msg) {
                 interrupt_thread_turn(thread_id, running.turn_id);
             }
         }
+        if (missing_thread && id == thread_resume_id_) {
+            if (auto* c = store.by_thread(active_thread_id)) {
+                c->resumable = false;
+                store.save(paths.store_path);
+            }
+            active_thread_id.clear();
+            last_error = "Prior Codex session is gone. Send again to start a fresh conversation.";
+            set_state(AppState::Ready, L"Ready — prior chat unavailable");
+            return;
+        }
         if (id == initialize_id_) {
             set_state(AppState::Failed, L"Initialize failed");
         } else if (id == turn_start_id_ || id == thread_start_id_) {
@@ -1624,6 +2143,32 @@ void Session::handle_response(const Json& msg) {
         return;
     }
     const Json& result = msg.at("result");
+    if (auto pending = pending_resumed_turns_.find(id); pending != pending_resumed_turns_.end()) {
+        Json params = std::move(pending->second);
+        pending_resumed_turns_.erase(pending);
+        pending_resumed_prompts_.erase(id);
+        const std::string thread_id = params.at("threadId").as_string();
+        turn_start_threads_.erase(id);
+        const auto request = send_req("turn/start", std::move(params));
+        if (request >= 0) {
+            turn_start_threads_[request] = thread_id;
+            if (thread_id == active_thread_id) turn_start_id_ = request;
+            auto& running = thread_runtime_[thread_id];
+            running.activity.phase = "Generating";
+            if (thread_id == active_thread_id) {
+                activity = running.activity;
+                set_state(AppState::Generating, L"Generating");
+            }
+        } else {
+            auto& running = thread_runtime_[thread_id];
+            running.activity.finish("Failed: runtime connection closed");
+            if (thread_id == active_thread_id) {
+                activity = running.activity;
+                set_state(AppState::Failed, L"Runtime connection closed");
+            }
+        }
+        return;
+    }
     if (id == turn_interrupt_id_) {
         turn_interrupt_id_ = 0;
         if (!active_thread_id.empty()) {
@@ -1652,6 +2197,7 @@ void Session::handle_response(const Json& msg) {
     }
     if (id == account_read_id_) {
         apply_account(result.at("account"));
+        account_loaded = true;
         if (!account.signed_in) {
             set_state(AppState::SigningIn, L"ChatGPT sign-in required");
         } else {
@@ -1684,26 +2230,62 @@ void Session::handle_response(const Json& msg) {
         ingest_models(result, replace);
         return;
     }
-    if (id == thread_list_id_) {
-        threads.clear();
+    if (id == thread_list_id_ || id == repair_list_id_) {
+        const bool repair_list = id == repair_list_id_;
+        if (id == thread_list_id_) thread_list_id_ = 0;
+        if (id == repair_list_id_) repair_list_id_ = 0;
+
         const Json& data = result.at("data");
+        std::string listed_path;
+        bool listed_match = false;
         if (data.is_array()) {
             for (const auto& t : data.array_items()) {
                 ThreadSummary s;
                 s.id = t.at("id").as_string();
                 s.name = thread_label(t);
                 s.preview = t.at("preview").as_string("");
-                if (auto* c = store.by_thread(s.id)) {
+                s.cwd = utf16(t.at("cwd").as_string(""));
+                const auto* stored = store.by_thread(s.id);
+                const bool in_scope = stored ? store.contains_open_project(stored->project_id) : store.contains_open_path(s.cwd);
+                if (auto* c = store.by_thread(s.id); c && in_scope) {
                     c->updated_at = (std::max)(c->updated_at, t.at("updatedAt").as_int(0));
                 }
-                if (!s.id.empty()) {
+                if (!repair_list && !s.id.empty() && in_scope) {
                     threads.push_back(s);
+                }
+                if (repair_list) {
+                    const auto pit = pending_repair_prompts_.find(id);
+                    if (pit != pending_repair_prompts_.end() && s.id == pit->second.thread_id) {
+                        listed_match = true;
+                        listed_path = thread_path_field(t);
+                    }
                 }
             }
         }
         website_history_seen = false;  // Codex rollouts only unless a documented web id appears
         store.save(paths.store_path);
         ++chats_epoch;
+        if (!repair_list) {
+            const auto next = result.at("nextCursor").as_string("");
+            if (!next.empty() && next != "null") refresh_threads(next);
+        }
+
+        if (repair_list) {
+            const auto pit = pending_repair_prompts_.find(id);
+            if (pit == pending_repair_prompts_.end()) return;
+            PendingResumedPrompt prompt = pit->second;
+            pending_repair_prompts_.erase(pit);
+            if (listed_match) {
+                activity.phase = "Reloading conversation";
+                set_state(AppState::Generating, L"Found conversation — reloading…");
+                send_user_to_thread(prompt.text, prompt.thread_id, prompt.foreground, prompt.mode, listed_path,
+                                   !prompt.recorded_local, SendRepairStep::AfterListLookup, false);
+                return;
+            }
+            // Not in Codex list — try local rollout file, else start fresh.
+            prompt.repair_step = SendRepairStep::AfterListLookup;
+            advance_send_repair(std::move(prompt));
+        }
         return;
     }
     if (id == thread_start_id_) {
@@ -1723,16 +2305,22 @@ void Session::handle_response(const Json& msg) {
         const auto pending_it = pending_thread_prompts_.find(id);
         const std::string pending = pending_it == pending_thread_prompts_.end() ? std::string{} : pending_it->second;
         if (pending_it != pending_thread_prompts_.end()) pending_thread_prompts_.erase(pending_it);
+        const auto pending_mode = pending_thread_modes_.find(id);
+        const std::string mode = pending_mode == pending_thread_modes_.end() ? "execute" : pending_mode->second;
+        pending_thread_modes_.erase(id);
         if (!pending.empty()) {
-            send_user_to_thread(pending, created_thread_id, foreground);
+            // Fresh Codex thread is already loaded — do not resume (that caused the chat-spam loop).
+            send_user_to_thread(pending, created_thread_id, foreground, mode, {}, true,
+                               SendRepairStep::FreshThread, true);
         }
         refresh_threads();
         return;
     }
     if (id == thread_resume_id_) {
         const Json& thread = result.at("thread");
-        active_thread_id = thread.at("id").as_string();
-        clear_orphaned_in_progress_turn(active_thread_id, thread);
+        const std::string resumed_id = thread.at("id").as_string();
+        if (resumed_id == active_thread_id)
+            clear_orphaned_in_progress_turn(resumed_id, thread);
         return;
     }
     if (const auto read = thread_read_threads_.find(id); read != thread_read_threads_.end()) {
@@ -1744,15 +2332,18 @@ void Session::handle_response(const Json& msg) {
     if (const auto started = turn_start_threads_.find(id); started != turn_start_threads_.end()) {
         const std::string thread_id = started->second;
         turn_start_threads_.erase(started);
+        pending_resumed_prompts_.erase(id);
         auto& running = thread_runtime_[thread_id];
         running.turn_id = result.at("turn").at("id").as_string();
         if (!running.turn_id.empty()) turn_threads_[running.turn_id] = thread_id;
         if (thread_id == active_thread_id) active_turn_id = running.turn_id;
+        send_repair_fresh_used_ = false;
         return;
     }
 }
 
 void Session::handle_line(const std::string& line) {
+    log_payload("IN", line);
     std::string err;
     Json msg = Json::parse(line, &err);
     if (!err.empty() || !msg.is_object()) {

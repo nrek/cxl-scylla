@@ -71,6 +71,8 @@ int run_settings_policy_tests() {
     // Defaults on a fresh Settings must already be Strict — a missing file must never be looser
     // than the shipped rule.
     const Settings fresh;
+    pol_expect(!fresh.verbose_agent_progress, "verbose progress defaults off");
+    pol_expect(!fresh.show_minimap, "minimap defaults off");
     pol_expect(scyllagpt::execution_policy_is_strict(fresh.execution_policy),
                "default Settings is strict");
 
@@ -79,6 +81,9 @@ int run_settings_policy_tests() {
     const std::wstring path = pol_temp_path();
     DeleteFileW(path.c_str());
     Settings out;
+    out.verbose_agent_progress = true;
+    out.show_minimap = true;
+    out.reasoning_effort = "high";
     out.execution_policy.human_terminals = PolicyMode::Ask;
     out.execution_policy.agent_terminals = PolicyMode::Ask;
     out.execution_policy.approved_recipes = PolicyMode::Block;
@@ -86,6 +91,16 @@ int run_settings_policy_tests() {
     pol_expect(scyllagpt::save_settings(path, out), "save settings with policy");
 
     const Settings back = scyllagpt::load_settings(path);
+    pol_expect(back.verbose_agent_progress, "verbose progress survives restart");
+    pol_expect(back.show_minimap, "minimap preference survives restart");
+    pol_expect(back.reasoning_effort == "high", "reasoning effort survives restart");
+    out.verbose_agent_progress = false;
+    pol_expect(scyllagpt::save_settings(path, out), "save verbose progress off");
+    pol_expect(!scyllagpt::load_settings(path).verbose_agent_progress, "verbose progress off survives restart");
+    write_raw(path, "{}");
+    pol_expect(!scyllagpt::load_settings(path).verbose_agent_progress, "older settings default verbose progress off");
+    pol_expect(!scyllagpt::load_settings(path).show_minimap, "older settings default minimap off");
+    pol_expect(scyllagpt::load_settings(path).reasoning_effort.empty(), "older settings default reasoning effort empty");
     pol_expect(back.execution_policy.human_terminals == PolicyMode::Ask, "round-trip human ask");
     pol_expect(back.execution_policy.agent_terminals == PolicyMode::Ask, "round-trip agent ask");
     pol_expect(back.execution_policy.approved_recipes == PolicyMode::Block, "round-trip recipes block");

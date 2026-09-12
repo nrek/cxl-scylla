@@ -24,6 +24,8 @@ Win32/
 
 **/bin/
 **/obj/
+installer/artifacts/
+installer/payload/
 Desktop.ini
 .DS_Store
 

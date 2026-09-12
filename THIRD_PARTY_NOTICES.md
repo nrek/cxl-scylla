@@ -40,3 +40,8 @@ The original license files remain at:
 OpenAI Codex, ChatGPT, Anthropic Claude, and Claude Code are optional external products. They are not bundled, sublicensed, or redistributed by this repository. Their respective licenses, subscriptions, privacy policies, and terms of service apply independently.
 
 Product names and trademarks belong to their respective owners. Their mention does not imply endorsement or affiliation.
+# Mermaid (Fluent Markdown preview)
+
+The Fluent shell bundles Mermaid 10.9.3 for offline diagram rendering.
+Project: https://github.com/mermaid-js/mermaid
+License: MIT; the bundled license is in `scylla-fluent/Assets/mermaid/LICENSE`.

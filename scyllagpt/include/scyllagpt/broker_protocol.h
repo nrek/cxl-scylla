@@ -32,7 +32,26 @@ struct QueryToolCall {
     std::string connection_alias;
     std::string sql;
     std::string operation_label;
+    bool ssh_command = false;
 };
+
+inline Json ssh_tool_descriptor() {
+    auto tool = Json::object();
+    tool["name"] = Json::string("scylla_ssh");
+    tool["description"] = Json::string("Execute a shell command through a saved SSH connection alias and its selected terminal. Scylla resolves Keyring credentials internally. Supply no credentials. Returns exit status, stdout and stderr subject to saved limits.");
+    auto schema = Json::object();
+    schema["type"] = Json::string("object");
+    auto properties = Json::object();
+    for (const auto* key : {"connection_alias", "command"}) {
+        auto field = Json::object(); field["type"] = Json::string("string"); properties[key] = std::move(field);
+    }
+    schema["properties"] = std::move(properties);
+    auto required = Json::array(); required.push(Json::string("connection_alias")); required.push(Json::string("command"));
+    schema["required"] = std::move(required);
+    schema["additionalProperties"] = Json::boolean(false);
+    tool["inputSchema"] = std::move(schema);
+    return tool;
+}
 
 // MCP tool descriptor for tools/list.
 inline Json query_tool_descriptor() {
@@ -99,7 +118,7 @@ inline bool parse_query_tool_arguments(const Json& arguments, QueryToolCall* out
 inline std::string encode_broker_request(const QueryToolCall& call, std::string_view token) {
     Json root = Json::object();
     root["v"] = Json::number(1);
-    root["op"] = Json::string("query");
+    root["op"] = Json::string(call.ssh_command ? "ssh" : "query");
     root["token"] = Json::string(std::string(token));
     root["alias"] = Json::string(call.connection_alias);
     root["sql"] = Json::string(call.sql);
@@ -119,7 +138,9 @@ inline bool decode_broker_request(std::string_view line, QueryToolCall* out, std
     const Json root = Json::parse(line, &parse_error);
     if (!parse_error.empty() || !root.is_object()) return fail("malformed request");
     if (root.at("v").as_int(0) != 1) return fail("unsupported protocol version");
-    if (root.at("op").as_string("") != "query") return fail("unsupported operation");
+    const auto operation = root.at("op").as_string("");
+    if (operation != "query" && operation != "ssh") return fail("unsupported operation");
+    out->ssh_command = operation == "ssh";
     *out_token = root.at("token").as_string("");
     out->connection_alias = root.at("alias").as_string("");
     out->sql = root.at("sql").as_string("");

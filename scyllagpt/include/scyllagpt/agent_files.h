@@ -23,15 +23,25 @@ inline std::wstring file_search_key(std::wstring value) {
     for (auto& c : value) c = c == L'\\' ? L'/' : std::towlower(c);
     return value;
 }
+inline std::wstring agent_file_reference(const std::wstring& path, const std::wstring& project_root) {
+    const auto relative = project_root.empty() ? std::filesystem::path{} :
+        std::filesystem::path(path).lexically_relative(std::filesystem::path(project_root));
+    return relative.empty() ? std::filesystem::path(path).generic_wstring() : relative.generic_wstring();
+}
 inline std::vector<AgentFile> agent_file_catalog(const KnowledgeStore& knowledge, const std::string& project_id,
                                                const std::wstring& project_root,
-                                               const std::vector<std::wstring>& project_roots = {}) {
+                                               const std::vector<std::wstring>& project_roots = {},
+                                               const std::vector<std::string>& open_project_ids = {}) {
     namespace fs = std::filesystem;
     struct Root { fs::path path; std::wstring label; std::string source; };
     std::vector<Root> roots;
     // Give external workflow sources their own traversal budget, independent of repo size.
-    for (const auto* s : knowledge.list_enabled_for_project(project_id))
-        if (s->agent_available) roots.push_back({s->path, s->label.empty() ? fs::path(s->path).filename().wstring() : s->label, s->id});
+    auto scopes = open_project_ids;
+    scopes.push_back(project_id);
+    for (const auto& scope : scopes)
+        for (const auto* s : knowledge.list_enabled_for_project(scope))
+            if (s->agent_available && std::none_of(roots.begin(), roots.end(), [&](const auto& r) { return r.source == s->id; }))
+                roots.push_back({s->path, s->label.empty() ? fs::path(s->path).filename().wstring() : s->label, s->id});
     if (!project_roots.empty()) {
         for (const auto& path : project_roots)
             if (!path.empty()) roots.push_back({path, fs::path(path).filename().wstring(), {}});
@@ -70,7 +80,14 @@ inline std::vector<AgentFile> agent_file_catalog(const KnowledgeStore& knowledge
 inline std::vector<AgentFile> match_agent_files(const std::vector<AgentFile>& files, const std::wstring& query) {
     const auto key = file_search_key(query);
     std::vector<AgentFile> result;
+    // Exact filenames precede substring hits, including similarly named handoffs.
     for (const auto& f : files) {
+        if (file_search_key(std::filesystem::path(f.path).filename().wstring()) == key)
+            result.push_back(f);
+    }
+    for (const auto& f : files) {
+        if (file_search_key(std::filesystem::path(f.path).filename().wstring()) == key) continue;
+        if (result.size() >= 40) break;
         if (file_search_key(f.label).find(key) != std::wstring::npos || file_search_key(f.path).find(key) != std::wstring::npos) {
             result.push_back(f);
             if (result.size() == 40) break;

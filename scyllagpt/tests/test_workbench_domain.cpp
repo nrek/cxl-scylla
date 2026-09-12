@@ -1,3 +1,4 @@
+#include "scyllagpt/session.h"
 #include "scyllagpt/knowledge.h"
 #include "scyllagpt/mcp_manager.h"
 #include "scyllagpt/paths.h"
@@ -12,7 +13,11 @@
 #include "scyllagpt/codex_thread_util.h"
 #include "scyllagpt/agent_files.h"
 #include "scyllagpt/chat_history.h"
+#include "scyllagpt/chat_projects.h"
 #include "scyllagpt/markdown.h"
+#include "scyllagpt/project_context.h"
+#include "scyllagpt/file_io.h"
+#include "scyllagpt/async_snapshot.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -41,7 +46,194 @@ static std::wstring temp_file(const wchar_t* name) {
 }
 
 int run_workbench_domain_tests() {
+    {
+        scyllagpt::Session session;
+        session.settings.default_provider = "openai";
+        session.models.push_back({"gpt-depth", "GPT Depth", "openai", false,
+                                  {"minimal", "low", "medium", "high", "xhigh"}, "low"});
+        session.selected_model = "gpt-depth";
+        session.reset_reasoning_effort_for_selected_model();
+        expect(session.settings.reasoning_effort == "medium", "model selection prefers medium reasoning effort");
+
+        session.models[0].reasoning_efforts = {"low", "high"};
+        session.models[0].default_reasoning_effort = "high";
+        session.reset_reasoning_effort_for_selected_model();
+        expect(session.settings.reasoning_effort == "high", "model selection uses supported declared default");
+
+        scyllagpt::Json turn = scyllagpt::Json::object();
+        session.apply_reasoning_effort(turn);
+        expect(turn.at("effort").as_string("") == "high", "selected reasoning effort reaches Codex turn payload");
+        session.settings.reasoning_effort = "unsupported";
+        turn = scyllagpt::Json::object();
+        session.apply_reasoning_effort(turn);
+        expect(!turn.has("effort"), "unsupported reasoning effort is omitted from Codex turn payload");
+    }
+    {
+        scyllagpt::Session session;
+        session.settings.default_provider = "openai";
+        session.models.push_back({"gpt-5.6-terra", "GPT-5.6-Terra", "openai", false, {"medium"}, "medium", "code", false});
+        session.models.push_back({"gpt-5.6-sol", "GPT-5.6-Sol", "openai", false, {"low", "medium"}, "low", "", true});
+        session.ensure_selected_model();
+        expect(session.selected_model == "gpt-5.6-sol", "catalog default selects GPT-5.6-Sol");
+        session.reset_reasoning_effort_for_selected_model();
+        expect(session.settings.reasoning_effort == "medium", "GPT-5.6-Sol supports selectable medium effort");
+        scyllagpt::Json turn = scyllagpt::Json::object();
+        turn["model"] = scyllagpt::Json::string(session.selected_model);
+        session.apply_reasoning_effort(turn);
+        expect(turn.at("model").as_string("") == "gpt-5.6-sol", "selected GPT-5.6-Sol reaches turn payload");
+        expect(turn.at("effort").as_string("") == "medium", "selected medium reaches turn payload");
+    }
+    {
+        using namespace scyllagpt;
+        WorkspaceStore projects;
+        Project owner;
+        owner.id = "owner"; owner.root = L"D:\\projects\\cxl-scylla";
+        owner.roots = {owner.root, L"D:\\projects\\cxl-sentinel", L"D:\\projects\\cxl-spore"};
+        projects.projects.push_back(owner); projects.active_project_id = owner.id;
+        Conversation chat; chat.project_id = owner.id;
+        chat.local_messages = Json::array();
+        Json message = Json::object(); message["user"] = Json::boolean(true);
+        message["text"] = Json::string("Injected cxl-spore" + user_display_metadata("Compare cxl-sentinel with this repo"));
+        chat.local_messages.push(message);
+        auto paths = chat_project_paths(projects, &chat, L"", "Chat", "");
+        expect(paths.array_items().size() == 2, "chat project dots include owner and visible mention only");
+        expect(!mentions_project(L"cxl-sentinel-backup", L"cxl-sentinel"), "project mentions respect name boundaries");
+        expect(mentions_project(L"(CXL-SENTINEL)", L"cxl-sentinel"), "project mentions ignore case");
+        auto peer = chat_project_paths(projects, nullptr, L"d:\\PROJECTS\\cxl-sentinel\\src", "Chat", "");
+        expect(peer.array_items().size() == 1, "provider cwd matches peer project case insensitively");
+        Session session;
+        session.active_thread_id = "foreground";
+        session.handle_line(R"({"method":"turn/started","params":{"threadId":"background","turn":{"id":"turn-1"}}})");
+        expect(session.thread_activity("background") && session.thread_activity("background")->busy,
+               "history sees background thread working");
+        session.handle_line(R"({"method":"turn/completed","params":{"threadId":"background","turn":{"id":"turn-1","status":"completed"}}})");
+        expect(session.thread_activity("background") && !session.thread_activity("background")->busy
+            && session.thread_activity("background")->phase == "Completed", "history sees background completion");
+        expect(session.active_thread_id == "foreground", "background completion preserves active chat");
+    }
     g_fail = 0;
+    {
+        using namespace scyllagpt;
+        const std::vector<AgentFile> files = {
+            {L"D:\\repo\\old-plan.md", L"old-plan.md"},
+            {L"D:\\repo\\plan.md", L"plan.md"},
+            {L"D:\\knowledge\\plan.md", L"plan.md"}
+        };
+        const auto matches = match_agent_files(files, L"plan.md");
+        expect(matches.size() == 3 && matches[0].path == files[1].path && matches[1].path == files[2].path,
+               "exact filename mentions precede substring matches and retain ambiguous paths");
+        expect(match_agent_files(files, L"missing.md").empty(), "unknown filename does not resolve");
+        expect(agent_file_reference(L"D:/projects/.cursor/plans/plan.md", L"D:/projects/repo") ==
+            L"../.cursor/plans/plan.md", "Knowledge mention uses project-relative path");
+        expect(agent_file_reference(L"D:/repo/src/file.cpp", L"D:/repo") == L"src/file.cpp",
+            "Project mention uses relative path");
+        expect(agent_file_reference(L"E:/knowledge/plan.md", L"D:/repo") == L"E:/knowledge/plan.md",
+            "Cross-drive mention retains resolvable absolute path");
+    }
+    {
+        using namespace std::chrono_literals;
+        scyllagpt::AsyncSnapshot<int> cache(30s);
+        std::promise<void> release;
+        auto gate = release.get_future().share();
+        std::atomic<int> calls = 0;
+        auto probe = [&](int) { ++calls; gate.wait(); return 7; };
+        auto poll = std::async(std::launch::async, [&] { return cache.get(probe); });
+        const bool responsive = poll.wait_for(1s) == std::future_status::ready;
+        if (!responsive) release.set_value();
+        expect(responsive && poll.get() == 0, "provider cache returns immediately while authentication is blocked");
+        if (responsive) {
+            bool retained = true;
+            for (int i = 0; i < 100; ++i) retained = retained && cache.get(probe) == 0;
+            expect(retained, "in-flight provider probe keeps last snapshot");
+            release.set_value();
+        }
+        expect(cache.get(probe, true) == 7 && calls == 1, "provider polling coalesces into one background probe");
+        cache.invalidate(true);
+        std::promise<void> stale_release;
+        auto stale_gate = stale_release.get_future().share();
+        cache.get([stale_gate](int) { stale_gate.wait(); return 99; });
+        cache.invalidate(true);
+        stale_release.set_value();
+        expect(cache.get([](int) { return 11; }, true) == 11, "invalidated auth cannot restore stale signed-in state");
+    }
+    {
+        using namespace scyllagpt;
+        WorkspaceStore store;
+        const auto scylla = store.open_or_create(L"D:\\projects\\cxl-scylla")->id;
+        const auto forge = store.open_or_create(L"D:\\projects\\synq-forge")->id;
+        const auto phalanx = store.open_or_create(L"D:\\projects\\synq-phalanx")->id;
+        store.upsert_thread(scylla, "a", "scylla-chat", "Scylla", "");
+        store.upsert_thread(forge, "a", "forge-chat", "Forge", "");
+        store.upsert_thread(phalanx, "a", "phalanx-chat", "Phalanx", "");
+        store.upsert_thread(forge, "other", "other-account", "Other", "");
+        store.active_project_id = scylla;
+        store.history_all_projects = true;
+        expect(store.list_visible("a", L"").size() == 1, "single open project excludes unrelated chats even with legacy all-projects flag");
+        store.active_project_id = forge;
+        store.active()->roots = {L"D:\\projects\\synq-forge", L"D:\\projects\\synq-phalanx"};
+        expect(store.list_visible("a", L"").size() == 2, "peer projects union their histories without crossing accounts");
+        expect(store.contains_open_path(L"d:/PROJECTS/synq-forge/app"), "provider cwd uses normalized root containment");
+        expect(!store.contains_open_path(L"D:\\projects\\synq-forge-copy"), "similar project names do not match");
+        expect(!store.contains_open_path(L""), "unknown provider cwd excluded");
+        const auto names = open_project_names(store);
+        KnowledgeStore knowledge;
+        knowledge.add_source(L"Forge", L"D:\\scope-test\\forge", SourceType::Knowledge, AccessMode::ReadOnly, true, {forge}, "forge");
+        knowledge.add_source(L"Phalanx", L"D:\\scope-test\\phalanx", SourceType::Knowledge, AccessMode::ReadOnly, true, {phalanx}, "phalanx");
+        knowledge.add_source(L"Scylla", L"D:\\scope-test\\scylla", SourceType::Knowledge, AccessMode::ReadOnly, true, {scylla}, "scylla");
+        expect(scoped_knowledge_paths(store, knowledge).size() == 2, "knowledge grants include peer projects and exclude closed projects");
+        expect(names == std::vector<std::string>{"synq-forge", "synq-phalanx"}, "knowledge projects derived from every open root");
+        expect(project_document_matches(L"synq-forge/entry.md", "", names), "project handoff folder matches");
+        expect(project_document_matches(L"synq-phalanx.md", "", names), "peer blueprint matches");
+        expect(!project_document_matches(L"cxl-scylla.md", "Mentions synq-forge", names), "casual mention cannot import unrelated knowledge");
+        expect(project_document_matches(L"FORGE.md", "| Repo | `synq-forge/` |", names), "explicit repo metadata supports blueprint aliases");
+        expect(!project_document_matches(L"synq-forge-copy.md", "", names), "knowledge rejects prefix collisions");
+        const auto base = std::filesystem::path(temp_file(L"project_scope")) / L".md";
+        std::filesystem::create_directories(base / L"blueprints");
+        std::filesystem::create_directories(base / L"handoff" / L"synq-forge");
+        write_file_bytes_atomic((base / L"blueprints" / L"synq-forge.md").wstring(), "FORGE_CONTEXT");
+        write_file_bytes_atomic((base / L"blueprints" / L"cxl-scylla.md").wstring(), "UNRELATED_CONTEXT");
+        const auto old = base / L"handoff" / L"synq-forge" / L"old.md";
+        write_file_bytes_atomic(old.wstring(), "STALE_CONTEXT");
+        std::filesystem::last_write_time(old, std::filesystem::file_time_type::clock::now() - std::chrono::hours(72));
+        write_file_bytes_atomic((base / L"handoff" / L"synq-forge" / L"recent.md").wstring(), "RECENT_CONTEXT");
+        const auto context = scoped_knowledge_context(store, {base.wstring()});
+        expect(context.find("FORGE_CONTEXT") != std::string::npos && context.find("RECENT_CONTEXT") != std::string::npos,
+               "prompt contains scoped blueprint and recent handoff contents");
+        expect(context.find("UNRELATED_CONTEXT") == std::string::npos && context.find("STALE_CONTEXT") == std::string::npos,
+               "prompt excludes unrelated and stale files");
+        store.active_project_id.clear();
+        expect(store.list_visible("a", L"").empty(), "no projects means no project history");
+    }
+    {
+        using namespace scyllagpt;
+        Session session;
+        session.paths.store_path = temp_file(L"chat_delete.json");
+        auto* row = session.store.upsert_thread("", "", "delete-me", "Private title", "Private preview");
+        row->local_messages = Json::array();
+        session.active_thread_id = "delete-me";
+        session.history_messages.push_back({true, "Private message"});
+        std::string error;
+        session.state = AppState::Generating;
+        expect(!session.delete_thread("delete-me", &error), "cannot delete generating chat");
+        expect(!session.store.by_thread("delete-me")->deleted, "busy deletion leaves chat intact");
+        session.state = AppState::Ready;
+        expect(session.delete_thread("delete-me", &error), "delete idle chat");
+        expect(session.active_thread_id.empty() && session.history_messages.empty(), "active deleted chat clears transcript");
+        WorkspaceStore restored;
+        expect(restored.load(session.paths.store_path), "deleted chat persists");
+        const auto* deleted = restored.by_thread("delete-me");
+        expect(deleted && deleted->deleted && deleted->title.empty() && deleted->preview.empty() &&
+            deleted->local_messages.array_items().empty(), "deletion removes local content and keeps tombstone");
+        expect(restored.list_visible("", L"").empty(), "deleted chat absent after reload");
+        expect(!restored.upsert_thread("", "", "delete-me", "Provider title", "Provider preview"), "provider cannot restore deleted chat");
+        session.open_thread("delete-me");
+        expect(session.active_thread_id.empty(), "deleted chat cannot reopen");
+        session.store.upsert_thread("", "", "keep-me", "Keep", "");
+        session.paths.store_path = temp_file(L"missing-delete-directory") + L"/store.json";
+        expect(!session.delete_thread("keep-me", &error) && !session.store.by_thread("keep-me")->deleted,
+            "failed persistence leaves chat intact");
+        DeleteFileW(temp_file(L"chat_delete.json").c_str());
+    }
     expect(scyllagpt::unresolved_environment_directory(L"%SystemDrive%"), "Unresolved environment directory recognized");
     expect(scyllagpt::unresolved_environment_directory(L"%LOCAL_APPDATA%"), "Environment directory allows underscore");
     expect(!scyllagpt::unresolved_environment_directory(L"100%") &&
@@ -72,6 +264,10 @@ int run_workbench_domain_tests() {
         using namespace scyllagpt;
         WorkspaceStore store;
         store.upsert_thread("p", "a", "old", "Old", "")->updated_at = 100;
+        Project project;
+        project.id = "p"; project.root = L"D:\\projects\\test"; project.roots = {project.root};
+        store.projects.push_back(project);
+        store.active_project_id = "p";
         store.upsert_thread("p", "a", "new", "New", "")->updated_at = 300;
         auto* pinned = store.upsert_thread("p", "a", "pin", "Pinned", "");
         pinned->updated_at = 50;
@@ -88,6 +284,16 @@ int run_workbench_domain_tests() {
         expect(chat->title == "My own title" && chat_title_request(chat).empty(), "manual chat names protected");
         expect(visible_chat_text("Done.<!--scylla-title: Repair Input-->") == "Done.", "title metadata hidden");
         expect(visible_chat_text("Done.<!--scylla-ti") == "Done.", "partial title metadata hidden");
+        const std::string injected = "Execute mode: carry out the requested work and validate the result.\n\n"
+            "Knowledge folders granted for this turn (absolute paths; not limited to the project cwd):\nD:/notes\n"
+            "Chat naming: hidden instruction\n\n---\n";
+        expect(visible_user_text(injected + "test") == "test", "restored prompt hides runtime metadata");
+        expect(visible_user_text(injected + injected + "test") == "test", "nested runtime headers unwrapped");
+        expect(visible_user_text("Execute mode: carry out the requested work and validate the result.\r\n\r\n---\r\ntest") == "test",
+               "runtime metadata accepts CRLF");
+        expect(visible_user_text("Explain this\n---\nChat naming: example") == "Explain this\n---\nChat naming: example",
+               "ordinary user separators preserved");
+        expect(visible_user_text(injected + "one\n---\ntwo") == "one\n---\ntwo", "user body separators preserved");
         chat->local_messages = Json::array();
         Json message = Json::object();
         message["user"] = Json::boolean(true);
@@ -167,6 +373,14 @@ int run_workbench_domain_tests() {
         std::ofstream(nested / L"file with spaces.md") << "context";
         std::ofstream(shared / L"%SystemDrive%" / L"generated-cache.db") << "cache";
         auto catalog = scyllagpt::agent_file_catalog(store, "project", L"");
+        fs::create_directories(shared / L"plans" / L"in_progress");
+        std::ofstream(shared / L"plans" / L"in_progress" / L"mention-plan.md") << "plan";
+        expect(scyllagpt::match_agent_files(scyllagpt::agent_file_catalog(store, "other", L"", {}, {"project"}),
+            L"mention-plan.md").size() == 1, "Mentions discover plans from another open project's Knowledge");
+        store.set_override(id, L"plans", scyllagpt::AccessMode::NoAccess);
+        expect(scyllagpt::match_agent_files(scyllagpt::agent_file_catalog(store, "other", L"", {}, {"project"}),
+            L"mention-plan.md").empty(), "Open-project mention scope preserves denied folders");
+        store.remove_override(id, L"plans");
         expect(scyllagpt::match_agent_files(catalog, L"FILE WITH SPACES").size() == 1, "Mentions find nested Knowledge files case-insensitively");
         const auto manifest = scyllagpt::workflow_source_manifest(catalog, fixture.wstring(), "repair terminal keyboard");
         expect(manifest.find("workflow.mdc") != std::string::npos && manifest.find("SKILL.md") != std::string::npos,
@@ -615,7 +829,7 @@ int run_workbench_domain_tests() {
 
     {
         auto templates = scyllagpt::McpManager::known_templates();
-        expect(templates.size() == 5, "mcp templates count");
+        expect(templates.size() == 8, "mcp templates count");
         bool has_github = false;
         bool has_linear = false;
         bool has_notion = false;
@@ -640,13 +854,22 @@ int run_workbench_domain_tests() {
                              !t.environment.empty();
             }
         }
-        expect(has_github && has_linear && has_notion && has_figma && has_strata, "mcp template ids");
+          expect(has_github && has_linear && has_notion && !has_figma && has_strata, "mcp template ids");
 
         scyllagpt::McpManager mgr;
         auto conn = scyllagpt::McpManager::from_template(templates[0], L"Personal");
         expect(!conn.id.empty() && conn.service_id == "github", "mcp from_template");
         expect(!conn.connection_name.empty(), "mcp from_template connection_name");
         expect(conn.auth_state == scyllagpt::McpAuthState::Unknown, "mcp from_template auth");
+        expect(conn.oauth_scopes.empty() && !conn.scopes_selected, "new MCP connection has no implicit scope grant");
+        conn.oauth_scopes = {"read:user", "repo"};
+        conn.scopes_selected = true;
+        for (const auto& t : templates) {
+            expect(t.service_id != "linear-readonly", "read-only Linear is a choice, not a separate recipe");
+            if (t.service_id == "supabase") expect(t.suggested_endpoint_or_cmd == "https://mcp.supabase.com/mcp", "Supabase does not force read only");
+            if (t.default_transport == scyllagpt::McpTransportKind::Http)
+                expect(!scyllagpt::McpManager::suggested_oauth_scopes(t.service_id).empty(), "every remote recipe offers provider scopes");
+        }
         auto strata = scyllagpt::McpManager::from_template(templates.back(), L"Workspace Knowledge");
         expect(strata.arguments.size() == 2 && strata.environment.size() == 1,
                "mcp stdio template arguments and environment");
@@ -699,6 +922,7 @@ int run_workbench_domain_tests() {
         expect(loaded.connections().size() == mgr.connections().size(), "mcp roundtrip count");
         const auto* round = loaded.resolve_alias("github-personal");
         expect(round != nullptr, "mcp roundtrip resolve_alias");
+        expect(round && round->scopes_selected && round->oauth_scopes == conn.oauth_scopes, "selected OAuth scopes survive save and reload");
         expect(round->auth_state == scyllagpt::McpAuthState::Healthy, "mcp roundtrip auth_state");
         expect(!round->connection_name.empty(), "mcp roundtrip connection_name");
         expect(!round->last_checked_iso.empty(), "mcp roundtrip last_checked_iso");

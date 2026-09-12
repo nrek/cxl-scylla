@@ -1,4 +1,5 @@
 #include "scyllagpt/project_connection.h"
+#include "scyllagpt/json.h"
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -51,6 +52,17 @@ int run_project_connection_tests() {
 
     ProjectConnectionManager manager;
     auto production = valid_connection("project-a", "@prod-db");
+    {
+        auto mongo = production;
+        mongo.database.engine = scyllagpt::DatabaseEngine::MongoDb;
+        mongo.database.port = 27017;
+        const auto json = scyllagpt::project_connection_json(mongo);
+        const auto restored = scyllagpt::project_connection_from_json(json);
+        expect(restored.database.engine == scyllagpt::DatabaseEngine::MongoDb && restored.database.port == 27017,
+               "MongoDB connection metadata roundtrips without falling back to MySQL");
+        expect(restored.database.password_ref == mongo.database.password_ref && restored.ssh.private_key_ref == mongo.ssh.private_key_ref,
+               "settings serialization preserves credential references");
+    }
     std::string error;
     expect(manager.upsert(production, &error), "add project connection");
     expect(manager.all().size() == 1, "connection count");

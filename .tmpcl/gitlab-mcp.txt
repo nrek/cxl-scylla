@@ -1,0 +1,5 @@
+      | GitLab Docs                                                         Skip to main content 
+  Go to GitLab Docs homepage              What's new?           What's new? 
+ Get free trial      
+  
+ Toggle menu       Use GitLab    GitLab Duo    GitLab Orbit    Extend    Install    Administer    Subscribe    Contribute    Solutions                       GitLab Docs       Help us learn about your current experience with the documentation.  Take the survey .        MCP server  This document was moved to  another location .                                 Facebook      LinkedIn      Twitter      YouTube          Company    About GitLab    View pricing    Try GitLab for free      Feedback    View page source    Edit in Web IDE    Contribute to GitLab    Suggest updates      Help & Community    Get certified    Get support    Post on the GitLab forum      Resources    Terms    Privacy statement    Use of generative AI    Acceptable use of user licenses                    

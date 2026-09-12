@@ -1,0 +1,108 @@
+﻿2026-09-11T19:59:57.5768691Z OnLaunched begin
+2026-09-11T19:59:57.7560364Z WorkbenchWindow ctor enter
+2026-09-11T19:59:57.7569489Z new FilesPane
+2026-09-11T19:59:57.8784734Z new HistoryPane
+2026-09-11T19:59:57.8810444Z new BottomPanelView
+2026-09-11T19:59:57.8964592Z new StatusStripView
+2026-09-11T19:59:57.8972738Z new EditorPane
+2026-09-11T19:59:57.9064413Z new AgentPane
+2026-09-11T19:59:57.9211560Z new TitleChrome
+2026-09-11T19:59:57.9282358Z BuildChrome
+2026-09-11T19:59:57.9295399Z Content set
+2026-09-11T19:59:57.9314252Z wire events
+2026-09-11T19:59:57.9331915Z LoadSettings
+2026-09-11T19:59:57.9334459Z EnsureSession
+2026-09-11T19:59:57.9337613Z WorkbenchWindow ctor exit
+2026-09-11T19:59:57.9397725Z Activated → EnsureHwnd
+2026-09-11T19:59:57.9402789Z GetWindowHandle
+2026-09-11T19:59:57.9434860Z Watching XAML bridge hwnd=0x2a421ee owner=0x1ab2278
+2026-09-11T19:59:57.9442089Z hwnd=27992696
+2026-09-11T19:59:57.9449026Z dark title ok
+2026-09-11T19:59:57.9450152Z editor attach ok
+2026-09-11T19:59:57.9451047Z bottom attach ok
+2026-09-11T19:59:57.9451426Z EnsureHwnd done
+2026-09-11T19:59:59.1322087Z Stress: opening editor
+2026-09-11T19:59:59.1485547Z Stress: editor ready
+2026-09-11T20:00:01.3649337Z PASS terminal UI: composition, prompt, focus, input, Payload and editor coexistence
+2026-09-11T20:00:01.4056697Z XAML bridge destroyed hwnd=0x2a421ee
+   at System.Environment.get_StackTrace()
+   at Scylla.WindowLifetimeDiagnostics.OnMessage(IntPtr hwnd, UInt32 message, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data) in D:\projects\cxl-scylla\scylla-fluent\WindowLifetimeDiagnostics.cs:line 33
+   at ABI.Microsoft.UI.Xaml.IWindowMethods.Close(IObjectReference _obj)
+   at Microsoft.UI.Xaml.Window.Close()
+   at Scylla.UiStressTest.Run(WorkbenchWindow window) in D:\projects\cxl-scylla\scylla-fluent\UiStressTest.cs:line 26
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.ExecutionContextCallback(Object s)
+   at System.Threading.ExecutionContext.RunInternal(ExecutionContext executionContext, ContextCallback callback, Object state)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.MoveNext(Thread threadPoolThread)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.MoveNext()
+   at System.Threading.Tasks.AwaitTaskContinuation.RunCallback(ContextCallback callback, Object state, Task& currentTask)
+   at System.Threading.Tasks.Task.RunContinuations(Object continuationObject)
+   at System.Threading.Tasks.Task`1.TrySetResult(TResult result)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.SetExistingTaskResult(Task`1 task, TResult result)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder.SetResult()
+   at Scylla.UiStressTest.ValidateTerminal(WorkbenchWindow window, IntPtr hwnd) in D:\projects\cxl-scylla\scylla-fluent\UiStressTest.cs:line 130
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.ExecutionContextCallback(Object s)
+   at System.Threading.ExecutionContext.RunInternal(ExecutionContext executionContext, ContextCallback callback, Object state)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.MoveNext(Thread threadPoolThread)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.MoveNext()
+   at Microsoft.UI.Dispatching.DispatcherQueueSynchronizationContext.<>c__DisplayClass2_0.<Post>b__0()
+   at ABI.Microsoft.UI.Dispatching.DispatcherQueueHandler.Do_Abi_Invoke(IntPtr thisPtr)
+   at ABI.Microsoft.UI.Xaml.IApplicationStaticsMethods.Start(IObjectReference _obj, ApplicationInitializationCallback callback)
+   at Microsoft.UI.Xaml.Application.Start(ApplicationInitializationCallback callback)
+   at Scylla.Program.Main(String[] args) in D:\projects\cxl-scylla\scylla-fluent\obj\x64\Release\net8.0-windows10.0.19041.0\App.g.i.cs:line 26
+0x7ff8a6238f13
+
+2026-09-11T20:00:01.4121521Z Activated → EnsureHwnd
+2026-09-11T20:01:26.2245369Z OnLaunched begin
+2026-09-11T20:01:26.2856653Z WorkbenchWindow ctor enter
+2026-09-11T20:01:26.2867382Z new FilesPane
+2026-09-11T20:01:26.3508166Z new HistoryPane
+2026-09-11T20:01:26.3531594Z new BottomPanelView
+2026-09-11T20:01:26.3623457Z new StatusStripView
+2026-09-11T20:01:26.3631403Z new EditorPane
+2026-09-11T20:01:26.3700173Z new AgentPane
+2026-09-11T20:01:26.3838278Z new TitleChrome
+2026-09-11T20:01:26.3887679Z BuildChrome
+2026-09-11T20:01:26.3896964Z Content set
+2026-09-11T20:01:26.3907809Z wire events
+2026-09-11T20:01:26.3920664Z LoadSettings
+2026-09-11T20:01:26.3922532Z EnsureSession
+2026-09-11T20:01:26.3924945Z WorkbenchWindow ctor exit
+2026-09-11T20:01:26.4002543Z Activated → EnsureHwnd
+2026-09-11T20:01:26.4007519Z GetWindowHandle
+2026-09-11T20:01:26.4036133Z Watching XAML bridge hwnd=0x59e1f86 owner=0x21f1ce6
+2026-09-11T20:01:26.4041274Z hwnd=35593446
+2026-09-11T20:01:26.4047917Z dark title ok
+2026-09-11T20:01:26.4048987Z editor attach ok
+2026-09-11T20:01:26.4050394Z bottom attach ok
+2026-09-11T20:01:26.4050823Z EnsureHwnd done
+2026-09-11T20:01:26.8355115Z Stress: opening editor
+2026-09-11T20:01:26.8488617Z Stress: editor ready
+2026-09-11T20:01:28.9624862Z PASS terminal UI: composition, prompt, focus, input, Payload and editor coexistence
+2026-09-11T20:01:28.9949016Z XAML bridge destroyed hwnd=0x59e1f86
+   at System.Environment.get_StackTrace()
+   at Scylla.WindowLifetimeDiagnostics.OnMessage(IntPtr hwnd, UInt32 message, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data) in D:\projects\cxl-scylla\scylla-fluent\WindowLifetimeDiagnostics.cs:line 33
+   at ABI.Microsoft.UI.Xaml.IWindowMethods.Close(IObjectReference _obj)
+   at Microsoft.UI.Xaml.Window.Close()
+   at Scylla.UiStressTest.Run(WorkbenchWindow window) in D:\projects\cxl-scylla\scylla-fluent\UiStressTest.cs:line 26
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.ExecutionContextCallback(Object s)
+   at System.Threading.ExecutionContext.RunInternal(ExecutionContext executionContext, ContextCallback callback, Object state)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.MoveNext(Thread threadPoolThread)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.MoveNext()
+   at System.Threading.Tasks.AwaitTaskContinuation.RunCallback(ContextCallback callback, Object state, Task& currentTask)
+   at System.Threading.Tasks.Task.RunContinuations(Object continuationObject)
+   at System.Threading.Tasks.Task`1.TrySetResult(TResult result)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.SetExistingTaskResult(Task`1 task, TResult result)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder.SetResult()
+   at Scylla.UiStressTest.ValidateTerminal(WorkbenchWindow window, IntPtr hwnd) in D:\projects\cxl-scylla\scylla-fluent\UiStressTest.cs:line 133
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.ExecutionContextCallback(Object s)
+   at System.Threading.ExecutionContext.RunInternal(ExecutionContext executionContext, ContextCallback callback, Object state)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.MoveNext(Thread threadPoolThread)
+   at System.Runtime.CompilerServices.AsyncTaskMethodBuilder`1.AsyncStateMachineBox`1.MoveNext()
+   at Microsoft.UI.Dispatching.DispatcherQueueSynchronizationContext.<>c__DisplayClass2_0.<Post>b__0()
+   at ABI.Microsoft.UI.Dispatching.DispatcherQueueHandler.Do_Abi_Invoke(IntPtr thisPtr)
+   at ABI.Microsoft.UI.Xaml.IApplicationStaticsMethods.Start(IObjectReference _obj, ApplicationInitializationCallback callback)
+   at Microsoft.UI.Xaml.Application.Start(ApplicationInitializationCallback callback)
+   at Scylla.Program.Main(String[] args) in D:\projects\cxl-scylla\scylla-fluent\obj\x64\Release\net8.0-windows10.0.19041.0\App.g.i.cs:line 26
+0x7ff8a61f7fd3
+
+2026-09-11T20:01:29.0019823Z Activated → EnsureHwnd

@@ -110,7 +110,15 @@ PreparedOperation ConnectionBroker::prepare(const ConnectionQueryRequest& reques
         response.safe_message = "The requested connection is disabled.";
         return prepared;
     }
-    response.assessment = assess_sql(request.sql, connection.query_policy);
+    if (connection.ssh_only != request.ssh_command) {
+        response.safe_message = "The tool does not match this connection type.";
+        return prepared;
+    }
+    if (request.ssh_command) {
+        response.assessment.allowed = connection.command_authority != ConnectionAuthority::Block;
+        response.assessment.approval_required = connection.command_authority == ConnectionAuthority::Ask;
+        response.assessment.reason = "SSH commands are blocked for this connection.";
+    } else response.assessment = assess_sql(request.sql, connection.query_policy);
     if (!response.assessment.allowed) {
         response.status = BrokerStatus::PolicyBlocked;
         response.safe_message = response.assessment.reason;

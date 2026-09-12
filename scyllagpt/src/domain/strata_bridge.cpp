@@ -500,6 +500,14 @@ StrataBridgeLaunch discover_strata_bridge_launch() {
 
     wchar_t module[MAX_PATH]{};
     GetModuleFileNameW(nullptr, module, MAX_PATH);
+    const auto bundled = std::filesystem::path(module).parent_path() / L"strata" / L"strata.exe";
+    if (file_exists_w(bundled.wstring())) {
+        launch.found = true;
+        launch.exe = bundled.wstring();
+        launch.args = L"bridge";
+        launch.discovery_note = "bundled STRATA bridge";
+        return launch;
+    }
     const auto adapter = std::filesystem::path(module).parent_path() / L"strata_workbench_bridge.py";
     if (file_exists_w(adapter.wstring())) {
         std::vector<std::wstring> candidates;

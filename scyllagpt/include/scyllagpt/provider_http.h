@@ -10,6 +10,7 @@ namespace scyllagpt {
 struct HttpModelRow {
     std::string id;
     std::string display;
+    std::string created; // Provider timestamp; empty when unavailable.
 };
 
 struct HttpChatMessage {

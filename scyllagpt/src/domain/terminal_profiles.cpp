@@ -167,6 +167,8 @@ std::string run_capture_stdout(const std::wstring& exe, const std::wstring& cmdl
             break;
         }
     }
+    DWORD exit_code = 1;
+    if (!GetExitCodeProcess(pi.hProcess, &exit_code) || exit_code != 0) out.clear();
     CloseHandle(rd);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
@@ -184,12 +186,16 @@ void discover_wsl(std::vector<TerminalProfile>* out) {
     std::wstring cmd = L"\"" + exe + L"\" -l -q";
     const std::string raw = run_capture_stdout(exe, cmd, 4000);
     const auto distros = parse_wsl_list_quiet(raw);
+    if (distros.empty()) push_if_exists(out, "wsl-default", L"WSL (default distribution)", exe);
     for (const auto& d : distros) {
         if (d.empty()) {
             continue;
         }
         const std::string id = make_terminal_profile_id("wsl", d);
-        push_if_exists(out, id, L"WSL: " + d, exe, L"-d " + d);
+        // WSL distribution names normally contain no spaces; avoid redundant
+        // quoting, which some WSL launch paths retain in the distribution name.
+        const auto argument = d.find_first_of(L" \t") == std::wstring::npos ? d : L"\"" + d + L"\"";
+        push_if_exists(out, id, L"WSL: " + d, exe, L"-d " + argument);
     }
 }
 
@@ -204,6 +210,12 @@ std::string normalize_agent_terminal_policy(std::string_view raw) {
         return s;
     }
     return "ask";
+}
+
+std::string terminal_agent_policy(const std::map<std::string, std::string>& policies,
+                                 const std::string& id, std::string_view fallback) {
+    const auto found = policies.find(id);
+    return normalize_agent_terminal_policy(found == policies.end() ? fallback : std::string_view(found->second));
 }
 
 bool is_valid_agent_terminal_policy(std::string_view raw) {
@@ -424,6 +436,42 @@ std::vector<TerminalProfile> discover_terminal_profiles() {
         }
     }
 
+    // Discover common CLI launchers on PATH as well as popular per-user installs.
+    struct Cli { const char* id; const wchar_t* name; const wchar_t* binary; const wchar_t* install; };
+    const Cli tools[] = {
+        {"github-cli", L"GitHub CLI", L"gh", L"GitHub CLI\\gh.exe"},
+        {"claude-cli", L"Claude CLI", L"claude", L""},
+        {"codex-cli", L"Codex CLI", L"codex", L""},
+        {"cursor-cli", L"Cursor CLI", L"cursor-agent", L""},
+        {"nu", L"Nushell", L"nu", L"nu\\bin\\nu.exe"},
+        {"bash-path", L"Bash (PATH)", L"bash", L""},
+    };
+    for (const auto& tool : tools) {
+        std::wstring executable;
+        for (const auto* extension : {L".exe", L".cmd", L".bat"}) {
+            executable = search_path_exe((std::wstring(tool.binary) + extension).c_str());
+            if (!executable.empty()) break;
+        }
+        if (executable.empty() && *tool.install) {
+            const auto candidate = join2(program_files(), tool.install);
+            if (file_is_regular(candidate)) executable = candidate;
+        }
+        if (executable.empty()) {
+            for (const auto* folder : {L".local\\bin", L"AppData\\Roaming\\npm", L"scoop\\shims"}) {
+                for (const auto* extension : {L".exe", L".cmd", L".bat"}) {
+                    const auto candidate = join2(join2(user_profile(), folder), std::wstring(tool.binary) + extension);
+                    if (file_is_regular(candidate)) { executable = candidate; break; }
+                }
+                if (!executable.empty()) break;
+            }
+        }
+        if (executable.empty()) continue;
+        if (std::any_of(out.begin(), out.end(), [&](const auto& p) { return to_lower_copy(p.executable) == to_lower_copy(executable); })) continue;
+        const auto lower = to_lower_copy(executable);
+        if (lower.ends_with(L".cmd") || lower.ends_with(L".bat"))
+            push_if_exists(&out, tool.id, tool.name, join2(system32(), L"cmd.exe"), L"/d /s /k \"\"" + executable + L"\"\"");
+        else push_if_exists(&out, tool.id, tool.name, executable);
+    }
     return out;
 }
 

@@ -175,7 +175,7 @@ bool ProvidersSettingsUi::create(HWND parent, HINSTANCE inst, HFONT font, HFONT 
     SetWindowTextW(oa_api_.primary, L"Connect API key…");
     SetWindowTextW(oa_api_.secondary, L"Disconnect");
     SetWindowTextW(oa_api_.models_heading, L"OpenAI API Models");
-    SetWindowTextW(oa_api_.models_hint, L"Queried from the API. None enabled until you select them.");
+    SetWindowTextW(oa_api_.models_hint, L"Newest first; three enabled on first setup.");
 
     make_card(cl_, L"Claude Account", Cmd_ProvClManage, Cmd_ProvClRefresh, Cmd_ProvClDefault, Cmd_ProvClSearch,
               Cmd_ProvClModels, Cmd_ProvClEnableAll, Cmd_ProvClDisableAll, Cmd_ProvClDefaultFooter, Cmd_SetClCode,
@@ -190,7 +190,7 @@ bool ProvidersSettingsUi::create(HWND parent, HINSTANCE inst, HFONT font, HFONT 
     SetWindowTextW(cl_api_.primary, L"Connect API key…");
     SetWindowTextW(cl_api_.secondary, L"Disconnect");
     SetWindowTextW(cl_api_.models_heading, L"Claude API Models");
-    SetWindowTextW(cl_api_.models_hint, L"Queried from Anthropic. None enabled until you select them.");
+    SetWindowTextW(cl_api_.models_hint, L"Newest first; three enabled on first setup.");
 
     active_heading_ = ui_kit::create_static(parent_, inst_, 0, L"Active Agent", font_, false);
     active_hint_ = ui_kit::create_static(parent_, inst_, 0,

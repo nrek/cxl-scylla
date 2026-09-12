@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../scylla-fluent/NativeCore.cs" Link="NativeCore.cs" />
+    <Compile Include="../../scylla-fluent/ChatAttachment.cs" Link="ChatAttachment.cs" />
+    <Compile Include="../../scylla-fluent/ChatHistoryState.cs" Link="ChatHistoryState.cs" />
+  </ItemGroup>
+</Project>

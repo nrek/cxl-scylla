@@ -55,7 +55,10 @@ McpOAuthResult mcp_oauth_probe(const std::wstring& endpoint, const std::string& 
 
 // Full interactive authorize (blocks until browser returns or timeout). HWND is for ShellExecute owner.
 McpOAuthResult mcp_oauth_authorize(HWND owner, const std::wstring& endpoint,
-                                   const std::string& connection_id, DWORD timeout_ms = 300000);
+                                   const std::string& connection_id, DWORD timeout_ms = 300000,
+                                   const std::vector<std::string>& scopes = {});
+
+std::vector<std::string> mcp_oauth_discover_scopes(const std::wstring& endpoint, std::string* error);
 
 // Silent refresh when a refresh_token is stored. Falls back to NeedsReauth on failure.
 McpOAuthResult mcp_oauth_refresh(const std::string& connection_id);

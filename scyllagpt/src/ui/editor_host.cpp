@@ -10,8 +10,12 @@
 #include "Scintilla.h"
 
 #include <algorithm>
+#include <commctrl.h>
 #include <cstring>
 #include <vector>
+#include <windowsx.h>
+
+#pragma comment(lib, "comctl32.lib")
 
 namespace scyllagpt {
 namespace {
@@ -20,6 +24,83 @@ constexpr int kEditorFontPoints = 10;
 
 sptr_t send(HWND sci, unsigned msg, uptr_t w = 0, sptr_t l = 0) {
     return SendMessageW(sci, msg, w, l);
+}
+
+struct MinimapState {
+    HWND primary = nullptr;
+    bool dragging = false;
+};
+
+void copy_view_styles(HWND source, HWND target) {
+    if (!source || !target) return;
+    char font[LF_FACESIZE]{};
+    for (int style = 0; style <= STYLE_MAX; ++style) {
+        send(target, SCI_STYLESETFORE, style, send(source, SCI_STYLEGETFORE, style));
+        send(target, SCI_STYLESETBACK, style, send(source, SCI_STYLEGETBACK, style));
+        send(target, SCI_STYLESETSIZEFRACTIONAL, style, send(source, SCI_STYLEGETSIZEFRACTIONAL, style));
+        send(target, SCI_STYLESETWEIGHT, style, send(source, SCI_STYLEGETWEIGHT, style));
+        send(target, SCI_STYLESETITALIC, style, send(source, SCI_STYLEGETITALIC, style));
+        send(target, SCI_STYLESETUNDERLINE, style, send(source, SCI_STYLEGETUNDERLINE, style));
+        send(target, SCI_STYLESETEOLFILLED, style, send(source, SCI_STYLEGETEOLFILLED, style));
+        send(target, SCI_STYLESETCASE, style, send(source, SCI_STYLEGETCASE, style));
+        std::memset(font, 0, sizeof(font));
+        send(source, SCI_STYLEGETFONT, style, reinterpret_cast<sptr_t>(font));
+        if (font[0]) send(target, SCI_STYLESETFONT, style, reinterpret_cast<sptr_t>(font));
+    }
+}
+
+void minimap_navigate(HWND minimap, MinimapState* state, int y) {
+    if (!state || !IsWindow(state->primary)) return;
+    RECT rc{};
+    GetClientRect(minimap, &rc);
+    const int lines = static_cast<int>(send(state->primary, SCI_GETLINECOUNT));
+    if (lines <= 0 || rc.bottom <= 0) return;
+    const int target = std::clamp(MulDiv(y, lines, rc.bottom), 0, lines - 1);
+    const int visible = static_cast<int>(send(state->primary, SCI_LINESONSCREEN));
+    send(state->primary, SCI_SETFIRSTVISIBLELINE, (std::max)(0, target - visible / 2));
+    SetFocus(state->primary);
+}
+
+LRESULT CALLBACK minimap_subclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                  UINT_PTR id, DWORD_PTR data) {
+    auto* state = reinterpret_cast<MinimapState*>(data);
+    switch (msg) {
+    case WM_SETCURSOR:
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+    case WM_LBUTTONDOWN:
+        state->dragging = true;
+        SetCapture(hwnd);
+        minimap_navigate(hwnd, state, GET_Y_LPARAM(lp));
+        return 0;
+    case WM_MOUSEMOVE:
+        if (state->dragging && (wp & MK_LBUTTON)) minimap_navigate(hwnd, state, GET_Y_LPARAM(lp));
+        return 0;
+    case WM_LBUTTONUP:
+        if (state->dragging) {
+            state->dragging = false;
+            ReleaseCapture();
+            minimap_navigate(hwnd, state, GET_Y_LPARAM(lp));
+        }
+        return 0;
+    case WM_MOUSEWHEEL:
+        if (state && IsWindow(state->primary)) {
+            const int first = static_cast<int>(send(state->primary, SCI_GETFIRSTVISIBLELINE));
+            const int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+            send(state->primary, SCI_SETFIRSTVISIBLELINE, (std::max)(0, first - steps * 3));
+            SetFocus(state->primary);
+        }
+        return 0;
+    case WM_CONTEXTMENU:
+    case WM_CHAR:
+    case WM_KEYDOWN:
+        return 0;
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hwnd, minimap_subclass, id);
+        delete state;
+        break;
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
 }
 
 COLORREF to_bgr(COLORREF rgb) {
@@ -351,6 +432,8 @@ HWND editor_create(HWND parent, int control_id, HINSTANCE inst) {
     send(sci, SCI_SETVIRTUALSPACEOPTIONS, SCVS_NONE, 0);
     send(sci, SCI_SETINDENTATIONGUIDES, SC_IV_LOOKBOTH, 0);
     send(sci, SCI_BRACEHIGHLIGHTINDICATOR, 1, 0);
+    // Apply the shared skin here so both Fluent and Win32 editor hosts receive it.
+    install_thin_scrollbar(sci, theme().editor);
     return sci;
 }
 
@@ -649,6 +732,63 @@ void editor_set_whitespace(HWND sci, bool visible) {
     if (sci) {
         send(sci, SCI_SETVIEWWS, visible ? SCWS_VISIBLEALWAYS : SCWS_VISIBLEONLYININDENT, 0);
     }
+}
+
+HWND editor_create_minimap(HWND parent, HWND primary, int control_id, HINSTANCE inst, int /*dpi*/) {
+    if (!parent || !primary) return nullptr;
+    HWND minimap = editor_create(parent, control_id, inst);
+    if (!minimap) return nullptr;
+
+    const sptr_t document = send(primary, SCI_GETDOCPOINTER);
+    send(primary, SCI_ADDREFDOCUMENT, 0, document);
+    send(minimap, SCI_SETDOCPOINTER, 0, document);
+    // Scintilla documents share text and lexer style bytes, but each view owns its
+    // visual style table. Copy it after attaching the document or the secondary
+    // view renders those shared styles with Scintilla's white system defaults.
+    copy_view_styles(primary, minimap);
+    send(minimap, SCI_SETREADONLY, 1);
+    send(minimap, SCI_SETZOOM, static_cast<uptr_t>(-7));
+    send(minimap, SCI_SETWRAPMODE, SC_WRAP_NONE);
+    send(minimap, SCI_SETHSCROLLBAR, 0);
+    send(minimap, SCI_SETVSCROLLBAR, 0);
+    send(minimap, SCI_SETMARGINWIDTHN, 0, 0);
+    send(minimap, SCI_SETMARGINWIDTHN, 1, 0);
+    send(minimap, SCI_SETMARGINWIDTHN, 2, 0);
+    send(minimap, SCI_SETINDENTATIONGUIDES, SC_IV_NONE);
+    send(minimap, SCI_SETVIEWWS, SCWS_INVISIBLE);
+    send(minimap, SCI_SETCARETSTYLE, CARETSTYLE_INVISIBLE);
+    send(minimap, SCI_SETCARETLINEVISIBLE, 0);
+    send(minimap, SCI_SETSELECTIONMODE, SC_SEL_STREAM);
+    send(minimap, SCI_SETSELALPHA, 48);
+    send(minimap, SCI_SETSELFORE, 0);
+    send(minimap, SCI_SETSELBACK, 1, theme().surface_active);
+    send(minimap, SCI_USEPOPUP, SC_POPUP_NEVER);
+
+    LONG_PTR style = GetWindowLongPtrW(minimap, GWL_STYLE);
+    SetWindowLongPtrW(minimap, GWL_STYLE, style & ~WS_TABSTOP);
+    auto* state = new MinimapState{primary, false};
+    if (!SetWindowSubclass(minimap, minimap_subclass, 1, reinterpret_cast<DWORD_PTR>(state))) {
+        delete state;
+        DestroyWindow(minimap);
+        return nullptr;
+    }
+    return minimap;
+}
+
+void editor_sync_minimap(HWND primary, HWND minimap) {
+    if (!primary || !minimap) return;
+    const int lines = static_cast<int>(send(primary, SCI_GETLINECOUNT));
+    const int first_display = static_cast<int>(send(primary, SCI_GETFIRSTVISIBLELINE));
+    const int visible = (std::max)(1, static_cast<int>(send(primary, SCI_LINESONSCREEN)));
+    const int first = static_cast<int>(send(primary, SCI_DOCLINEFROMVISIBLE, first_display));
+    const int last = (std::min)(lines - 1,
+        static_cast<int>(send(primary, SCI_DOCLINEFROMVISIBLE, first_display + visible)));
+    const sptr_t start = send(primary, SCI_POSITIONFROMLINE, (std::max)(0, first));
+    const sptr_t end = last + 1 < lines ? send(primary, SCI_POSITIONFROMLINE, last + 1)
+                                       : send(primary, SCI_GETLENGTH);
+    send(minimap, SCI_SETSEL, static_cast<uptr_t>(start), end);
+    const int mini_visible = (std::max)(1, static_cast<int>(send(minimap, SCI_LINESONSCREEN)));
+    send(minimap, SCI_SETFIRSTVISIBLELINE, (std::max)(0, first - mini_visible / 2));
 }
 
 }  // namespace scyllagpt

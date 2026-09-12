@@ -1,0 +1,396 @@
+scyllagpt/src/ui/window.cpp-3911-    // stay tall with an empty draft.
+scyllagpt/src/ui/window.cpp-3912-    sync_composer_growth(ui);
+scyllagpt/src/ui/window.cpp-3913-    const int composer_text = composer_line_height(ui) * ui->composer_lines + dip(ui->wnd, 2);
+scyllagpt/src/ui/window.cpp-3914-    const int composer = composer_text + dip(ui->wnd, 56) + thumb_extra;
+scyllagpt/src/ui/window.cpp-3915-
+scyllagpt/src/ui/window.cpp-3916-    const bool narrow = ui->panes.narrow_tabs;
+scyllagpt/src/ui/window.cpp-3917-    ShowWindow(ui->tab_editor, narrow ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-3918-    ShowWindow(ui->tab_agent, narrow ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-3919-
+scyllagpt/src/ui/window.cpp-3920-    int x = pad;
+scyllagpt/src/ui/window.cpp-3921-    ShowWindow(ui->brand, SW_HIDE);
+scyllagpt/src/ui/window.cpp-3922-    const int project_w = dip(ui->wnd, dpi_w < 900 ? (std::max)(80, dpi_w - 640) : 200);
+scyllagpt/src/ui/window.cpp:3923:    MoveWindow(ui->project, x, ybtn, project_w, btnh, TRUE);
+scyllagpt/src/ui/window.cpp-3924-    x += project_w + dip(ui->wnd, 8);
+scyllagpt/src/ui/window.cpp:3925:    MoveWindow(ui->openfolder, x, ybtn, btnh, btnh, TRUE);
+scyllagpt/src/ui/window.cpp-3926-    x += dip(ui->wnd, 40);
+scyllagpt/src/ui/window.cpp-3927-    const int file_tabs_left = x;
+scyllagpt/src/ui/window.cpp-3928-    const int account_w = dip(ui->wnd, dpi_w < 1100 ? 100 : 136);
+scyllagpt/src/ui/window.cpp-3929-    const int model_w = dip(ui->wnd, dpi_w < 1100 ? 160 : 200);
+scyllagpt/src/ui/window.cpp-3930-    const int gap = dip(ui->wnd, 8);
+scyllagpt/src/ui/window.cpp-3931-    const int settings_x = w - pad - btnh;
+scyllagpt/src/ui/window.cpp-3932-    const int account_x = settings_x - gap - account_w;
+scyllagpt/src/ui/window.cpp-3933-    const int model_x = account_x - gap - model_w;
+scyllagpt/src/ui/window.cpp-3934-    const int focus_x = model_x - gap - dip(ui->wnd, 64);
+scyllagpt/src/ui/window.cpp-3935-    const int chats_x = focus_x - dip(ui->wnd, 60);
+scyllagpt/src/ui/window.cpp-3936-    const int files_x = chats_x - dip(ui->wnd, 60);
+scyllagpt/src/ui/window.cpp:3937:    MoveWindow(ui->toggle_files, files_x, ybtn, dip(ui->wnd, 56), btnh, TRUE);
+scyllagpt/src/ui/window.cpp:3938:    MoveWindow(ui->toggle_history, chats_x, ybtn, dip(ui->wnd, 56), btnh, TRUE);
+scyllagpt/src/ui/window.cpp:3939:    MoveWindow(ui->focus, focus_x, ybtn, dip(ui->wnd, 64), btnh, TRUE);
+scyllagpt/src/ui/window.cpp:3940:    MoveWindow(ui->settings, settings_x, ybtn, btnh, btnh, TRUE);
+scyllagpt/src/ui/window.cpp:3941:    MoveWindow(ui->account, account_x, ybtn, account_w, btnh, TRUE);
+scyllagpt/src/ui/window.cpp:3942:    MoveWindow(ui->models, model_x, ybtn, model_w, btnh, TRUE);
+scyllagpt/src/ui/window.cpp-3943-    // File tabs belong to the main chrome. A second chrome row at compact widths
+scyllagpt/src/ui/window.cpp-3944-    // keeps tab overflow and the controls from occupying the same hit area.
+scyllagpt/src/ui/window.cpp:3945:    MoveWindow(ui->tabs, stacked_file_tabs ? pad : file_tabs_left,
+scyllagpt/src/ui/window.cpp-3946-               stacked_file_tabs ? toolbar_h : (toolbar_h - hdr),
+scyllagpt/src/ui/window.cpp-3947-               stacked_file_tabs ? w - pad * 2 : (std::max)(1, files_x - gap - file_tabs_left), hdr, TRUE);
+scyllagpt/src/ui/window.cpp-3948-    ShowWindow(ui->models, SW_SHOW);
+scyllagpt/src/ui/window.cpp-3949-    ShowWindow(ui->signin, SW_HIDE);
+scyllagpt/src/ui/window.cpp-3950-    ShowWindow(ui->signout, SW_HIDE);
+scyllagpt/src/ui/window.cpp-3951-
+scyllagpt/src/ui/window.cpp-3952-    int body_y = bar;
+scyllagpt/src/ui/window.cpp-3953-    int body_h = h - bar - st;
+scyllagpt/src/ui/window.cpp-3954-    if (narrow) {
+scyllagpt/src/ui/window.cpp:3955:        MoveWindow(ui->tab_editor, pad, bar + dip(ui->wnd, 4), dip(ui->wnd, 72), btnh, TRUE);
+scyllagpt/src/ui/window.cpp:3956:        MoveWindow(ui->tab_agent, pad + dip(ui->wnd, 80), bar + dip(ui->wnd, 4), dip(ui->wnd, 72), btnh, TRUE);
+scyllagpt/src/ui/window.cpp-3957-        body_y = bar + dip(ui->wnd, 36);
+scyllagpt/src/ui/window.cpp-3958-        body_h = h - body_y - st;
+scyllagpt/src/ui/window.cpp-3959-    }
+scyllagpt/src/ui/window.cpp-3960-
+scyllagpt/src/ui/window.cpp-3961-    const int min_term = ui_space::kMinTerminalHDip;
+scyllagpt/src/ui/window.cpp-3962-    int term_h_dip = (std::max)(min_term, ui->session.settings.terminal_h);
+scyllagpt/src/ui/window.cpp-3963-    if (ui->panel_collapsed) {
+scyllagpt/src/ui/window.cpp-3964-        term_h_dip = ui_space::kPanelTabHDip + 8;
+scyllagpt/src/ui/window.cpp-3965-    }
+scyllagpt/src/ui/window.cpp-3966-    const int term_band = ui->session.settings.terminal_visible
+scyllagpt/src/ui/window.cpp-3967-        ? (std::min)(dip(ui->wnd, term_h_dip), (std::max)(0, body_h - dip(ui->wnd, 100))) : 0;
+scyllagpt/src/ui/window.cpp-3968-    const int term_splitter = term_band > 0 ? dip(ui->wnd, 8) : 0;
+--
+scyllagpt/src/ui/window.cpp-3974-    int cx = 0;
+scyllagpt/src/ui/window.cpp-3975-    ui->split1 = {};
+scyllagpt/src/ui/window.cpp-3976-    ui->split2 = {};
+scyllagpt/src/ui/window.cpp-3977-    ui->split3 = {};
+scyllagpt/src/ui/window.cpp-3978-    ui->split_term = {};
+scyllagpt/src/ui/window.cpp-3979-    ui->split_knowledge = {};
+scyllagpt/src/ui/window.cpp-3980-
+scyllagpt/src/ui/window.cpp-3981-    auto place_files = [&](int ww) {
+scyllagpt/src/ui/window.cpp-3982-        ShowWindow(ui->hdr_files, SW_HIDE);
+scyllagpt/src/ui/window.cpp-3983-        ShowWindow(ui->filter, SW_SHOW);
+scyllagpt/src/ui/window.cpp-3984-        ShowWindow(ui->tree, SW_SHOW);
+scyllagpt/src/ui/window.cpp-3985-        const int breath = dip(ui->wnd, 5);
+scyllagpt/src/ui/window.cpp:3986:        MoveWindow(ui->filter, cx + pad, body_y + breath, ww - pad * 2, filter_h, TRUE);
+scyllagpt/src/ui/window.cpp-3987-        center_single_line_edit(ui->filter, ui->font);
+scyllagpt/src/ui/window.cpp-3988-        const int heading = dip(ui->wnd, 28);
+scyllagpt/src/ui/window.cpp-3989-        const int available = (std::max)(0, body_h - breath * 2 - filter_h);
+scyllagpt/src/ui/window.cpp-3990-        const int default_knowledge_h = (std::min)(dip(ui->wnd, 260), (std::max)(heading, available / 3));
+scyllagpt/src/ui/window.cpp-3991-        const int max_knowledge_h = (std::max)(heading, available - dip(ui->wnd, 96) - breath);
+scyllagpt/src/ui/window.cpp-3992-        const int min_knowledge_h = (std::min)(dip(ui->wnd, 80), max_knowledge_h);
+scyllagpt/src/ui/window.cpp-3993-        const int knowledge_h = ui->knowledge_collapsed ? heading
+scyllagpt/src/ui/window.cpp-3994-            : ui->session.settings.knowledge_h == 0 ? default_knowledge_h
+scyllagpt/src/ui/window.cpp-3995-            : std::clamp(dip(ui->wnd, ui->session.settings.knowledge_h), min_knowledge_h, max_knowledge_h);
+scyllagpt/src/ui/window.cpp-3996-        ui->knowledge_height = px_to_dip(ui->wnd, knowledge_h);
+scyllagpt/src/ui/window.cpp-3997-        ui->knowledge_max_height = px_to_dip(ui->wnd, max_knowledge_h);
+scyllagpt/src/ui/window.cpp-3998-        const int knowledge_y = body_y + body_h - knowledge_h;
+scyllagpt/src/ui/window.cpp-3999-        if (!ui->knowledge_collapsed) {
+scyllagpt/src/ui/window.cpp-4000-            // Existing breathing space between the trees doubles as a resize target.
+scyllagpt/src/ui/window.cpp-4001-            // No child HWND covers it, so the frame owns capture just like the terminal splitter.
+scyllagpt/src/ui/window.cpp-4002-            ui->split_knowledge = {cx + breath, knowledge_y - breath, cx + ww - breath, knowledge_y};
+scyllagpt/src/ui/window.cpp-4003-        }
+scyllagpt/src/ui/window.cpp:4004:        MoveWindow(ui->tree, cx + breath, body_y + breath + filter_h + breath, ww - breath * 2,
+scyllagpt/src/ui/window.cpp-4005-                   (std::max)(0, available - knowledge_h - breath), TRUE);
+scyllagpt/src/ui/window.cpp:4006:        MoveWindow(ui->knowledge_header, cx + breath, knowledge_y, (std::max)(1, ww - breath * 2 - heading), heading, TRUE);
+scyllagpt/src/ui/window.cpp:4007:        MoveWindow(ui->knowledge_manage, cx + ww - breath - heading, knowledge_y, heading, heading, TRUE);
+scyllagpt/src/ui/window.cpp-4008-        SetWindowTextW(ui->knowledge_header, ui->knowledge_collapsed ? L"▸ KNOWLEDGE" : L"▾ KNOWLEDGE");
+scyllagpt/src/ui/window.cpp-4009-        ShowWindow(ui->knowledge_header, SW_SHOWNA);
+scyllagpt/src/ui/window.cpp-4010-        ShowWindow(ui->knowledge_manage, SW_SHOWNA);
+scyllagpt/src/ui/window.cpp:4011:        MoveWindow(ui->knowledge_tree, cx + breath, knowledge_y + heading, ww - breath * 2,
+scyllagpt/src/ui/window.cpp-4012-                   (std::max)(0, knowledge_h - heading), TRUE);
+scyllagpt/src/ui/window.cpp-4013-        ShowWindow(ui->knowledge_tree, ui->knowledge_collapsed ? SW_HIDE : SW_SHOWNA);
+scyllagpt/src/ui/window.cpp-4014-        cx += ww;
+scyllagpt/src/ui/window.cpp-4015-    };
+scyllagpt/src/ui/window.cpp-4016-    auto hide_files = [&]() {
+scyllagpt/src/ui/window.cpp-4017-        ShowWindow(ui->hdr_files, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4018-        ShowWindow(ui->filter, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4019-        ShowWindow(ui->tree, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4020-        ShowWindow(ui->knowledge_tree, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4021-        ShowWindow(ui->knowledge_header, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4022-        ShowWindow(ui->knowledge_manage, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4023-    };
+--
+scyllagpt/src/ui/window.cpp-4038-            ShowWindow(ui->markdown_view, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4039-            ShowWindow(ui->markdown_toggle, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4040-            // Background panel only. SW_SHOW would activate and raise it over Settings controls
+scyllagpt/src/ui/window.cpp-4041-            // (owner-draw buttons/nav then look blank until hover). SW_SHOWNA keeps creation order.
+scyllagpt/src/ui/window.cpp-4042-            ShowWindow(ui->content_host, SW_SHOWNA);
+scyllagpt/src/ui/window.cpp-4043-            EnableWindow(ui->content_host, FALSE);
+scyllagpt/src/ui/window.cpp-4044-            ShowWindow(ui->content_back, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4045-            ShowWindow(ui->content_title, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4046-            const int hdr_h = dip(ui->wnd, 36);
+scyllagpt/src/ui/window.cpp-4047-            const int gap_below_hdr = dip(ui->wnd, 16);  // space between Back/title and nav/body
+scyllagpt/src/ui/window.cpp-4048-            const int pad_u = dip(ui->wnd, 12);
+scyllagpt/src/ui/window.cpp-4049-            const int hdr_y = body_y + (hdr_h - btnh) / 2;  // shared vertical mid with Back
+scyllagpt/src/ui/window.cpp:4050:            MoveWindow(ui->content_host, cx, body_y, ww, body_h, TRUE);
+scyllagpt/src/ui/window.cpp:4051:            MoveWindow(ui->content_back, cx + pad_u, hdr_y, dip(ui->wnd, 72), btnh, TRUE);
+scyllagpt/src/ui/window.cpp:4052:            MoveWindow(ui->content_title, cx + pad_u + dip(ui->wnd, 80), hdr_y,
+scyllagpt/src/ui/window.cpp-4053-                       ww - pad_u * 2 - dip(ui->wnd, 80), btnh, TRUE);
+scyllagpt/src/ui/window.cpp-4054-            hide_settings_controls(ui);
+scyllagpt/src/ui/window.cpp-4055-            ShowWindow(ui->gs_open_folder, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4056-            ShowWindow(ui->gs_providers, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4057-            ShowWindow(ui->content_body, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4058-            ShowWindow(ui->content_nav, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4059-            const int y0 = body_y + hdr_h + gap_below_hdr;
+scyllagpt/src/ui/window.cpp-4060-            const int h0 = body_h - hdr_h - gap_below_hdr - pad_u;
+scyllagpt/src/ui/window.cpp-4061-            if (ui->content_view == ContentView::Settings) {
+scyllagpt/src/ui/window.cpp-4062-                const int nav_w = dip(ui->wnd, 140);
+scyllagpt/src/ui/window.cpp-4063-                ShowWindow(ui->content_nav, SW_SHOW);
+scyllagpt/src/ui/window.cpp:4064:                MoveWindow(ui->content_nav, cx + pad_u, y0, nav_w, h0, TRUE);
+scyllagpt/src/ui/window.cpp-4065-                InvalidateRect(ui->content_nav, nullptr, TRUE);
+scyllagpt/src/ui/window.cpp-4066-                InvalidateRect(ui->content_back, nullptr, TRUE);
+scyllagpt/src/ui/window.cpp-4067-                InvalidateRect(ui->content_title, nullptr, TRUE);
+scyllagpt/src/ui/window.cpp-4068-                const int px = cx + pad_u + nav_w + pad_u;
+scyllagpt/src/ui/window.cpp-4069-                const int pw = ww - nav_w - pad_u * 3;
+scyllagpt/src/ui/window.cpp-4070-                int py = y0;
+scyllagpt/src/ui/window.cpp-4071-                auto place_btn = [&](HWND h, int bw, int bh = -1) {
+scyllagpt/src/ui/window.cpp-4072-                    const int hh = bh < 0 ? btnh : bh;
+scyllagpt/src/ui/window.cpp-4073-                    MoveWindow(h, px, py, bw, hh, TRUE);
+scyllagpt/src/ui/window.cpp-4074-                    ShowWindow(h, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4075-                    InvalidateRect(h, nullptr, TRUE);
+scyllagpt/src/ui/window.cpp-4076-                    py += hh + dip(ui->wnd, 8);
+--
+scyllagpt/src/ui/window.cpp-4098-                } else if (ui->settings_section == SettingsSection::Advanced) {
+scyllagpt/src/ui/window.cpp-4099-                    if (ui->ui_gallery.visible()) {
+scyllagpt/src/ui/window.cpp-4100-                        RECT gr{px, y0, px + (std::max)(1, pw), y0 + h0};
+scyllagpt/src/ui/window.cpp-4101-                        ui->ui_gallery.layout(gr);
+scyllagpt/src/ui/window.cpp-4102-                    } else {
+scyllagpt/src/ui/window.cpp-4103-                        place_btn(ui->set_codex, dip(ui->wnd, 160));
+scyllagpt/src/ui/window.cpp-4104-                        place_btn(ui->set_copy_runtime, dip(ui->wnd, 160));
+scyllagpt/src/ui/window.cpp-4105-                        place_btn(ui->set_ui_gallery, dip(ui->wnd, 140));
+scyllagpt/src/ui/window.cpp-4106-                        ShowWindow(ui->content_body, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4107-                        SetWindowTextW(ui->content_body,
+scyllagpt/src/ui/window.cpp-4108-                                       L"Runtime paths and developer tools.\r\n\r\n"
+scyllagpt/src/ui/window.cpp-4109-                                       L"Scylla Keyring lives under Settings → Security.");
+scyllagpt/src/ui/window.cpp:4110:                        MoveWindow(ui->content_body, px, py + dip(ui->wnd, 8), (std::max)(1, pw),
+scyllagpt/src/ui/window.cpp-4111-                                   (std::max)(1, h0 - (py - y0) - dip(ui->wnd, 8)), TRUE);
+scyllagpt/src/ui/window.cpp-4112-                    }
+scyllagpt/src/ui/window.cpp-4113-                } else if (ui->settings_section == SettingsSection::Security) {
+scyllagpt/src/ui/window.cpp-4114-                    const int tab_h = dip(ui->wnd, 32);
+scyllagpt/src/ui/window.cpp-4115-                    const int tab_gap = dip(ui->wnd, 8);
+scyllagpt/src/ui/window.cpp-4116-                    const int tab_w = dip(ui->wnd, 140);
+scyllagpt/src/ui/window.cpp-4117-                    // Widths differ per label; walk the strip so a new tab never overlaps.
+scyllagpt/src/ui/window.cpp-4118-                    const struct {
+scyllagpt/src/ui/window.cpp-4119-                        HWND tab;
+scyllagpt/src/ui/window.cpp-4120-                        int w;
+scyllagpt/src/ui/window.cpp-4121-                    } sec_tabs[] = {{ui->sec_tab_overview, tab_w},
+scyllagpt/src/ui/window.cpp-4122-                                    {ui->sec_tab_keyring, tab_w},
+--
+scyllagpt/src/ui/window.cpp-4159-                } else if (ui->settings_section == SettingsSection::Terminal) {
+scyllagpt/src/ui/window.cpp-4160-                    RECT tr{px, y0, px + (std::max)(1, pw), y0 + h0};
+scyllagpt/src/ui/window.cpp-4161-                    ui->terminal_ui.set_visible(true);
+scyllagpt/src/ui/window.cpp-4162-                    ui->terminal_ui.layout(tr);
+scyllagpt/src/ui/window.cpp-4163-                }
+scyllagpt/src/ui/window.cpp-4164-            } else if (ui->content_view == ContentView::Keyring) {
+scyllagpt/src/ui/window.cpp-4165-                ShowWindow(ui->content_body, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4166-                RECT kr{cx + pad_u, y0, cx + ww - pad_u, y0 + h0};
+scyllagpt/src/ui/window.cpp-4167-                ui->keyring_ui.show(true);
+scyllagpt/src/ui/window.cpp-4168-                ui->keyring_ui.layout(kr);
+scyllagpt/src/ui/window.cpp-4169-            } else {
+scyllagpt/src/ui/window.cpp-4170-                ShowWindow(ui->content_body, SW_SHOW);
+scyllagpt/src/ui/window.cpp:4171:                MoveWindow(ui->content_body, cx + pad_u, y0, ww - pad_u * 2, h0 - (ui->content_view == ContentView::GettingStarted
+scyllagpt/src/ui/window.cpp-4172-                                                                                       ? dip(ui->wnd, 40)
+scyllagpt/src/ui/window.cpp-4173-                                                                                       : 0),
+scyllagpt/src/ui/window.cpp-4174-                           TRUE);
+scyllagpt/src/ui/window.cpp-4175-                if (ui->content_view == ContentView::GettingStarted) {
+scyllagpt/src/ui/window.cpp:4176:                    MoveWindow(ui->gs_open_folder, cx + pad_u, body_y + body_h - dip(ui->wnd, 36), dip(ui->wnd, 120), btnh,
+scyllagpt/src/ui/window.cpp-4177-                               TRUE);
+scyllagpt/src/ui/window.cpp:4178:                    MoveWindow(ui->gs_providers, cx + pad_u + dip(ui->wnd, 128), body_y + body_h - dip(ui->wnd, 36),
+scyllagpt/src/ui/window.cpp-4179-                               dip(ui->wnd, 140), btnh, TRUE);
+scyllagpt/src/ui/window.cpp-4180-                    ShowWindow(ui->gs_open_folder, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4181-                    ShowWindow(ui->gs_providers, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4182-                }
+scyllagpt/src/ui/window.cpp-4183-            }
+scyllagpt/src/ui/window.cpp-4184-            cx += ww;
+scyllagpt/src/ui/window.cpp-4185-            return;
+scyllagpt/src/ui/window.cpp-4186-        }
+scyllagpt/src/ui/window.cpp-4187-        ShowWindow(ui->content_host, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4188-        ShowWindow(ui->content_back, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4189-        ShowWindow(ui->content_title, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4190-        ShowWindow(ui->content_nav, SW_HIDE);
+--
+scyllagpt/src/ui/window.cpp-4201-        ShowWindow(ui->tabs, has_doc ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4202-        ShowWindow(ui->hdr_editor, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4203-        ShowWindow(ui->find_toggle, has_doc ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4204-        ShowWindow(ui->find, (has_doc && ui->find_open) ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4205-        ShowWindow(ui->save, has_doc ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4206-        ShowWindow(ui->gutter, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4207-        ShowWindow(ui->editor_status, has_doc ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4208-        ShowWindow(ui->editor, has_doc && !preview_md ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4209-        ShowWindow(ui->markdown_view, preview_md ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4210-        ShowWindow(ui->markdown_toggle, markdown ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4211-        SetWindowTextW(ui->markdown_toggle, preview_md ? L"Source" : L"Preview");
+scyllagpt/src/ui/window.cpp-4212-        if (!has_doc) {
+scyllagpt/src/ui/window.cpp:4213:            MoveWindow(ui->empty_editor, cx, body_y, ww, body_h, TRUE);
+scyllagpt/src/ui/window.cpp-4214-            // Same stack as paint_empty_editor — center in viewport on every resize.
+scyllagpt/src/ui/window.cpp-4215-            const int mark_h = dip(ui->wnd, 12);
+scyllagpt/src/ui/window.cpp-4216-            const int mark_gap = dip(ui->wnd, 12);
+scyllagpt/src/ui/window.cpp-4217-            const int title_h = dip(ui->wnd, 28);
+scyllagpt/src/ui/window.cpp-4218-            const int title_gap = dip(ui->wnd, 8);
+scyllagpt/src/ui/window.cpp-4219-            const int sub_h = dip(ui->wnd, 20);
+scyllagpt/src/ui/window.cpp-4220-            const int sub_to_btn = dip(ui->wnd, 16);
+scyllagpt/src/ui/window.cpp-4221-            const int content_h = mark_h + mark_gap + title_h + title_gap + sub_h + sub_to_btn + btnh;
+scyllagpt/src/ui/window.cpp-4222-            const int y0 = body_y + (std::max)(0, (body_h - content_h) / 2);
+scyllagpt/src/ui/window.cpp-4223-            const int btn_y = y0 + mark_h + mark_gap + title_h + title_gap + sub_h + sub_to_btn;
+scyllagpt/src/ui/window.cpp-4224-            const int mid_x = cx + ww / 2;
+scyllagpt/src/ui/window.cpp:4225:            MoveWindow(ui->empty_open_file, mid_x - dip(ui->wnd, 128), btn_y, dip(ui->wnd, 120), btnh, TRUE);
+scyllagpt/src/ui/window.cpp:4226:            MoveWindow(ui->empty_open_folder, mid_x + dip(ui->wnd, 8), btn_y, dip(ui->wnd, 120), btnh, TRUE);
+scyllagpt/src/ui/window.cpp-4227-            cx += ww;
+scyllagpt/src/ui/window.cpp-4228-            return;
+scyllagpt/src/ui/window.cpp-4229-        }
+scyllagpt/src/ui/window.cpp-4230-        const int tab_h = 0; // Tabs now occupy the main window chrome.
+scyllagpt/src/ui/window.cpp-4231-        const int crumb = dip(ui->wnd, 32);
+scyllagpt/src/ui/window.cpp-4232-        const int status_w = dip(ui->wnd, 280);
+scyllagpt/src/ui/window.cpp-4233-        const int trail = btnh * 2 + 8 + (markdown ? dip(ui->wnd, 80) : 0);
+scyllagpt/src/ui/window.cpp:4234:        MoveWindow(ui->markdown_toggle, cx + ww - btnh * 2 - 8 - dip(ui->wnd, 80), body_y + (crumb - btnh) / 2, dip(ui->wnd, 76), btnh, TRUE);
+scyllagpt/src/ui/window.cpp:4235:        MoveWindow(ui->find_toggle, cx + ww - btnh * 2 - 8, body_y + (crumb - btnh) / 2, btnh, btnh, TRUE);
+scyllagpt/src/ui/window.cpp:4236:        MoveWindow(ui->save, cx + ww - btnh, body_y + (crumb - btnh) / 2, btnh, btnh, TRUE);
+scyllagpt/src/ui/window.cpp-4237-        if (ui->find_open) {
+scyllagpt/src/ui/window.cpp-4238-            const int find_w = dip(ui->wnd, 180);
+scyllagpt/src/ui/window.cpp-4239-            const int crumb_w = ww - trail - pad * 2 - find_w - status_w - 16;
+scyllagpt/src/ui/window.cpp:4240:            MoveWindow(ui->hdr_editor, cx + pad, body_y + tab_h, (std::max)(dip(ui->wnd, 80), crumb_w), crumb, TRUE);
+scyllagpt/src/ui/window.cpp:4241:            MoveWindow(ui->find, cx + ww - trail - pad - find_w - status_w - 8, body_y + tab_h + (crumb - filter_h) / 2, find_w,
+scyllagpt/src/ui/window.cpp-4242-                       filter_h, TRUE);
+scyllagpt/src/ui/window.cpp-4243-            center_single_line_edit(ui->find, ui->font);
+scyllagpt/src/ui/window.cpp:4244:            MoveWindow(ui->editor_status, cx + ww - trail - pad - status_w, body_y + tab_h, status_w, crumb, TRUE);
+scyllagpt/src/ui/window.cpp-4245-        } else {
+scyllagpt/src/ui/window.cpp:4246:            MoveWindow(ui->hdr_editor, cx + pad, body_y + tab_h, (std::max)(dip(ui->wnd, 60), ww - trail - pad * 2 - status_w - 8), crumb, TRUE);
+scyllagpt/src/ui/window.cpp:4247:            MoveWindow(ui->editor_status, cx + ww - trail - pad - status_w, body_y + tab_h, status_w, crumb, TRUE);
+scyllagpt/src/ui/window.cpp-4248-        }
+scyllagpt/src/ui/window.cpp:4249:        MoveWindow(ui->editor, cx, body_y + tab_h + crumb, ww, body_h - tab_h - crumb, TRUE);
+scyllagpt/src/ui/window.cpp:4250:        MoveWindow(ui->markdown_view, cx, body_y + tab_h + crumb, ww, body_h - tab_h - crumb, TRUE);
+scyllagpt/src/ui/window.cpp-4251-        cx += ww;
+scyllagpt/src/ui/window.cpp-4252-    };
+scyllagpt/src/ui/window.cpp-4253-    auto hide_editor = [&]() {
+scyllagpt/src/ui/window.cpp-4254-        ShowWindow(ui->hdr_editor, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4255-        ShowWindow(ui->tabs, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4256-        ShowWindow(ui->find, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4257-        ShowWindow(ui->find_toggle, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4258-        ShowWindow(ui->save, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4259-        ShowWindow(ui->gutter, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4260-        ShowWindow(ui->editor_status, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4261-        ShowWindow(ui->editor, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4262-        ShowWindow(ui->markdown_view, SW_HIDE);
+--
+scyllagpt/src/ui/window.cpp-4275-    };
+scyllagpt/src/ui/window.cpp-4276-    auto place_agent = [&](int ww) {
+scyllagpt/src/ui/window.cpp-4277-        ShowWindow(ui->hdr_agent, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4278-        ShowWindow(ui->chat_tabs, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4279-        ShowWindow(ui->neu, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4280-        ShowWindow(ui->agent_hint, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4281-        ShowWindow(ui->ctx, ui->session.context_chips.empty() ? SW_HIDE : SW_SHOW);
+scyllagpt/src/ui/window.cpp-4282-        ShowWindow(ui->composer, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4283-        ShowWindow(ui->add_file, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4284-        ShowWindow(ui->workflow, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4285-        ShowWindow(ui->send, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4286-        ShowWindow(ui->cancel, SW_HIDE);
+scyllagpt/src/ui/window.cpp:4287:        MoveWindow(ui->chat_tabs, cx + pad, body_y, ww - pad - btnh - 8, hdr, TRUE);
+scyllagpt/src/ui/window.cpp:4288:        MoveWindow(ui->neu, cx + ww - pad - btnh, body_y + (hdr - btnh) / 2, btnh, btnh, TRUE);
+scyllagpt/src/ui/window.cpp-4289-        const int chip_h = ui->session.context_chips.empty() ? 0 : dip(ui->wnd, 26);
+scyllagpt/src/ui/window.cpp-4290-        if (chip_h) {
+scyllagpt/src/ui/window.cpp:4291:            MoveWindow(ui->ctx, cx + pad, body_y + hdr, ww - pad * 2, chip_h, TRUE);
+scyllagpt/src/ui/window.cpp-4292-        }
+scyllagpt/src/ui/window.cpp-4293-        const int activity_h = ui->session.activity.visible ? dip(ui->wnd, 96) : 0;
+scyllagpt/src/ui/window.cpp-4294-        const int trans_h = body_h - hdr - chip_h - composer - activity_h;
+scyllagpt/src/ui/window.cpp-4295-        const int ty = body_y + hdr + chip_h;
+scyllagpt/src/ui/window.cpp-4296-        const bool empty = chat_log_empty(ui->chat_log);
+scyllagpt/src/ui/window.cpp-4297-        ShowWindow(ui->transcript, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4298-        ShowWindow(ui->chat_log, empty ? SW_HIDE : SW_SHOW);
+scyllagpt/src/ui/window.cpp-4299-        ShowWindow(ui->empty_agent, empty ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4300-        // The chat log applies its own grid padding internally; a second inset here made the
+scyllagpt/src/ui/window.cpp-4301-        // gutters disagree with every other pane.
+scyllagpt/src/ui/window.cpp:4302:        MoveWindow(ui->chat_log, cx, ty, ww, std::max(dip(ui->wnd, 80), trans_h), TRUE);
+scyllagpt/src/ui/window.cpp:4303:        MoveWindow(ui->empty_agent, cx, ty, ww, std::max(dip(ui->wnd, 80), trans_h), TRUE);
+scyllagpt/src/ui/window.cpp-4304-        const int activity_y = ty + std::max(dip(ui->wnd, 80), trans_h);
+scyllagpt/src/ui/window.cpp-4305-        ShowWindow(ui->activity, activity_h ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp:4306:        MoveWindow(ui->activity, cx + pad, activity_y, ww - pad * 2, activity_h, TRUE);
+scyllagpt/src/ui/window.cpp-4307-        const int cy = activity_y + activity_h;
+scyllagpt/src/ui/window.cpp-4308-        const int box_pad = pad;
+scyllagpt/src/ui/window.cpp-4309-        ui->composer_box = {cx + box_pad, cy + 4, cx + ww - box_pad, cy + composer - 8};
+scyllagpt/src/ui/window.cpp-4310-        const RECT& box = ui->composer_box;
+scyllagpt/src/ui/window.cpp:4311:        MoveWindow(ui->composer_panel, box.left, box.top, box.right - box.left, box.bottom - box.top, TRUE);
+scyllagpt/src/ui/window.cpp-4312-        ShowWindow(ui->composer_panel, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4313-        SetWindowPos(ui->composer_panel, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+scyllagpt/src/ui/window.cpp-4314-        const int inner = dip(ui->wnd, 12);
+scyllagpt/src/ui/window.cpp-4315-        const int foot = dip(ui->wnd, 32);
+scyllagpt/src/ui/window.cpp-4316-        const int send_s = dip(ui->wnd, 28);
+scyllagpt/src/ui/window.cpp-4317-        const int thumb_h = ui->images.empty() ? 0 : dip(ui->wnd, 56);
+scyllagpt/src/ui/window.cpp-4318-        ui->thumb_row = {box.left + inner, box.top + dip(ui->wnd, 6), box.right - inner,
+scyllagpt/src/ui/window.cpp-4319-                         box.top + dip(ui->wnd, 6) + (thumb_h ? dip(ui->wnd, 48) : 0)};
+scyllagpt/src/ui/window.cpp-4320-        const int text_top = box.top + (thumb_h ? thumb_h : dip(ui->wnd, 8));
+scyllagpt/src/ui/window.cpp-4321-        const int text_h = (box.bottom - foot) - text_top - 4;
+scyllagpt/src/ui/window.cpp:4322:        MoveWindow(ui->composer, box.left + inner, text_top, (box.right - box.left) - inner * 2,
+scyllagpt/src/ui/window.cpp-4323-                   std::max(dip(ui->wnd, 36), text_h), TRUE);
+scyllagpt/src/ui/window.cpp:4324:        MoveWindow(ui->composer_cue, box.left + inner + 4, text_top + 2, dip(ui->wnd, 320), dip(ui->wnd, 20), TRUE);
+scyllagpt/src/ui/window.cpp:4325:        MoveWindow(ui->workflow, box.left + inner, box.bottom - foot, dip(ui->wnd, 100), dip(ui->wnd, 26), TRUE);
+scyllagpt/src/ui/window.cpp:4326:        MoveWindow(ui->send, box.right - inner - send_s, box.bottom - foot - 2, send_s, send_s, TRUE);
+scyllagpt/src/ui/window.cpp-4327-        const bool cue = get_window_text(ui->composer).empty();
+scyllagpt/src/ui/window.cpp-4328-        ShowWindow(ui->composer_cue, cue ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4329-        cx += ww;
+scyllagpt/src/ui/window.cpp-4330-    };
+scyllagpt/src/ui/window.cpp-4331-    auto hide_agent = [&]() {
+scyllagpt/src/ui/window.cpp-4332-        ShowWindow(ui->hdr_agent, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4333-        ShowWindow(ui->chat_tabs, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4334-        ShowWindow(ui->neu, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4335-        ShowWindow(ui->agent_hint, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4336-        ShowWindow(ui->add_file, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4337-        ShowWindow(ui->workflow, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4338-        ShowWindow(ui->ctx, SW_HIDE);
+--
+scyllagpt/src/ui/window.cpp-4346-        ShowWindow(ui->cancel, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4347-        ShowWindow(ui->empty_agent, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4348-        ui->composer_box = {};
+scyllagpt/src/ui/window.cpp-4349-    };
+scyllagpt/src/ui/window.cpp-4350-    auto place_history = [&](int ww) {
+scyllagpt/src/ui/window.cpp-4351-        ShowWindow(ui->hdr_history, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4352-        ShowWindow(ui->scope, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4353-        ShowWindow(ui->search, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4354-        ShowWindow(ui->pin, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4355-        ShowWindow(ui->archive, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4356-        ShowWindow(ui->threads, SW_SHOW);
+scyllagpt/src/ui/window.cpp-4357-        const int breath = dip(ui->wnd, 5);
+scyllagpt/src/ui/window.cpp:4358:        MoveWindow(ui->search, cx + breath, body_y + breath, ww - breath * 2, filter_h, TRUE);
+scyllagpt/src/ui/window.cpp-4359-        center_single_line_edit(ui->search, ui->font);
+scyllagpt/src/ui/window.cpp-4360-        const int list_y = body_y + breath + filter_h + breath;
+scyllagpt/src/ui/window.cpp:4361:        MoveWindow(ui->threads, cx + breath, list_y, ww - breath * 2, body_h - (list_y - body_y) - breath, TRUE);
+scyllagpt/src/ui/window.cpp:4362:        MoveWindow(ui->empty_chats, cx + breath, list_y, ww - breath * 2, body_h - (list_y - body_y) - breath, TRUE);
+scyllagpt/src/ui/window.cpp-4363-        ShowWindow(ui->empty_chats, ui->thread_ids.empty() ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4364-        cx += ww;
+scyllagpt/src/ui/window.cpp-4365-    };
+scyllagpt/src/ui/window.cpp-4366-    auto hide_history = [&]() {
+scyllagpt/src/ui/window.cpp-4367-        ShowWindow(ui->hdr_history, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4368-        ShowWindow(ui->scope, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4369-        ShowWindow(ui->search, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4370-        ShowWindow(ui->pin, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4371-        ShowWindow(ui->archive, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4372-        ShowWindow(ui->threads, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4373-        ShowWindow(ui->empty_chats, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4374-    };
+--
+scyllagpt/src/ui/window.cpp-4430-        ui->workbench_panel.set_visible(false);
+scyllagpt/src/ui/window.cpp-4431-        ui->terminal_sessions.set_panel_visible(false);
+scyllagpt/src/ui/window.cpp-4432-    }
+scyllagpt/src/ui/window.cpp-4433-
+scyllagpt/src/ui/window.cpp-4434-    // Status strip: message text on the left, clickable Environment chip pinned right. The chip
+scyllagpt/src/ui/window.cpp-4435-    // only exists while a project is open, since the environment is per project.
+scyllagpt/src/ui/window.cpp-4436-    int status_w = w - pad * 2;
+scyllagpt/src/ui/window.cpp-4437-    if (ui->status_env) {
+scyllagpt/src/ui/window.cpp-4438-        const bool show_env = !ui->session.store.active_project_id.empty();
+scyllagpt/src/ui/window.cpp-4439-        ShowWindow(ui->status_env, show_env ? SW_SHOW : SW_HIDE);
+scyllagpt/src/ui/window.cpp-4440-        if (show_env) {
+scyllagpt/src/ui/window.cpp-4441-            const int env_w = dip(ui->wnd, 168);
+scyllagpt/src/ui/window.cpp:4442:            MoveWindow(ui->status_env, w - pad - env_w, h - st + 2, env_w, st - 4, TRUE);
+scyllagpt/src/ui/window.cpp-4443-            status_w -= env_w + dip(ui->wnd, 8);
+scyllagpt/src/ui/window.cpp-4444-        }
+scyllagpt/src/ui/window.cpp-4445-    }
+scyllagpt/src/ui/window.cpp:4446:    MoveWindow(ui->status, pad, h - st + 2, (std::max)(1, status_w), st - 4, TRUE);
+scyllagpt/src/ui/window.cpp-4447-    ShowWindow(ui->homehint, SW_HIDE);
+scyllagpt/src/ui/window.cpp-4448-    // Never RDW_UPDATENOW here: sync paint while a panel BUTTON is still in BN_CLICKED (or a
+scyllagpt/src/ui/window.cpp-4449-    // session-tab LBUTTONUP still on the stack) has crashed after hosts were parented under content_.
+scyllagpt/src/ui/window.cpp-4450-    RedrawWindow(ui->wnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+scyllagpt/src/ui/window.cpp-4451-    refresh_thin_scrollbar(ui->tree);
+scyllagpt/src/ui/window.cpp-4452-    refresh_thin_scrollbar(ui->threads);
+scyllagpt/src/ui/window.cpp-4453-    refresh_thin_scrollbar(ui->ctx);
+scyllagpt/src/ui/window.cpp-4454-    refresh_thin_scrollbar(ui->editor);
+scyllagpt/src/ui/window.cpp-4455-    refresh_thin_scrollbar(ui->composer);
+scyllagpt/src/ui/window.cpp-4456-}
+scyllagpt/src/ui/window.cpp-4457-
+scyllagpt/src/ui/window.cpp-4458-void refresh_models(Ui* ui) {

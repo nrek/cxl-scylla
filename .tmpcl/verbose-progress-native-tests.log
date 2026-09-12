@@ -1,0 +1,707 @@
+ok   completed Plan saves Knowledge artifact
+ok   plan registered for originating project
+ok   Ask does not save a plan
+ok   interrupted Plan does not save partial artifact
+ok   Plan and Ask leave project files unchanged
+ok   discovery modes cannot escalate writes
+ok   discovery overrides remove writable roots and network
+ok   discovery modes cannot escalate writes
+ok   discovery overrides remove writable roots and network
+ok   Execute preserves project sandbox grants
+ok   unknown modes rejected
+ok   object parse
+ok   numeric id 0
+ok   dump
+ok   trailing data rejected
+ok   split: incomplete first chunk
+ok   split: second chunk
+ok   two complete lines
+ok   first line
+ok   second line
+ok   combined lines
+ok   unicode escape
+ok   approval decline payload
+ok   no-grant lockdown is read-only
+ok   lockdown disables web_search
+ok   lockdown disables shell_tool
+ok   lockdown disables apps
+ok   lockdown disables remote_plugin
+ok   lockdown disables hooks
+ok   lockdown file_opener none
+ok   lockdown no AGENTS walk
+ok   lockdown on-request not never
+ok   lockdown empty notify
+ok   lockdown shell env inherit none
+ok   lockdown has no computer-use helper
+ok   grant lockdown is workspace-write
+ok   grant lockdown enables shell for browse/search
+ok   cli disable apps
+ok   cli disable shell when no grant
+ok   cli allows shell when grant
+ok   cli still disables apps with grant
+ok   1600 four panes
+ok   1600 mins
+ok   1200 history collapsed
+ok   1000 editor+agent
+ok   focus editor hides sides
+ok   cpp lexer kinds
+ok   cpp path detect
+ok   breadcrumbs
+ok   ts via cpp lexer id
+ok   python lang
+ok   dockerfile lang
+ok   plaintext null
+ok   indent spaces 2
+ok   indent tabs
+ok   same folder same uuid
+ok   same leaf name different dirs
+ok   snapshot unsaved label
+ok   snapshot body
+ok   empty chips empty snapshot
+ok   create roundtrip file
+ok   load crlf as lf
+ok   buffer is lf
+ok   save same hash
+ok   disk still crlf
+ok   save conflict when disk hash moved
+ok   shell app_bg
+ok   app_bg aliases shell
+ok   editor and agent share work surface
+ok   gutter matches editor canvas
+ok   amber identity
+ok   subtle border token
+ok   create v2 argon2 vault
+ok   vault file on disk
+ok   create refuses existing
+ok   open vault
+ok   unlock wrong passphrase fails
+ok   unlock good passphrase
+ok   format version 2
+ok   add global secret
+ok   add project A secret
+ok   add project B secret
+ok   list_refs all count
+ok   ui list global+A
+ok   project B filtered out of A ui list
+ok   list_refs empty while locked
+ok   add_secret requires unlock
+ok   authorize_use
+ok   build_authorized_env_block
+ok   env fragment contains secret once
+ok   authorization consumed
+ok   app vault path
+ok   legacy path under keyrings
+ok   update_description
+ok   should_autolock false when fresh
+ok   should_autolock false when locked
+ok   create seeded legacy v1
+ok   migrate seeded legacy vault
+ok   legacy removed after migrate
+ok   legacy archived .migrated
+ok   migrated secret visible in project scope
+ok   authorize migrated secret
+ok   migrated secret value via broker
+ok   create empty legacy
+ok   migrate bad passphrase
+ok   legacy remains after failed migrate
+ok   no get_secret_value in public header
+ok   scoped deletion removes requested project value
+ok   scoped deletion preserves same name in another project
+ok   scoped deletion cannot fall back to another project
+ok   valid var name
+ok   invalid var name
+ok   add environment
+ok   active set on first add
+ok   add plain var
+ok   save environments
+ok   load environments
+ok   loaded env exists
+ok   loaded var count
+ok   create vault
+ok   open vault
+ok   unlock vault
+ok   add secret
+ok   add secret ref
+ok   human resolve ok
+ok   human includes protected
+ok   human entries
+ok   agent resolve ok
+ok   agent has no protected secrets
+ok   env block double-null terminated shape
+ok   detect inheritance cycle
+ok   normalize connection alias
+ok   valid connection alias
+ok   reject spaced connection alias
+ok   MongoDB connection metadata roundtrips without falling back to MySQL
+ok   settings serialization preserves credential references
+ok   add project connection
+ok   connection count
+ok   resolve project connection alias
+ok   alias remains project scoped
+ok   reject duplicate project alias
+ok   allow alias in different project
+ok   require pinned SSH host key
+ok   require an SSH password or key reference
+ok   password-only SSH credential is accepted
+ok   accept Keyring-referenced hosts, ports, and username
+ok   require an SSH host or a host reference
+ok   require an SSH username or a username reference
+ok   require a database host or a host reference
+ok   save project connections
+ok   load project connections
+ok   round-trip connection
+ok   round-trip secret reference
+ok   round-trip ssh key reference
+ok   round-trip ssh key passphrase reference
+ok   round-trip pinned host key
+ok   round-trip ssh host reference
+ok   round-trip ssh port reference
+ok   round-trip ssh username reference
+ok   round-trip database host reference
+ok   round-trip database port reference
+ok   connection stores references only
+ok   classify read query
+ok   classify modifying CTE
+ok   detect multiple statements outside literals
+ok   classify schema query
+ok   auto allow read query
+ok   ask for data modification
+ok   block statement batch
+ok   enforce result limits
+ok   hide rows for metadata-only results
+ok   broker test connection setup
+ok   broker keeps aliases project scoped
+ok   broker asks before schema change
+ok   broker requires unlocked keyring
+ok   untrusted request never reaches executor
+ok   cancel rejects unknown operation
+ok   SSH connection needs no database credentials
+ok   SSH defaults to requiring approval
+ok   SQL tool cannot execute an SSH connection
+ok   SSH requires an unlocked keyring even with automatic permission
+ok   executor failure reaches broker response
+ok   broker preserves sanitized executor diagnostic
+ok   locked keyring prepares nothing
+ok   refused prepare carries no credentials
+ok   finish preserves the prepare failure
+ok   second refused finish preserves status
+ok   finish of an unready operation never executes
+ok   operation id is released after a refused prepare
+ok   credential lookup by name
+ok   unknown credential returns empty
+ok   wiped credentials are unreadable
+ok   parse tool arguments
+ok   tool arguments carry alias and sql
+ok   reject tool call without sql
+ok   reject oversize sql
+ok   decode broker request
+ok   broker request round-trip
+ok   reject malformed request
+ok   reject unsupported protocol version
+ok   tool result names the refusal
+ok   tool result forbids fabricating rows
+ok   successful tool result carries rows
+ok   unreadable broker response fails loudly
+ok   plan a remote-execution command
+ok   password never reaches argv
+ok   private key never reaches argv
+ok   database username never reaches argv
+ok   sql never reaches argv
+ok   stdin carries username, password, then sql in order
+ok   plan carries the key for the caller to stage
+ok   non-default port is bracketed in known_hosts
+ok   host key checking stays on
+ok   ssh never prompts
+ok   password auth is refused
+ok   agent identities are ignored
+ok   known_hosts path is passed
+ok   an unencrypted key needs no askpass
+ok   plan resolves hosts and ports from the Keyring
+ok   referenced ssh host and user resolve
+ok   referenced ssh port resolves
+ok   referenced database host resolves
+ok   referenced database port resolves
+ok   known_hosts uses the resolved host
+ok   an unresolved host reference fails closed
+ok   a non-numeric port reference fails closed
+ok   refuse a host carrying shell metacharacters
+ok   accept a passphrase-protected key
+ok   a passphrase-protected key requests askpass
+ok   plan carries the passphrase for askpass
+ok   passphrase never reaches argv
+ok   BatchMode is omitted so askpass can supply the key passphrase
+ok   password prompts stay disabled without BatchMode
+ok   encrypted keys remain pinned to the staged identity
+ok   an unresolved passphrase reference fails closed
+ok   default port is not bracketed
+ok   refuse an unpinned host
+ok   refuse ssh password authentication
+ok   refuse a direct route
+ok   refuse an unimplemented engine
+ok   refuse when credentials are unresolved
+ok   parse batch result set
+ok   row count excludes the header
+ok   columns parsed
+ok   rows parsed
+ok   parse batch nulls
+ok   \N becomes json null
+ok   parse escapes
+ok   escaped newline is unescaped into the value
+ok   empty output is a success
+ok   empty output yields no rows
+ok   recognizable errors are kept
+ok   stderr carrying a value is suppressed
+ok   unknown errors get a generic message
+ok   host key failure is surfaced
+ok   later-line OpenSSH diagnostics are surfaced
+ok   key load failures are surfaced
+ok   fake-backed execution succeeds
+ok   fake-backed execution returns rows
+ok   runner receives the password on stdin
+ok   spawned argv holds no password
+ok   askpass execution succeeds
+ok   encrypted key requires only the ssh query process
+ok   askpass is attached to ssh
+ok   passphrase stays out of ssh argv
+ok   askpass ssh spawn omits BatchMode
+ok   ssh is pointed at an askpass program
+ok   askpass is forced so no console prompt can appear
+ok   the passphrase travels only in the ssh process environment
+ok   initialize is answered
+ok   initialize names the broker server
+ok   initialize advertises tools
+ok   notifications get no reply
+ok   malformed json is a parse error
+ok   unknown method is rejected
+ok   query and SSH tools are exposed
+ok   SSH has a separate tool
+ok   SSH operation type survives pipe serialization
+ok   SSH tool forwards alias and command without SQL interpretation
+ok   the tool is scylla_query
+ok   tool schema takes alias and sql
+ok   tool schema exposes no credential surface
+ok   tool call reaches the broker with its alias
+ok   successful call is not an error
+ok   rows reach the agent
+ok   a refused query is an error result
+ok   refusal names the policy
+ok   refusal forbids fabrication
+ok   unreachable broker is an error
+ok   unreachable broker says the query did not run
+ok   unknown tool name is rejected
+ok   missing sql is a tool error
+ok   session token is 32 hex characters
+ok   session tokens do not repeat
+ok   broker pipe service starts
+ok   pipe name is derivable from the token alone
+ok   pipe round-trip returns a response
+ok   authorized call succeeds
+ok   handler received the sql
+ok   unauthorized call still gets a reply
+ok   wrong token is refused
+ok   refused call never reaches the handler
+ok   broker pipe service stops
+ok   stopped service accepts nothing
+ok   policy empty -> ask
+ok   policy ALLOW
+ok   policy block
+ok   policy junk -> ask
+ok   policy valid ask
+ok   policy invalid maybe
+ok   profile block overrides global allow
+ok   profile allow overrides global default
+ok   new profile inherits default
+ok   invalid profile policy fails closed to ask
+ok   cwd mode project
+ok   parse home
+ok   slug wsl id
+ok   parse wsl utf16
+ok   parse wsl utf8
+ok   resolve project cwd
+ok   resolve home cwd
+ok   resolve custom cwd
+ok   known cmd
+ok   known pwsh
+ok   unknown notepad
+ok   cmd profile enabled
+ok   discover non-empty
+ok   discover includes cmd.exe
+ok   merge size
+ok   cmd stays enabled
+ok   pwsh disabled by prefs
+ok   enabled filter
+ok   default skips disabled preferred
+ok   default uses preferred
+ok   exact filename mentions precede substring matches and retain ambiguous paths
+ok   unknown filename does not resolve
+ok   Knowledge mention uses project-relative path
+ok   Project mention uses relative path
+ok   Cross-drive mention retains resolvable absolute path
+ok   provider cache returns immediately while authentication is blocked
+ok   in-flight provider probe keeps last snapshot
+ok   provider polling coalesces into one background probe
+ok   invalidated auth cannot restore stale signed-in state
+ok   single open project excludes unrelated chats even with legacy all-projects flag
+ok   peer projects union their histories without crossing accounts
+ok   provider cwd uses normalized root containment
+ok   similar project names do not match
+ok   unknown provider cwd excluded
+ok   knowledge grants include peer projects and exclude closed projects
+ok   knowledge projects derived from every open root
+ok   project handoff folder matches
+ok   peer blueprint matches
+ok   casual mention cannot import unrelated knowledge
+ok   explicit repo metadata supports blueprint aliases
+ok   knowledge rejects prefix collisions
+ok   prompt contains scoped blueprint and recent handoff contents
+ok   prompt excludes unrelated and stale files
+ok   no projects means no project history
+ok   cannot delete generating chat
+ok   busy deletion leaves chat intact
+ok   delete idle chat
+ok   active deleted chat clears transcript
+ok   deleted chat persists
+ok   deletion removes local content and keeps tombstone
+ok   deleted chat absent after reload
+ok   provider cannot restore deleted chat
+ok   deleted chat cannot reopen
+ok   failed persistence leaves chat intact
+ok   Unresolved environment directory recognized
+ok   Environment directory allows underscore
+ok   Ordinary directory names remain visible
+ok   Markdown styles, literal fenced code and local links
+ok   Markdown bullets and CRLF normalized without duplicate line breaks
+ok   Incomplete streaming markdown remains literal
+ok   Markdown link destination preserves balanced parentheses
+ok   chat history preserves pins then sorts newest first
+ok   agent title limited to four words
+ok   manual chat names protected
+ok   title metadata hidden
+ok   partial title metadata hidden
+ok   restored prompt hides runtime metadata
+ok   nested runtime headers unwrapped
+ok   runtime metadata accepts CRLF
+ok   ordinary user separators preserved
+ok   user body separators preserved
+ok   save chat history metadata
+ok   load chat history metadata
+ok   chat metadata roundtrip
+ok   chat today grouping
+ok   chat yesterday across year boundary
+ok   older chats dated
+ok   legacy unknown chat dates
+ok   add peer repository root
+ok   project retains multiple roots
+ok   save multi-root project
+ok   multi-root project roundtrip
+ok   primary project root cannot be removed
+ok   Strata discovery fixture source
+ok   Plan falls back from read-only Knowledge
+ok   Plan excludes human-only Knowledge
+ok   Mentions discover plans from another open project's Knowledge
+ok   Open-project mention scope preserves denied folders
+ok   Mentions find nested Knowledge files case-insensitively
+ok   Workflow manifest includes rules and skills
+ok   Agent catalog excludes unresolved environment directories
+ok   Workflow index excludes unrelated skill and rule descriptions
+ok   Workflow metadata cache invalidates on file changes
+ok   Unrelated project skill excluded even with keyword overlap
+ok   Backfill skill selected for relevant project and task
+ok   AlwaysApply cannot bypass task scope
+ok   Restored user text excludes prompt metadata and preserves embedded delimiters
+ok   User display attachment metadata roundtrip
+ok   Mentions exclude denied Knowledge subfolders
+ok   Mentions respect Knowledge project scope
+ok   Plan prefers writable agent Knowledge
+ok   Plan honors directory overrides
+FAIL Plan prefers established Knowledge plans folder
+ok   Ctrl+Enter submits
+ok   Shift+Enter does not submit
+ok   Enter does not submit
+ok   IME composition does not submit
+ok   Ctrl+Alt+Enter does not submit
+ok   Plan instructions include destination and lifecycle
+ok   scylla-query slash consumes
+ok   scylla-query slash leaves body
+ok   scylla-query prefix alone does not match
+ok   scylla-query slash is case-insensitive
+ok   skill says execution is unavailable when no tool is registered
+ok   skill forbids the unexecutable fenced block
+ok   skill forbids claiming submission
+ok   skill does not advertise a tool that is not registered
+ok   skill names the tool when it is registered
+ok   skill documents the alias argument
+ok   skill no longer asks for a per-call role map
+ok   skill forbids fabricated values
+ok   scylla-query skill forbids secret values
+ok   scylla-query skill documents bang keyring tokens
+ok   find /scylla-query span
+ok   querying is not a skill completion
+ok   /scy suggests /scylla-query
+ok   bang insert normalizes scylla_ prefix
+ok   bang insert keeps scylla_ prefix
+ok   !scy filters keyring names
+ok   !scy reaches hyphenated keyring names
+ok   !scylla_rds matches through the inserted prefix
+ok   bare fragment matches keyring name
+ok   unrelated fragment matches nothing
+ok   composer rests at 3 lines
+ok   composer grows with content
+ok   composer caps at 12 lines
+ok   @ quoted path span
+ok   @ basename span
+ok   detect bang keyring token
+ok   bang token instructions
+ok   latest inProgress turn id from thread payload
+ok   missing turns yields empty inProgress id
+ok   identical chat rows are reused
+ok   identical chat rows destroy nothing
+ok   a streaming delta only retexts the trailing row
+ok   a new message creates exactly one row
+ok   a shorter transcript destroys only the surplus rows
+ok   merge appends only unseen provider assistant messages
+ok   merge preserves local transcript order
+ok   unseen provider reply lands last
+ok   merge does not duplicate a known assistant message
+ok   merge ignores provider user messages
+ok   Strata discovers Knowledge subfolder databases breadth-first
+ok   Strata respects project scope
+ok   Knowledge index takes precedence over project fallback
+ok   Strata skips No Access subtrees
+ok   Strata skips disabled sources
+ok   Strata falls back when no Knowledge database exists
+ok   Direct .md grant resolves parent workspace
+ok   Discovery leaves database untouched
+ok   knowledge add_source
+ok   knowledge type
+ok   knowledge access rw
+ok   knowledge agent flag
+ok   knowledge alias
+ok   knowledge effective_writable
+ok   knowledge list project
+ok   knowledge list other empty
+ok   knowledge list scoped
+ok   knowledge add global skills
+ok   skills not writable by default
+ok   knowledge list includes global
+ok   knowledge other sees global only
+ok   drive root C:\
+ok   drive root D:
+ok   not drive root Temp
+ok   refuse drive root add
+ok   knowledge save
+ok   knowledge load
+ok   knowledge roundtrip count
+ok   knowledge roundtrip project_ids
+ok   knowledge roundtrip type
+ok   knowledge roundtrip access
+ok   knowledge roundtrip alias
+ok   knowledge roundtrip skills type
+ok   knowledge roundtrip skills access
+ok   knowledge roundtrip global empty pids
+ok   legacy write open
+ok   legacy load
+ok   legacy count
+ok   legacy writable->access
+ok   legacy project_id->project_ids
+ok   knowledge remove
+ok   knowledge after remove
+ok   knowledge removed id gone
+ok   override add_source
+ok   normalize slashes and trim
+ok   normalize collapse
+ok   normalize refuses traversal
+ok   normalize refuses absolute
+ok   normalize root is empty
+ok   effective root read_write
+ok   effective root not from override
+ok   set override read_only
+ok   set override no_access
+ok   override count
+ok   ancestor override read_only
+ok   ancestor override matched path
+ok   exact override no_access
+ok   no_access cascades to descendants
+ok   set sibling-prefix override
+ok   prefix override does not leak across segments
+ok   remove sibling-prefix override
+ok   set nested override
+ok   nearest override wins
+ok   inherit clears override
+ok   inherit falls back to ancestor
+ok   absolute path honours override
+ok   path outside root denied
+ok   unknown source denied
+ok   update root to read_only
+ok   overrides survive root change
+ok   root read_only cascades
+ok   override save
+ok   override load
+ok   override roundtrip count
+ok   override roundtrip count of overrides
+ok   override roundtrip no_access
+ok   override roundtrip read_only readable
+ok   agent paths add md
+ok   agent paths add other
+ok   agent paths add off
+ok   disable off source
+ok   agent paths add noagent
+ok   agent paths only enabled+available for proj-a
+ok   agent paths includes md root
+ok   agent paths for proj-b
+ok   agent paths empty for unknown project
+ok   health add real dir
+ok   enabled defaults true
+ok   health healthy for real dir
+ok   health add missing dir
+ok   health unavailable for missing dir
+ok   health set no_access
+ok   health partially accessible
+ok   health clear no_access
+ok   health back to healthy
+ok   refresh_all_health count
+ok   enabled listing before disable
+ok   set_enabled false
+ok   disabled health
+ok   settings listing still shows disabled
+FAIL mcp templates count
+ok   explorer listing hides disabled
+FAIL mcp template ids
+ok   source_for_path skips disabled
+ok   disabled resolves to no access
+ok   disabled never writable
+ok   set_enabled true
+ok   re-enabled reprobes health
+ok   source_for_path sees re-enabled
+ok   disable second source
+ok   enabled save
+ok   enabled load
+ok   enabled roundtrip true
+ok   enabled roundtrip false
+ok   disabled health on load
+ok   mcp runtime config server
+ok   mcp runtime config url
+ok   mcp runtime config bearer env
+ok   mcp runtime config contains no bearer token
+ok   mcp stdio command and arguments
+ok   mcp stdio environment
+ok   mcp from_template
+ok   mcp from_template connection_name
+ok   mcp from_template auth
+ok   mcp stdio template arguments and environment
+ok   mcp add stdio template
+ok   mcp add
+ok   mcp set_alias
+ok   mcp alias stored without @
+ok   mcp resolve_alias with @
+ok   mcp resolve_alias without @
+ok   mcp add second github account
+ok   mcp alias uniqueness
+ok   mcp alias uniqueness error
+ok   mcp set_alias with @ prefix
+ok   mcp alias_completions prefix
+ok   mcp mark_auth healthy
+ok   mcp last_checked_iso
+ok   mcp disconnect flag
+ok   mcp disconnect auth
+ok   mcp set_enabled false
+ok   mcp add scoped
+ok   mcp list project
+ok   mcp save
+ok   mcp load
+ok   mcp roundtrip count
+ok   mcp roundtrip resolve_alias
+ok   mcp roundtrip auth_state
+ok   mcp roundtrip connection_name
+ok   mcp roundtrip last_checked_iso
+ok   mcp roundtrip disconnect+disabled
+ok   mcp roundtrip stdio arguments and environment
+ok   mcp remove
+ok   strata default endpoint
+ok   strata health_check callable
+3 failed
+ok   bridge envelope parse ok
+ok   bridge envelope fields
+ok   bridge caps parse
+ok   bridge caps values
+ok   bridge error envelope
+ok   bridge error fields
+ok   bridge search parse
+ok   bridge search hits
+ok   bridge status parse
+ok   bridge status values
+ok   bridge recent flat parse
+ok   bridge recent flat items
+ok   bridge recent project parse
+ok   bridge recent dedupe by path
+ok   bridge get parse
+ok   bridge get values
+ok   bridge pending parse
+ok   bridge pending values
+ok   bridge pending zero parse
+ok   bridge pending zero values
+ok   preview passthrough
+ok   preview redacts inline key=value
+ok   preview redacts separated value
+ok   preview redacts stripe-style token
+ok   preview redacts key blocks
+ok   preview flattens whitespace
+ok   preview truncates
+ok   preview truncates on utf-8 boundary
+ok   bridge capabilities soft
+ok   paths appdata
+ok   paths knowledge
+ok   paths mcp
+ok   paths strata
+ok   base64url alphabet
+ok   base64url non-empty
+ok   pkce s256 rfc7636
+ok   www-auth parse
+ok   www-auth resource_metadata
+ok   www-auth scope
+ok   cred save
+ok   cred present
+ok   cred load
+ok   cred access
+ok   cred refresh
+ok   cred client_id
+ok   cred resource
+ok   cred clear
+ok   cred gone
+ok   parse allow
+ok   parse ask
+ok   parse block
+ok   parse is case sensitive -> fallback
+ok   parse empty -> fallback
+ok   mode to string
+ok   strict allows human terminals
+ok   strict blocks agent terminals
+ok   strict asks for approved recipes
+ok   strict recognises itself
+ok   modified policy is not strict
+ok   verbose progress defaults off
+ok   default Settings is strict
+ok   save settings with policy
+ok   verbose progress survives restart
+ok   save verbose progress off
+ok   verbose progress off survives restart
+ok   older settings default verbose progress off
+ok   round-trip human ask
+ok   round-trip agent ask
+ok   round-trip recipes block
+ok   round-trip leaves existing keys intact
+ok   legacy settings default to strict
+ok   unparsable human falls back to strict default
+ok   valid agent survives
+ok   empty recipes falls back to strict default
+ok   agent allow is clamped to block
+ok   coerce openai-api
+ok   coerce claude-api
+ok   coerce unknown -> openai
+ok   provider id openai-api
+ok   provider id claude-api
+ok   account missing enable => on
+ok   api missing enable => off
+ok   claude-api missing enable => off
+ok   api explicit enable => on
+ok   load default_provider openai-api

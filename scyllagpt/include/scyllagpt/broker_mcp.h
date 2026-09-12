@@ -1,8 +1,8 @@
 #pragma once
 
-// The agent-facing side of the broker: a minimal MCP server exposing exactly one tool.
+// The agent-facing side of the broker: query and SSH command tools.
 //
-// This runs in a *secret-free* helper process. It can name a connection alias and carry SQL, but it
+// This runs in a *secret-free* helper process. It can name an alias and carry SQL or a command, but it
 // holds no Keyring, no credentials, and no database or SSH configuration. Everything it learns comes
 // back from the Workbench over the broker pipe, already bounded by policy.
 

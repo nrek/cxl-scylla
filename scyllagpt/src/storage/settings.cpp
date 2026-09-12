@@ -1,5 +1,6 @@
 #include "scyllagpt/settings.h"
 
+#include "scyllagpt/file_io.h"
 #include "scyllagpt/utf.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -61,21 +62,10 @@ bool execution_policy_is_strict(const ExecutionPolicy& policy) {
 Settings load_settings(const std::wstring& path) {
     Settings s;
     s.drafts = Json::object();
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
+    std::string raw = read_file_bytes(path);
+    if (raw.empty()) {
         return s;
     }
-    LARGE_INTEGER sz{};
-    GetFileSizeEx(h, &sz);
-    if (sz.QuadPart <= 0 || sz.QuadPart > 4 * 1024 * 1024) {
-        CloseHandle(h);
-        return s;
-    }
-    std::string raw(static_cast<std::size_t>(sz.QuadPart), 0);
-    DWORD rd = 0;
-    ReadFile(h, raw.data(), static_cast<DWORD>(raw.size()), &rd, nullptr);
-    CloseHandle(h);
-    raw.resize(rd);
     std::string err;
     Json j = Json::parse(raw, &err);
     if (!err.empty() || !j.is_object()) {
@@ -86,16 +76,21 @@ Settings load_settings(const std::wstring& path) {
     s.last_thread_id = j.at("last_thread_id").as_string("");
     s.restore_chat_on_start = j.at("restore_chat_on_start").as_bool(true);
     s.project_folder = utf16(j.at("project_folder").as_string());
-    s.files_w = static_cast<int>(j.at("files_w").as_int(220));
+    for (const auto& item : j.at("pinned_tabs").array_items()) {
+        if (item.is_string()) s.pinned_tabs.push_back(utf16(item.as_string()));
+    }
+    s.files_w = static_cast<int>(j.at("files_w").as_int(300));
     const auto knowledge_h = j.at("knowledge_h").as_int(0);
     s.knowledge_h = knowledge_h > 0 && knowledge_h <= 10000 ? static_cast<int>(knowledge_h) : 0;
-    s.agent_w = static_cast<int>(j.at("agent_w").as_int(400));
-    s.history_w = static_cast<int>(j.at("history_w").as_int(232));
+    s.agent_w = static_cast<int>(j.at("agent_w").as_int(650));
+    s.history_w = static_cast<int>(j.at("history_w").as_int(300));
     s.files_mode = static_cast<int>(j.at("files_mode").as_int(0));
     s.history_mode = static_cast<int>(j.at("history_mode").as_int(0));
+    s.agent_mode = static_cast<int>(j.at("agent_mode").as_int(0));
     s.focus_editor = j.at("focus_editor").as_bool(false);
     s.default_provider = coerce_default_provider(j.at("default_provider").as_string("openai"));
     s.selected_model = j.at("selected_model").as_string("");
+    s.reasoning_effort = j.at("reasoning_effort").as_string("");
     s.model_enabled.clear();
     const Json& me = j.at("model_enabled");
     if (me.is_object()) {
@@ -118,6 +113,8 @@ Settings load_settings(const std::wstring& path) {
         }
     }
     s.word_wrap = j.at("word_wrap").as_bool(false);
+    s.show_minimap = j.at("show_minimap").as_bool(false);
+    s.verbose_agent_progress = j.at("verbose_agent_progress").as_bool(false);
     s.show_whitespace = j.at("show_whitespace").as_bool(false);
     s.terminal_h = static_cast<int>(j.at("terminal_h").as_int(220));
     if (s.terminal_h < 140) {
@@ -130,7 +127,7 @@ Settings load_settings(const std::wstring& path) {
     }
     s.default_terminal_profile_id = j.at("default_terminal_profile_id").as_string("");
     s.panel_surface = j.at("panel_surface").as_string("terminal");
-    if (s.panel_surface != "problems" && s.panel_surface != "output" && s.panel_surface != "ports") {
+    if (s.panel_surface != "payload" && s.panel_surface != "problems" && s.panel_surface != "output" && s.panel_surface != "ports") {
         s.panel_surface = "terminal";
     }
     // Missing / unparsable policy falls back to Strict rather than the loosest option.
@@ -152,6 +149,10 @@ Settings load_settings(const std::wstring& path) {
         s.execution_policy.agent_terminals = PolicyMode::Block;
     }
     s.terminal_profile_enabled.clear();
+    for (const auto& kv : j.at("terminal_profile_policy").object_items()) {
+        const auto value = kv.second.as_string("ask");
+        s.terminal_profile_policy[kv.first] = value == "allow" || value == "block" ? value : "ask";
+    }
     const Json& en = j.at("terminal_profile_enabled");
     if (en.is_object()) {
         for (const auto& kv : en.object_items()) {
@@ -159,13 +160,13 @@ Settings load_settings(const std::wstring& path) {
         }
     }
     if (s.files_w < 180) {
-        s.files_w = 220;
+        s.files_w = 300;
     }
-    if (s.agent_w < 320) {
-        s.agent_w = 400;
+    if (s.agent_w < 300) {
+        s.agent_w = 650;
     }
     if (s.history_w < 180) {
-        s.history_w = 232;
+        s.history_w = 300;
     }
     if (j.at("drafts").is_object()) {
         s.drafts = j.at("drafts");
@@ -188,15 +189,20 @@ bool save_settings(const std::wstring& path, const Settings& s) {
     j["last_thread_id"] = Json::string(s.last_thread_id);
     j["restore_chat_on_start"] = Json::boolean(s.restore_chat_on_start);
     j["project_folder"] = Json::string(utf8(s.project_folder));
+    Json pinned_tabs = Json::array();
+    for (const auto& item : s.pinned_tabs) pinned_tabs.push(Json::string(utf8(item)));
+    j["pinned_tabs"] = std::move(pinned_tabs);
     j["files_w"] = Json::number(s.files_w);
     j["knowledge_h"] = Json::number(s.knowledge_h);
     j["agent_w"] = Json::number(s.agent_w);
     j["history_w"] = Json::number(s.history_w);
     j["files_mode"] = Json::number(s.files_mode);
     j["history_mode"] = Json::number(s.history_mode);
+    j["agent_mode"] = Json::number(s.agent_mode);
     j["focus_editor"] = Json::boolean(s.focus_editor);
     j["default_provider"] = Json::string(s.default_provider);
     j["selected_model"] = Json::string(s.selected_model);
+    j["reasoning_effort"] = Json::string(s.reasoning_effort);
     {
         Json me = Json::object();
         for (const auto& kv : s.model_enabled) {
@@ -222,6 +228,8 @@ bool save_settings(const std::wstring& path, const Settings& s) {
         j["provider_default_model"] = std::move(pdm);
     }
     j["word_wrap"] = Json::boolean(s.word_wrap);
+    j["show_minimap"] = Json::boolean(s.show_minimap);
+    j["verbose_agent_progress"] = Json::boolean(s.verbose_agent_progress);
     j["show_whitespace"] = Json::boolean(s.show_whitespace);
     j["terminal_h"] = Json::number(s.terminal_h);
     j["terminal_visible"] = Json::boolean(s.terminal_visible);
@@ -238,6 +246,9 @@ bool save_settings(const std::wstring& path, const Settings& s) {
         en[kv.first] = Json::boolean(kv.second);
     }
     j["terminal_profile_enabled"] = std::move(en);
+    Json terminal_policies = Json::object();
+    for (const auto& [id, policy] : s.terminal_profile_policy) terminal_policies[id] = Json::string(policy);
+    j["terminal_profile_policy"] = std::move(terminal_policies);
     j["drafts"] = s.drafts.is_object() ? s.drafts : Json::object();
     Json w = Json::object();
     w["x"] = Json::number(s.window.x);
@@ -247,14 +258,7 @@ bool save_settings(const std::wstring& path, const Settings& s) {
     w["maximized"] = Json::boolean(s.window.maximized);
     j["window"] = std::move(w);
     const std::string body = j.dump();
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    DWORD wr = 0;
-    const BOOL ok = WriteFile(h, body.data(), static_cast<DWORD>(body.size()), &wr, nullptr);
-    CloseHandle(h);
-    return ok != 0;
+    return write_file_bytes_atomic(path, body);
 }
 
 }  // namespace scyllagpt

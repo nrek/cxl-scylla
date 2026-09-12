@@ -41,6 +41,11 @@ enum StrataSettingsCtrlId : int {
     Id_StrataPublish,
     Id_StrataPull,
     Id_StrataSearchButton,
+    Id_StrataEnabled,
+    Id_StrataMode,
+    Id_StrataApiKeyLabel,
+    Id_StrataApiKey,
+    Id_StrataVerify,
 };
 
 class StrataSettingsUi {
@@ -101,7 +106,7 @@ class StrataSettingsUi {
                 project_,      test_btn_, open_btn_,    refresh_btn_,     recent_btn_,   save_binding_btn_,
                 search_label_, search_,   results_,     detail_,          hint_,         diag_,
                 remote_label_, remote_,   save_remote_, source_,          projects_btn_, open_doc_,
-                close_doc_,    publish_,  pull_,        search_btn_};
+                close_doc_,    publish_,  pull_,        search_btn_, enabled_, mode_, api_key_label_, api_key_, verify_};
     }
 
     void apply_fonts();
@@ -139,6 +144,7 @@ class StrataSettingsUi {
     HWND remote_label_ = nullptr, remote_ = nullptr, save_remote_ = nullptr, source_ = nullptr;
     HWND projects_btn_ = nullptr, open_doc_ = nullptr, close_doc_ = nullptr;
     HWND publish_ = nullptr, pull_ = nullptr, search_btn_ = nullptr;
+    HWND enabled_ = nullptr, mode_ = nullptr, api_key_label_ = nullptr, api_key_ = nullptr, verify_ = nullptr;
     RECT content_{};
     std::future<Json> pending_;
     std::string pending_op_, pending_workspace_;

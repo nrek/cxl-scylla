@@ -1,0 +1,79 @@
+ok   base64url alphabet
+ok   base64url non-empty
+ok   pkce s256 rfc7636
+ok   www-auth parse
+ok   www-auth resource_metadata
+ok   www-auth scope
+ok   cred save
+ok   cred present
+ok   cred load
+ok   cred access
+ok   cred refresh
+ok   cred client_id
+ok   cred resource
+ok   cred clear
+ok   cred gone
+PASS no implicit OAuth grant
+PASS provider offers scope choices
+PASS no forced read-only endpoint
+PASS save selected scopes
+PASS reload selected scopes
+PASS all selected scopes survive roundtrip
+PASS authentication history survives roundtrip
+PASS project filtering preserves isolation
+PASS disconnect marks stale
+PASS no implicit OAuth grant
+PASS provider offers scope choices
+PASS no forced read-only endpoint
+PASS save selected scopes
+PASS reload selected scopes
+PASS all selected scopes survive roundtrip
+PASS authentication history survives roundtrip
+PASS project filtering preserves isolation
+PASS disconnect marks stale
+PASS no implicit OAuth grant
+PASS provider offers scope choices
+PASS no forced read-only endpoint
+PASS save selected scopes
+PASS reload selected scopes
+PASS all selected scopes survive roundtrip
+PASS authentication history survives roundtrip
+PASS project filtering preserves isolation
+PASS disconnect marks stale
+PASS no implicit OAuth grant
+PASS provider offers scope choices
+PASS no forced read-only endpoint
+PASS save selected scopes
+PASS reload selected scopes
+PASS all selected scopes survive roundtrip
+PASS authentication history survives roundtrip
+PASS project filtering preserves isolation
+PASS disconnect marks stale
+PASS no implicit OAuth grant
+PASS provider offers scope choices
+PASS no forced read-only endpoint
+PASS save selected scopes
+PASS reload selected scopes
+PASS all selected scopes survive roundtrip
+PASS authentication history survives roundtrip
+PASS project filtering preserves isolation
+PASS disconnect marks stale
+PASS no implicit OAuth grant
+PASS provider offers scope choices
+PASS no forced read-only endpoint
+PASS save selected scopes
+PASS reload selected scopes
+PASS all selected scopes survive roundtrip
+PASS authentication history survives roundtrip
+PASS project filtering preserves isolation
+PASS disconnect marks stale
+PASS no implicit OAuth grant
+PASS provider offers scope choices
+PASS no forced read-only endpoint
+PASS save selected scopes
+PASS reload selected scopes
+PASS all selected scopes survive roundtrip
+PASS authentication history survives roundtrip
+PASS project filtering preserves isolation
+PASS disconnect marks stale
+0 failed

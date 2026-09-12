@@ -1,4 +1,9 @@
 #include "scyllagpt/ssh_query_executor.h"
+#include "scyllagpt/ssh_terminal_script.h"
+#include "scyllagpt/terminal_profiles.h"
+#include "scyllagpt/settings.h"
+#include <shellapi.h>
+#include <thread>
 
 #include "scyllagpt/json.h"
 #include "scyllagpt/paths.h"
@@ -125,10 +130,29 @@ Json json_string_array(const std::vector<std::string>& raw_fields) {
 }
 
 bool write_private_file(const std::wstring& path, std::string_view body) {
-    // D:P — protected DACL (no inheritance); full access to the owner only.
+    // Windows OpenSSH rejects the generic OWNER RIGHTS SID (S-1-3-4) even when it resolves to the
+    // file owner. Build the protected DACL with the current user's concrete SID instead, matching
+    // the ACL shape accepted for keys under %USERPROFILE%\.ssh.
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+    DWORD token_bytes = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &token_bytes);
+    std::vector<BYTE> token_info(token_bytes);
+    if (token_bytes == 0 ||
+        !GetTokenInformation(token, TokenUser, token_info.data(), token_bytes, &token_bytes)) {
+        CloseHandle(token);
+        return false;
+    }
+    CloseHandle(token);
+    const auto* token_user = reinterpret_cast<const TOKEN_USER*>(token_info.data());
+    LPWSTR sid_text = nullptr;
+    if (!ConvertSidToStringSidW(token_user->User.Sid, &sid_text)) return false;
+    const std::wstring sddl = L"D:P(A;;FA;;;" + std::wstring(sid_text) + L")";
+    LocalFree(sid_text);
+
     PSECURITY_DESCRIPTOR descriptor = nullptr;
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;FA;;;OW)", SDDL_REVISION_1,
-                                                             &descriptor, nullptr)) {
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1,
+                                                              &descriptor, nullptr)) {
         return false;
     }
     SECURITY_ATTRIBUTES attributes{};
@@ -232,6 +256,12 @@ std::vector<std::pair<std::wstring, std::wstring>> askpass_environment(const std
     std::wstring self(MAX_PATH, L'\0');
     const DWORD length = GetModuleFileNameW(nullptr, self.data(), static_cast<DWORD>(self.size()));
     self.resize(length);
+    // Fluent has no askpass process mode. The native helper is deployed alongside it.
+    const auto slash = self.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) {
+        const auto helper = self.substr(0, slash + 1) + L"scylla-broker.exe";
+        if (file_exists(helper)) self = helper;
+    }
     return {
         {L"SSH_ASKPASS", self},
         {L"SSH_ASKPASS_REQUIRE", L"force"},
@@ -310,13 +340,6 @@ ProcessRunResult run_process(const ProcessRunRequest& request) {
     }
     result.spawned = true;
 
-    if (!request.stdin_text.empty()) {
-        DWORD written = 0;
-        WriteFile(in_write, request.stdin_text.data(), static_cast<DWORD>(request.stdin_text.size()),
-                  &written, nullptr);
-    }
-    close_handle(in_write);  // EOF so mysql stops reading SQL
-
     auto drain = [](HANDLE pipe, std::string& sink) {
         char buffer[4096];
         DWORD read = 0;
@@ -324,9 +347,19 @@ ProcessRunResult run_process(const ProcessRunRequest& request) {
             if (sink.size() < 16u * 1024u * 1024u) sink.append(buffer, read);
         }
     };
-    // stderr is small for these commands; read stdout first, then stderr, then wait.
-    drain(out_read, result.standard_output);
-    drain(err_read, result.standard_error);
+    // Drain both streams concurrently and apply the timeout while I/O is in progress.
+    std::thread stdout_reader([&] { drain(out_read, result.standard_output); });
+    std::thread stderr_reader([&] { drain(err_read, result.standard_error); });
+    std::thread input_writer([&] {
+        size_t offset = 0;
+        while (offset < request.stdin_text.size()) {
+            DWORD written = 0;
+            if (!WriteFile(in_write, request.stdin_text.data() + offset,
+                static_cast<DWORD>((std::min)(request.stdin_text.size() - offset, size_t{4096})), &written, nullptr) || !written) break;
+            offset += written;
+        }
+        close_handle(in_write);
+    });
 
     const DWORD timeout = request.timeout_ms == 0 ? INFINITE : request.timeout_ms;
     if (WaitForSingleObject(process.hProcess, timeout) == WAIT_TIMEOUT) {
@@ -334,6 +367,14 @@ ProcessRunResult run_process(const ProcessRunRequest& request) {
         TerminateProcess(process.hProcess, 1);
         WaitForSingleObject(process.hProcess, 5000);
     }
+    if (result.timed_out) {
+        CancelSynchronousIo(input_writer.native_handle());
+        CancelSynchronousIo(stdout_reader.native_handle());
+        CancelSynchronousIo(stderr_reader.native_handle());
+    }
+    input_writer.join();
+    stdout_reader.join();
+    stderr_reader.join();
     DWORD exit_code = 0;
     if (GetExitCodeProcess(process.hProcess, &exit_code)) result.exit_code = static_cast<int>(exit_code);
     CloseHandle(process.hThread);
@@ -646,6 +687,79 @@ int run_ssh_askpass_helper() {
 
 ConnectionResult SshQueryExecutor::execute(const TrustedExecutionContext& context) {
     ConnectionResult result;
+    if (context.connection.ssh_only) {
+        const auto paths = make_paths();
+        const auto settings = load_settings(paths.settings_path);
+        if (terminal_agent_policy(settings.terminal_profile_policy, context.connection.terminal_profile_id,
+            settings.agent_terminal_policy) != "allow") {
+            result.warning = "Agent terminal execution is not allowed by Terminal settings.";
+            return result;
+        }
+        const auto profiles = merge_terminal_profiles(discover_terminal_profiles(),
+            load_custom_terminal_profiles(paths.terminals_path), settings.terminal_profile_enabled);
+        const TerminalProfile* profile = nullptr;
+        for (const auto& candidate : profiles)
+            if (candidate.id == context.connection.terminal_profile_id && candidate.enabled) profile = &candidate;
+        if (!profile) { result.warning = "The selected terminal profile is unavailable or disabled."; return result; }
+        const auto slash = profile->executable.find_last_of(L"\\/");
+        if (_wcsicmp(profile->executable.substr(slash == std::wstring::npos ? 0 : slash + 1).c_str(), L"wsl.exe") != 0) {
+            result.warning = "SSH command connections currently require a WSL terminal profile."; return result;
+        }
+        ProcessRunRequest request;
+        request.executable = profile->executable;
+        int argc = 0;
+        auto argv = CommandLineToArgvW((L"wsl.exe " + profile->args).c_str(), &argc);
+        if (!argv) { result.warning = "Invalid WSL profile arguments."; return result; }
+        for (int i = 1; i < argc; ++i) request.arguments.push_back(argv[i]);
+        LocalFree(argv);
+        // Only a distribution selector is accepted; custom command/profile switches cannot
+        // redirect the secret-bearing stdin to a different program.
+        if (!request.arguments.empty() && !(request.arguments.size() == 2 &&
+            (request.arguments[0] == L"-d" || request.arguments[0] == L"--distribution"))) {
+            result.warning = "Use a WSL profile with only a distribution selector."; return result;
+        }
+        request.arguments.insert(request.arguments.end(), {L"--exec", L"python3", L"-c", utf16(kSshTerminalScript)});
+        const auto& ssh = context.connection.ssh;
+        auto value = [&](const std::string& ref, const std::string& literal) {
+            return ref.empty() ? literal : context.credentials.lookup(ref);
+        };
+        std::uint16_t port = ssh.port;
+        if (!ssh.port_ref.empty() && !parse_port(context.credentials.lookup(ssh.port_ref), &port)) {
+            result.warning = "Invalid SSH port reference."; return result;
+        }
+        auto payload = Json::object();
+        payload["host"] = Json::string(value(ssh.host_ref, ssh.host));
+        payload["user"] = Json::string(value(ssh.username_ref, ssh.username));
+        payload["port"] = Json::number(port);
+        payload["hostKey"] = Json::string(ssh.host_key);
+        payload["key"] = Json::string(context.credentials.lookup(ssh.private_key_ref));
+        payload["passphrase"] = Json::string(context.credentials.lookup(ssh.key_passphrase_ref));
+        payload["command"] = Json::string(context.sql);
+        payload["timeout"] = Json::number(context.timeout_ms / 1000);
+        payload["maxBytes"] = Json::number((std::min)(context.connection.result_policy.max_bytes, 1024u * 1024u));
+        request.stdin_text = payload.dump();
+        request.timeout_ms = context.timeout_ms + 10000;
+        auto output = runner_(request);
+        SecureZeroMemory(request.stdin_text.data(), request.stdin_text.size());
+        std::string error;
+        const auto response = Json::parse(output.standard_output, &error);
+        if (!output.spawned || output.timed_out || !error.empty() || !response.is_object() || !response.at("error").is_null()) {
+            result.warning = "SSH terminal execution failed. The selected WSL distribution needs Python 3 and OpenSSH.";
+            return result;
+        }
+        if (response.at("timedOut").as_bool(false)) {
+            result.warning = "SSH command timed out."; return result;
+        }
+        auto columns = Json::array();
+        for (const auto* name : {"exitCode", "stdout", "stderr"}) columns.push(Json::string(name));
+        auto row = Json::array();
+        row.push(response.at("exitCode")); row.push(response.at("stdout")); row.push(response.at("stderr"));
+        auto rows = Json::array(); rows.push(std::move(row));
+        result.columns_json = columns.dump(); result.rows_json = rows.dump(); result.row_count = 1;
+        result.truncated = response.at("truncated").as_bool(false);
+        result.ok = true; // The command's exit status is returned separately, including nonzero.
+        return result;
+    }
     {
         std::lock_guard lock(mutex_);
         cancelled_[context.operation_id] = false;

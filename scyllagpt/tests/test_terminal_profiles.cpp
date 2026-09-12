@@ -27,6 +27,13 @@ int run_terminal_profile_tests() {
     tp_expect(scyllagpt::normalize_agent_terminal_policy("nope") == "ask", "policy junk -> ask");
     tp_expect(scyllagpt::is_valid_agent_terminal_policy("ask"), "policy valid ask");
     tp_expect(!scyllagpt::is_valid_agent_terminal_policy("maybe"), "policy invalid maybe");
+    {
+        const std::map<std::string, std::string> policies{{"pwsh", "block"}, {"wsl", "allow"}, {"cli", "invalid"}};
+        tp_expect(scyllagpt::terminal_agent_policy(policies, "pwsh", "allow") == "block", "profile block overrides global allow");
+        tp_expect(scyllagpt::terminal_agent_policy(policies, "wsl", "block") == "allow", "profile allow overrides global default");
+        tp_expect(scyllagpt::terminal_agent_policy(policies, "new", "ask") == "ask", "new profile inherits default");
+        tp_expect(scyllagpt::terminal_agent_policy(policies, "cli", "allow") == "ask", "invalid profile policy fails closed to ask");
+    }
 
     tp_expect(scyllagpt::working_directory_mode_string(WorkingDirectoryMode::Project) == "project",
               "cwd mode project");

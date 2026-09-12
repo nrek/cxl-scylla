@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Scylla</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64</Platforms>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <AssemblyName>scylla</AssemblyName>
+    <ApplicationIcon>..\scyllagpt\assets\scylla.ico</ApplicationIcon>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.251003001" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.6584" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3537.50" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="Assets\mermaid\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\scyllagpt\assets\scylla-app-logo.png" Link="Assets\scylla-app-logo.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\scyllagpt\assets\scylla-logo.png" Link="Assets\scylla-logo.png" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\scyllagpt\assets\scylla.ico" Link="Assets\scylla.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <PropertyGroup>
+    <ScyllaNativeOutputDir Condition="'$(ScyllaNativeOutputDir)' == ''">$(MSBuildProjectDirectory)\..\build\$(Configuration)</ScyllaNativeOutputDir>
+  </PropertyGroup>
+  <Target Name="DeployScyllaNativeRuntime" AfterTargets="Build">
+    <ItemGroup>
+      <ScyllaNativeRuntime Include="$(ScyllaNativeOutputDir)\scylla-core.dll" />
+      <ScyllaNativeRuntime Include="$(ScyllaNativeOutputDir)\scylla-broker.exe" />
+    </ItemGroup>
+    <Error Condition="!Exists('%(ScyllaNativeRuntime.Identity)')"
+           Text="Missing native runtime: %(ScyllaNativeRuntime.Identity). Build the scylla-core-shared CMake target for $(Configuration) before building Fluent." />
+    <Copy SourceFiles="@(ScyllaNativeRuntime)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

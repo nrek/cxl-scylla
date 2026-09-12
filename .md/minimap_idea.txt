@@ -1,0 +1,58 @@
+Here is a high-level conceptual outline of how you can implement a Scintilla-based minimap inside a WinUI 3 / Fluent UI application using C#.Since Scintilla is a Win32 control, WinUI 3 applications typically interact with it via a ContentPresenter combined with Win32 HWND hosting, or through a WinUI 3 wrapper like ScintillaNET (if using a version compatible with WinUI/Win32 hosting).The High-Level ArchitectureIn WinUI 3, you lay out your UI using a Grid. The primary editor and the minimap are placed side by side, sharing the same underlying text document.xml<!-- MainWindow.xaml (High-Level Layout) -->
+<Grid ColumnDefinitions="*, 120">
+    <!-- Main Text Editor Window -->
+    <ContentPresenter x:Name="MainEditorHost" Grid.Column0 />
+    
+    <!-- Minimap Window Overlayed with a Viewport Indicator -->
+    <Canvas Grid.Column="1" x:Name="MinimapContainer">
+        <ContentPresenter x:Name="MinimapEditorHost" Width="120" Height="10050" />
+        <!-- Fluent UI semi-transparent rectangle tracking the main window viewport -->
+        <Rectangle x:Name="ViewportIndicator" Fill="{ThemeResource SystemControlHighlightAccentBrush}" Opacity="0.2" Width="120"/>
+    </Canvas>
+</Grid>
+Use code with caution.The C# Implementation LogicIn your code-behind, you instantiate two Scintilla instances. You pass the underlying document pointer from the main editor to the minimap and synchronize their behaviors.MinimapImplementation.csusing Microsoft.UI.Xaml;using Microsoft.UI.Xaml.Controls;using System;public sealed partial class MainWindow : Window{// P/Invoke definitions for Scintilla messagesprivate const int SCI_GETDOCPOINTER = 2357;private const int SCI_SETDOCPOINTER = 2358;private const int SCI_SETZOOM = 2373;private const int SCI_SETVSCROLLBAR = 2280;private const int SCI_SETHSCROLLBAR = 2281;// Low-level window handles or wrapper objects
+private object mainScintillaInstance;
+private object minimapScintillaInstance;public MainWindow()
+{
+this.InitializeComponent();
+InitializeEditors();
+}private void InitializeEditors()
+{
+// 1. Create and host both native Scintilla instances in WinUI ContentPresenters
+mainScintillaInstance = CreateNativeScintillaControl();
+minimapScintillaInstance = CreateNativeScintillaControl();MainEditorHost.Content = mainScintillaInstance;
+MinimapEditorHost.Content = minimapScintillaInstance;
+
+// 2. Share the Document Pointer (Multi-View)
+IntPtr docPointer = SendScintillaMessage(mainScintillaInstance, SCI_GETDOCPOINTER, IntPtr.Zero, IntPtr.Zero);
+SendScintillaMessage(minimapScintillaInstance, SCI_SETDOCPOINTER, IntPtr.Zero, docPointer);
+
+// 3. Style the Minimap for Fluent UI look and feel
+SendScintillaMessage(minimapScintillaInstance, SCI_SETZOOM, new IntPtr(-10), IntPtr.Zero); // Microscopic font
+SendScintillaMessage(minimapScintillaInstance, SCI_SETVSCROLLBAR, IntPtr.Zero, IntPtr.Zero); // Hide scrollbars
+SendScintillaMessage(minimapScintillaInstance, SCI_SETHSCROLLBAR, IntPtr.Zero, IntPtr.Zero);
+HideMargins(minimapScintillaInstance); // Remove line numbers, folding lines, etc.
+
+// 4. Bind Scrolling Events
+RegisterScrollEvent(mainScintillaInstance, OnMainEditorScroll);
+}private void OnMainEditorScroll(object sender, EventArgs e)
+{
+// Calculate the current visible range of the main editor
+int firstVisibleLine = GetFirstVisibleLine(mainScintillaInstance);
+int linesOnScreen = GetLinesOnScreen(mainScintillaInstance);// Compute where the Fluent UI highlight rectangle should sit over the minimap
+double lineHeigthInMinimap = 1.2; // Approximate micro-pixel height per line
+
+// Update the visual indicator position using WinUI Composition or Canvas properties
+Canvas.SetTop(ViewportIndicator, firstVisibleLine * lineHeigthInMinimap);
+ViewportIndicator.Height = linesOnScreen * lineHeigthInMinimap;
+
+// Explicitly scroll the minimap document to keep it centered if the file is massive
+ScrollToLine(minimapScintillaInstance, firstVisibleLine);
+}// Helper stubs representing your Win32/SendMessage bridge
+private IntPtr SendScintillaMessage(object instance, int msg, IntPtr wParam, IntPtr lParam) => IntPtr.Zero;
+private object CreateNativeScintillaControl() => null;
+private void HideMargins(object instance) { }
+private int GetFirstVisibleLine(object instance) => 0;
+private int GetLinesOnScreen(object instance) => 0;
+private void ScrollToLine(object instance, int line) { }
+private void RegisterScrollEvent(object instance, EventHandler handler) { }}Key Fluent UI EnhancementsTo make this blend perfectly with Fluent UI design systems:The Viewport Indicator: Use the predefined theme resource {ThemeResource SystemControlHighlightAccentBrush} so that the minimap highlighter automatically responds when a user changes their Windows accent color or toggles between Light/Dark mode.Canvas Interactivity: You should attach a PointerPressed and PointerMoved event to the minimap Canvas. When a user clicks or drags on the minimap, you can mathematically translate that Y-coordinate back to a document line number and call SCI_SETFIRSTVISIBLELINE on the primary editor to jump instantly to that code block.

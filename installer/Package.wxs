@@ -1,0 +1,90 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="Scylla" Manufacturer="CXL" Version="1.0.0" UpgradeCode="D626E77B-1532-48CB-99C0-760AD5C32D3A"
+           Scope="perUser" Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Scylla is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <Property Id="STRATAENABLED" Value="1" Secure="yes" />
+    <Property Id="STRATAMODE" Value="solo" Secure="yes" />
+    <Property Id="STRATAENDPOINT" Value="http://127.0.0.1:8765" Secure="yes" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="CXLFolder" Name="CXL">
+        <Directory Id="INSTALLFOLDER" Name="Scylla">
+          <Directory Id="STRATADIR" Name="strata" />
+        </Directory>
+      </Directory>
+      <Directory Id="DesktopFolder" />
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ProgramMenuScyllaFolder" Name="Scylla" />
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="ProductFeature" Title="Scylla" Level="1">
+      <ComponentGroupRef Id="ScyllaPayload" />
+      <ComponentGroupRef Id="StrataPayload" />
+      <ComponentRef Id="Shortcuts" />
+      <ComponentRef Id="InstallerConfiguration" />
+    </Feature>
+
+    <ComponentGroup Id="ScyllaPayload" Directory="INSTALLFOLDER">
+      <Files Include="$(var.PublishDir)\**" Exclude="$(var.PublishDir)\strata\**" />
+    </ComponentGroup>
+    <ComponentGroup Id="StrataPayload" Directory="STRATADIR">
+      <Files Include="$(var.StrataDir)\**" />
+    </ComponentGroup>
+
+    <Component Id="Shortcuts" Directory="ProgramMenuScyllaFolder" Guid="*">
+      <Shortcut Id="StartMenuShortcut" Name="Scylla" Target="[INSTALLFOLDER]scylla.exe" WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RemoveProgramMenuScyllaFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" Key="Software\CXL\Scylla" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <Component Id="InstallerConfiguration" Directory="INSTALLFOLDER" Guid="*">
+      <RegistryValue Root="HKCU" Key="Software\CXL\Scylla\InstallerConfiguration" Name="Pending" Type="integer" Value="1" KeyPath="yes" />
+      <RegistryValue Root="HKCU" Key="Software\CXL\Scylla\InstallerConfiguration" Name="StrataEnabled" Type="string" Value="[STRATAENABLED]" />
+      <RegistryValue Root="HKCU" Key="Software\CXL\Scylla\InstallerConfiguration" Name="StrataMode" Type="string" Value="[STRATAMODE]" />
+      <RegistryValue Root="HKCU" Key="Software\CXL\Scylla\InstallerConfiguration" Name="StrataEndpoint" Type="string" Value="[STRATAENDPOINT]" />
+    </Component>
+
+    <UI>
+      <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+      <Dialog Id="StrataConfigDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="24"
+                 Transparent="yes" NoPrefix="yes" Text="Configure STRATA" />
+        <Control Id="Description" Type="Text" X="25" Y="36" Width="320" Height="32"
+                 Text="STRATA indexes project plans, blueprints, and handoffs. These choices can be changed later in Scylla settings." />
+        <Control Id="Enabled" Type="CheckBox" X="25" Y="78" Width="300" Height="18"
+                 Property="STRATAENABLED" CheckBoxValue="1" Text="Enable STRATA workspace knowledge" />
+        <Control Id="ModeLabel" Type="Text" X="25" Y="106" Width="80" Height="16" Text="Mode:" />
+        <Control Id="Mode" Type="RadioButtonGroup" X="105" Y="102" Width="220" Height="38" Property="STRATAMODE">
+          <RadioButtonGroup Property="STRATAMODE">
+            <RadioButton Value="solo" X="0" Y="0" Width="210" Height="16" Text="Solo (local-only)" />
+            <RadioButton Value="team" X="0" Y="20" Width="210" Height="16" Text="Team (shared STRATA host)" />
+          </RadioButtonGroup>
+        </Control>
+        <Control Id="EndpointLabel" Type="Text" X="25" Y="150" Width="320" Height="16"
+                 Text="Team endpoint (HTTPS):" />
+        <Control Id="Endpoint" Type="Edit" X="25" Y="168" Width="320" Height="18" Property="STRATAENDPOINT" />
+        <Control Id="Security" Type="Text" X="25" Y="193" Width="320" Height="30"
+                 Text="API keys are intentionally configured after setup and stored in Windows Credential Manager." />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+          <Publish Event="NewDialog" Value="LicenseAgreementDlg" />
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+          <Publish Event="NewDialog" Value="InstallDirDlg" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+      <Publish Dialog="LicenseAgreementDlg" Control="Next" Event="NewDialog" Value="StrataConfigDlg"
+               Condition="LicenseAccepted = 1" Order="2" />
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="StrataConfigDlg"
+               Condition="1" Order="2" />
+    </UI>
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+  </Package>
+</Wix>

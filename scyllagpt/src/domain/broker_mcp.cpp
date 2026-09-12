@@ -81,22 +81,27 @@ McpReply handle_mcp_message(std::string_view line, const BrokerCallFn& call_brok
     if (method == "tools/list") {
         Json tools = Json::array();
         tools.push(query_tool_descriptor());
+        tools.push(ssh_tool_descriptor());
         Json result = Json::object();
         result["tools"] = std::move(tools);
         return rpc_result(id, std::move(result));
     }
     if (method == "tools/call") {
         const Json& params = root.at("params");
-        if (params.at("name").as_string("") != kQueryToolName) {
+        const bool ssh = params.at("name").as_string("") == "scylla_ssh";
+        if (!ssh && params.at("name").as_string("") != kQueryToolName) {
             return rpc_error(id, -32602, "unknown tool");
         }
         QueryToolCall call;
         std::string argument_error;
-        if (!parse_query_tool_arguments(params.at("arguments"), &call, &argument_error)) {
+        auto arguments = params.at("arguments");
+        if (ssh) arguments["sql"] = arguments.at("command");
+        if (!parse_query_tool_arguments(arguments, &call, &argument_error)) {
             return tool_reply(id, "Scylla rejected the call: " + argument_error +
                                       ". No query ran and no rows were retrieved.",
                               true);
         }
+        call.ssh_command = ssh;
         if (!call_broker) {
             return tool_reply(id, "The Scylla broker is unavailable. No query ran.", true);
         }

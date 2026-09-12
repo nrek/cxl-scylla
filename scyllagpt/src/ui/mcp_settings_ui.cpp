@@ -688,6 +688,12 @@ bool McpSettingsUi::commit_add(McpManager& mgr, const std::wstring& mcp_path, HW
     }
 
     McpConnection c;
+    const std::string project = active_project_provider_ ? active_project_provider_() : std::string{};
+    if (project.empty()) {
+        MessageBoxW(owner, L"Open a project before adding a connection. You can change project scope in Manage afterward.",
+                    L"Add MCP", MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
     if (sel >= 0 && sel < static_cast<int>(templates.size())) {
         c = McpManager::from_template(templates[static_cast<std::size_t>(sel)], name);
         c.connection_name = name;
@@ -702,6 +708,8 @@ bool McpSettingsUi::commit_add(McpManager& mgr, const std::wstring& mcp_path, HW
         c.transport_kind = transport_of(add_transport_);
         c.auth_state = McpAuthState::Unknown;
     }
+    c.project_scope = {project};
+    c.policy.read = McpApprovalMode::Ask;
     if (!endpoint.empty()) {
         c.endpoint_or_cmd = endpoint;
     }
@@ -734,7 +742,16 @@ bool McpSettingsUi::commit_add(McpManager& mgr, const std::wstring& mcp_path, HW
                             L"A browser window will open so you can sign in.\n\n"
                             L"After you approve access, return here.",
                             L"Add MCP", MB_OK | MB_ICONINFORMATION);
-                const McpOAuthResult auth = mcp_oauth_authorize(owner, added->endpoint_or_cmd, added->id);
+                // Linear requires an explicit OAuth scope in the authorization link. The user has
+                // just chosen browser sign-in, so use the provider's documented MCP permissions
+                // unless this connection already carries an explicit selection.
+                if (added->service_id == "linear" && !added->scopes_selected) {
+                    added->oauth_scopes = McpManager::suggested_oauth_scopes(added->service_id);
+                    added->scopes_selected = true;
+                    persist(mgr, mcp_path);
+                }
+                const McpOAuthResult auth = mcp_oauth_authorize(
+                    owner, added->endpoint_or_cmd, added->id, 300000, added->oauth_scopes);
                 added->disconnected = false;
                 mgr.mark_auth(added->id, auth.state, auth.message);
                 persist(mgr, mcp_path);
@@ -1059,7 +1076,15 @@ bool McpSettingsUi::handle_command(int id, WORD notify, McpManager& mgr, const s
                     L"Reauthenticate", MB_OK | MB_ICONINFORMATION);
         mgr.mark_auth(c->id, McpAuthState::Unknown, "Waiting for browser sign-in…");
         refresh(mgr);
-        const McpOAuthResult auth = mcp_oauth_authorize(owner, c->endpoint_or_cmd, c->id);
+        // Existing Linear connections created before scoped OAuth was persisted need the same
+        // permissions when their browser link is rebuilt for reauthentication.
+        if (c->service_id == "linear" && !c->scopes_selected) {
+            c->oauth_scopes = McpManager::suggested_oauth_scopes(c->service_id);
+            c->scopes_selected = true;
+            persist(mgr, mcp_path);
+        }
+        const McpOAuthResult auth =
+            mcp_oauth_authorize(owner, c->endpoint_or_cmd, c->id, 300000, c->oauth_scopes);
         c->disconnected = false;
         mgr.mark_auth(c->id, auth.state, auth.message);
         persist(mgr, mcp_path);

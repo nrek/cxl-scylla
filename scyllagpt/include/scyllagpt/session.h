@@ -2,6 +2,7 @@
 
 #include "scyllagpt/agent_activity.h"
 
+#include "scyllagpt/event_sink.h"
 #include "scyllagpt/json.h"
 #include "scyllagpt/mcp_manager.h"
 #include "scyllagpt/paths.h"
@@ -9,6 +10,7 @@
 #include "scyllagpt/settings.h"
 #include "scyllagpt/store.h"
 
+#include <deque>
 #include <cstdint>
 #include <atomic>
 #include <functional>
@@ -34,12 +36,17 @@ struct ModelChoice {
     std::string display;
     std::string provider_id = "openai";  // openai | openai-api | claude | claude-api
     bool hidden = false;  // Hidden by the provider's default picker; still manageable in Settings.
+    std::vector<std::string> reasoning_efforts;
+    std::string default_reasoning_effort;
+    std::string specialty;  // "language" | "code" | empty (general purpose/unspecified)
+    bool is_default = false;
 };
 
 struct ThreadSummary {
     std::string id;
     std::string name;
     std::string preview;
+    std::wstring cwd;
 };
 
 struct AccountInfo {
@@ -53,19 +60,10 @@ class Session;
 
 using UiFn = std::function<void()>;
 
-// Posted to the main window when a Claude -p worker finishes (lParam = ClaudePrintResult*).
-constexpr UINT WM_SCYLLA_CLAUDE_DONE = WM_APP + 43;
-// Posted when a background `claude models` refresh finishes.
-constexpr UINT WM_SCYLLA_CLAUDE_MODELS = WM_APP + 44;
-
-struct ClaudePrintResult {
-    bool ok = false;
-    std::string text;
-    std::wstring error;
-};
-
 class Session {
 public:
+    void log_payload(const std::string& direction, const std::string& payload);
+    std::deque<std::string> payload_log;
     Paths paths;
     Settings settings;
 
@@ -96,7 +94,9 @@ public:
     std::wstring project_root;
     std::vector<ContextChip> context_chips;
 
-    bool start_runtime(HWND hwnd, UINT line_msg, std::wstring* error);
+    // on_line is invoked from the runtime reader thread; shells must marshal to UI.
+    // on_claude_done is invoked from worker threads with a by-value result.
+    bool start_runtime(LineSink on_line, ClaudeDoneSink on_claude_done, std::wstring* error);
     void stop_runtime();
     void handle_line(const std::string& line);
 
@@ -104,9 +104,12 @@ public:
     void logout();
     void new_conversation();
     void open_thread(const std::string& id);
+    bool delete_thread(const std::string& id, std::string* error);
     std::string chat_title_seed;
     int chats_epoch = 0;
-    void send_user(const std::string& text);
+    void send_user(const std::string& text, const std::string& mode = "execute");
+    std::string last_plan_path;
+    bool account_loaded = false;
     // Called on UI thread when a local print/API worker finishes (ok + text or error).
     void complete_claude_print(bool ok, const std::string& text, const std::wstring& error);
     bool claude_generating() const { return claude_busy_; }
@@ -128,7 +131,7 @@ public:
     std::string knowledge_grant_preamble() const;
     std::string account_scope() const;
     void cancel_turn();
-    void refresh_threads();
+    void refresh_threads(const std::string& cursor = {});
     void refresh_models();
     // Merge/strip account + API catalogs based on auth; bump models_epoch.
     void sync_claude_models();
@@ -145,15 +148,41 @@ public:
     std::vector<ModelChoice> models_for_provider(const std::string& provider_id, bool enabled_only) const;
     std::string provider_default_model_id(const std::string& provider_id) const;
     void set_provider_default_model(const std::string& provider_id, const std::string& model_id);
+    void reset_reasoning_effort_for_selected_model();
+    // Adds the selected effort to a Codex turn only when the active model advertises it.
+    void apply_reasoning_effort(Json& turn_params) const;
 
     std::string draft_for(const std::string& thread_id) const;
     void set_draft(const std::string& thread_id, const std::string& text);
 
     bool runtime_live() const { return runtime_.running(); }
     bool thread_busy(const std::string& thread_id) const;
+    const AgentActivity* thread_activity(const std::string& thread_id) const;
     bool active_thread_busy() const { return thread_busy(active_thread_id); }
+    // Drop stuck busy flags when the shell is idle (no live turn / resume).
+    void reconcile_idle_activity();
+    bool workspace_change_pending() const {
+        if (claude_busy_ || !pending_resumed_turns_.empty()) return true;
+        // Idle New Chat precreates via thread/start while UI is Ready — only block when a send is queued on it.
+        if (thread_start_id_ >= 0 &&
+            pending_thread_prompts_.find(thread_start_id_) != pending_thread_prompts_.end()) {
+            return true;
+        }
+        for (const auto& entry : thread_runtime_) {
+            if (entry.second.activity.busy) return true;
+        }
+        if (activity.busy &&
+            (state == AppState::Generating || state == AppState::AwaitingAction)) {
+            return true;
+        }
+        return false;
+    }
 
 private:
+    std::map<std::int64_t, std::string> pending_thread_modes_;
+    std::map<std::string, std::string> thread_modes_;
+    std::map<std::string, std::string> final_plan_text_;
+    void save_knowledge_plan(const std::string& thread_id, const std::string& text);
     std::int64_t next_id_ = 1;
     std::int64_t initialize_id_ = 0;
     std::int64_t account_read_id_ = 0;
@@ -169,8 +198,8 @@ private:
     std::int64_t turn_interrupt_id_ = 0;
 
     Runtime runtime_;
-    HWND hwnd_ = nullptr;
-    UINT line_msg_ = 0;
+    LineSink on_line_;
+    ClaudeDoneSink on_claude_done_;
     bool runtime_allow_shell_ = false;
 
     std::int64_t send_req(const char* method, Json params);
@@ -190,7 +219,6 @@ private:
     void ensure_api_thread(const std::string& provider_id, const char* backend);
     void send_claude_user(const std::string& text);
     void send_api_user(const std::string& provider_id, const std::string& text);
-    void send_user_to_thread(const std::string& text, const std::string& thread_id, bool foreground);
     static int model_sort_rank(const std::string& id, const std::string& provider_id);
     void handle_response(const Json& msg);
     void handle_notification(const Json& msg);
@@ -209,13 +237,39 @@ private:
         std::string stream;
         std::string turn_id;
     };
+    enum class SendRepairStep {
+        InitialResume = 0,
+        AfterListLookup = 1,
+        AfterPathResume = 2,
+        FreshThread = 3,  // post thread/start — never start another chat on failure
+    };
+    struct PendingResumedPrompt {
+        std::string text;
+        std::string mode;
+        std::string thread_id;
+        bool foreground = true;
+        SendRepairStep repair_step = SendRepairStep::InitialResume;
+        bool recorded_local = false;
+    };
+    void advance_send_repair(PendingResumedPrompt prompt);
+    void begin_fresh_send(PendingResumedPrompt prompt, const wchar_t* status);
+    void fail_send_repair(PendingResumedPrompt prompt, const std::string& error);
+    void send_user_to_thread(const std::string& text, const std::string& thread_id, bool foreground,
+                             const std::string& mode, const std::string& resume_path, bool record_user,
+                             SendRepairStep repair_step, bool skip_resume = false);
     std::unordered_map<std::string, ThreadRuntime> thread_runtime_;
     std::unordered_map<std::int64_t, std::string> turn_start_threads_;
+    std::unordered_map<std::int64_t, Json> pending_resumed_turns_;
+    std::unordered_map<std::int64_t, PendingResumedPrompt> pending_resumed_prompts_;
+    std::unordered_map<std::int64_t, PendingResumedPrompt> pending_repair_prompts_;
     std::unordered_map<std::int64_t, std::string> pending_thread_prompts_;
     std::unordered_map<std::int64_t, std::string> thread_read_threads_;
     std::unordered_map<std::string, std::string> turn_threads_;
+    std::int64_t repair_list_id_ = 0;
+    bool send_repair_fresh_used_ = false;
 
     bool claude_busy_ = false;
+    std::string print_thread_id_;
     std::atomic<bool> claude_cancel_{false};
 
     std::vector<std::wstring> knowledge_accessible_paths_;

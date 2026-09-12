@@ -28,7 +28,7 @@ void StrataSettingsUi::destroy() {
     test_btn_ = open_btn_ = refresh_btn_ = search_label_ = search_ = results_ = hint_ = diag_ = nullptr;
     save_binding_btn_ = recent_btn_ = detail_ = nullptr;
     remote_label_ = remote_ = save_remote_ = source_ = projects_btn_ = open_doc_ = close_doc_ = nullptr;
-    publish_ = pull_ = search_btn_ = nullptr;
+    publish_ = pull_ = search_btn_ = enabled_ = mode_ = api_key_label_ = api_key_ = verify_ = nullptr;
     visible_ = false;
 }
 bool StrataSettingsUi::create(HWND parent, HINSTANCE inst, HFONT font) {
@@ -43,6 +43,14 @@ bool StrataSettingsUi::create(HWND parent, HINSTANCE inst, HFONT font) {
     heading_ = label(Id_StrataHeading, L"STRATA");
     desc_ = label(Id_StrataDesc,
                   L"Browse projects, plans, blueprints and handoffs. Local knowledge works offline.");
+    enabled_ = ui_kit::create_checkbox(parent, inst, Id_StrataEnabled, L"Enable STRATA", font);
+    mode_ = ui_kit::create_select(parent, inst, Id_StrataMode, font);
+    ui_kit::select_set_items(mode_, {{L"Solo", 0}, {L"Team", 1}});
+    api_key_label_ = label(Id_StrataApiKeyLabel, L"Remote API Key");
+    api_key_ = ui_kit::create_text_field(parent, inst, Id_StrataApiKey, font);
+    SendMessageW(api_key_, EM_SETPASSWORDCHAR, 0x2022, 0);
+    ui_kit::set_placeholder(api_key_, L"strata_live_xxxxxxxxx");
+    verify_ = button(Id_StrataVerify, L"Verify");
     status_ = label(Id_StrataStatus, L"Local library");
     workspace_label_ = label(Id_StrataWorkspaceLabel, L"Workspace");
     workspace_ = ui_kit::create_path_field(parent, inst, Id_StrataWorkspace, font);
@@ -85,6 +93,12 @@ void StrataSettingsUi::update_visibility() {
     for (auto h : controls())
         if (h)
             ShowWindow(h, visible_ ? SW_SHOWNA : SW_HIDE);
+    const bool enabled = SendMessageW(enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const bool team = ui_kit::select_get_index(mode_) == 1;
+    for (auto h : {api_key_label_, api_key_, verify_})
+        ShowWindow(h, visible_ && enabled && team ? SW_SHOWNA : SW_HIDE);
+    for (auto h : {mode_, workspace_, remote_})
+        EnableWindow(h, enabled && !busy);
     ShowWindow(results_, visible_ && !document_open_ ? SW_SHOWNA : SW_HIDE);
     ShowWindow(detail_, visible_ && document_open_ ? SW_SHOWNA : SW_HIDE);
     ShowWindow(open_doc_, visible_ && !document_open_ ? SW_SHOWNA : SW_HIDE);
@@ -117,6 +131,15 @@ void StrataSettingsUi::layout(const RECT &content) {
     // narrow settings column cannot place the next control over the description.
     const int message_h = m.row_h * 2;
     row(desc_, message_h);
+    MoveWindow(enabled_, x, y, m.label_w, m.row_h, TRUE);
+    MoveWindow(mode_, x + m.label_w + m.pad_tight, y, m.btn_w, m.row_h, TRUE);
+    y += m.row_h + m.pad_tight;
+    if (SendMessageW(enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED && ui_kit::select_get_index(mode_) == 1) {
+        const int vw = m.btn_w;
+        ui_space::place_labeled_row(api_key_label_, api_key_, col, y, m, -(vw + m.pad_tight));
+        MoveWindow(verify_, x + w - vw, y, vw, m.row_h, TRUE);
+        y += m.row_h + m.pad_tight;
+    }
     ui_space::place_labeled_row(workspace_label_, workspace_, col, y, m);
     ui_kit::center_field_text(workspace_);
     y += m.row_h + m.pad_tight;
@@ -164,7 +187,14 @@ std::wstring StrataSettingsUi::project_binding() const { return utf16(browse_pro
 void StrataSettingsUi::set_status_text(const std::wstring &v) { SetWindowTextW(status_, v.c_str()); }
 void StrataSettingsUi::set_diag_text(const std::wstring &v) { SetWindowTextW(diag_, v.c_str()); }
 void StrataSettingsUi::set_detail_text(const std::wstring &v) { ui_kit::set_markdown(detail_, v); }
-void StrataSettingsUi::refresh(StrataBridge *, StrataClient *) {
+void StrataSettingsUi::refresh(StrataBridge *, StrataClient *client) {
+    if (client) {
+        SendMessageW(enabled_, BM_SETCHECK, client->settings().enabled ? BST_CHECKED : BST_UNCHECKED, 0);
+        ui_kit::select_set_index(mode_, client->settings().team ? 1 : 0);
+        SetWindowTextW(remote_, client->settings().endpoint.c_str());
+        SetWindowTextW(api_key_, client->settings().bearer.c_str());
+        update_visibility();
+    }
     if (pending_.valid() || loaded_workspace_ == workspace_path())
         return;
     browse_project_.clear();
@@ -296,6 +326,53 @@ void StrataSettingsUi::poll() {
 bool StrataSettingsUi::handle_command(int id, WORD notify, StrataBridge *, StrataClient *client,
                                       const std::string &project_id, const std::wstring &settings_path,
                                       HWND owner) {
+    if (id == Id_StrataEnabled && notify == BN_CLICKED) {
+        if (client) {
+            client->settings().enabled = SendMessageW(enabled_, BM_GETCHECK, 0, 0) == BST_CHECKED;
+            if (!client->save(settings_path))
+                ui_kit::report_save_failure(owner, L"STRATA settings", settings_path);
+        }
+        update_visibility();
+        layout(content_);
+        return true;
+    }
+    if (id == Id_StrataMode && notify == CBN_SELCHANGE) {
+        if (client) {
+            client->settings().team = ui_kit::select_get_index(mode_) == 1;
+            client->save(settings_path);
+        }
+        update_visibility();
+        layout(content_);
+        return true;
+    }
+    if (id == Id_StrataVerify && notify == BN_CLICKED) {
+        if (!client)
+            return true;
+        const std::wstring key = text(api_key_);
+        const std::wstring host = text(remote_);
+        if (key.rfind(L"strata_live_", 0) != 0) {
+            set_diag_text(L"Invalid key — expected a strata_live_ key.");
+            return true;
+        }
+        if (host.rfind(L"https://", 0) != 0) {
+            set_diag_text(L"Invalid host — enter an HTTPS STRATA address.");
+            return true;
+        }
+        client->settings().endpoint = host;
+        client->settings().bearer = key;
+        const StrataHealth health = client->health_check();
+        if (health.ok && health.http_status == 200) {
+            client->save(settings_path);
+            set_diag_text(L"✓ Verified");
+        } else if (health.http_status == 401 || health.http_status == 403) {
+            set_diag_text(L"Invalid key.");
+        } else if (!health.http_status) {
+            set_diag_text(L"Host not found or unavailable.");
+        } else {
+            set_diag_text(L"STRATA returned HTTP " + std::to_wstring(health.http_status) + L".");
+        }
+        return true;
+    }
     if (id == Id_StrataSource) {
         if (ui_kit::select_handle_command(source_, notify))
             return true;

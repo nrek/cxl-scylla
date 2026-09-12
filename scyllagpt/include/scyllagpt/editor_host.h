@@ -55,5 +55,7 @@ void editor_paste(HWND sci);
 void editor_select_all(HWND sci);
 void editor_set_word_wrap(HWND sci, bool on);
 void editor_set_whitespace(HWND sci, bool visible);
+HWND editor_create_minimap(HWND parent, HWND primary, int control_id, HINSTANCE inst, int dpi);
+void editor_sync_minimap(HWND primary, HWND minimap);
 
 }  // namespace scyllagpt

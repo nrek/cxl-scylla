@@ -98,6 +98,7 @@ public:
                              std::string_view project_id = {});
     KeyringStatus update_description(std::string_view name, std::string_view description);
     KeyringStatus remove_secret(std::string_view name);
+    KeyringStatus remove_secret(std::string_view name, SecretScope scope, std::string_view project_id);
 
     // Import secrets from a legacy v1 project vault into this unlocked app vault (project scope).
     // On success, renames legacy_path → legacy_path + L".migrated".

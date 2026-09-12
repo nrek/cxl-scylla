@@ -42,7 +42,21 @@ int run_broker_transport_tests() {
 
     const auto listed = handle_mcp_message(R"({"jsonrpc":"2.0","id":2,"method":"tools/list"})", nullptr);
     const Json tools = parse(listed.body).at("result").at("tools");
-    expect(tools.size() == 1, "exactly one tool is exposed");
+    expect(tools.size() == 2, "query and SSH tools are exposed");
+    expect(tools.at(std::size_t{1}).at("name").as_string("") == "scylla_ssh", "SSH has a separate tool");
+    {
+        bool called = false;
+        handle_mcp_message(R"({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"scylla_ssh","arguments":{"connection_alias":"ssh_synq","command":"uname -a"}}})",
+            [&](const QueryToolCall& call) {
+                called = call.ssh_command && call.connection_alias == "ssh_synq" && call.sql == "uname -a";
+                QueryToolCall decoded;
+                std::string token, error;
+                expect(decode_broker_request(encode_broker_request(call, "token"), &decoded, &token, &error) && decoded.ssh_command,
+                    "SSH operation type survives pipe serialization");
+                return std::string{};
+            });
+        expect(called, "SSH tool forwards alias and command without SQL interpretation");
+    }
     expect(tools.at(std::size_t{0}).at("name").as_string("") == "scylla_query", "the tool is scylla_query");
     const Json properties = tools.at(std::size_t{0}).at("inputSchema").at("properties");
     expect(properties.has("connection_alias") && properties.has("sql"), "tool schema takes alias and sql");

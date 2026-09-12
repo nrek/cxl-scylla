@@ -6,6 +6,7 @@
 #include <map>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace scyllagpt {
 
@@ -47,16 +48,19 @@ struct Settings {
     bool restore_chat_on_start = true;
     Json drafts;  // object: threadId -> draft text
     std::wstring project_folder;
-    int files_w = 220;
+    std::vector<std::wstring> pinned_tabs;
+    int files_w = 300;
     int knowledge_h = 0;  // DIPs; zero keeps the original automatic height until dragged.
-    int agent_w = 400;
-    int history_w = 232;
+    int agent_w = 650;
+    int history_w = 300;
     int files_mode = 0;    // 0 auto, 1 on, 2 off
     int history_mode = 0;
+    int agent_mode = 0;    // chat log (agent pane): 0 auto/show, 1 force on, 2 force off
     bool focus_editor = false;
     // "openai" | "openai-api" | "claude" | "claude-api"
     std::string default_provider = "openai";
     std::string selected_model;  // last model id for active provider
+    std::string reasoning_effort;
     // Per-model enable: key = "provider/model_id".
     // Account providers (openai, claude): missing key ⇒ enabled (first-run parity).
     // API providers (openai-api, claude-api): missing key ⇒ disabled (0 selected by default).
@@ -64,6 +68,8 @@ struct Settings {
     // Per-provider default model id. Empty ⇒ use catalog best among enabled.
     std::map<std::string, std::string> provider_default_model;
     bool word_wrap = false;
+    bool show_minimap = false;
+    bool verbose_agent_progress = false;
     bool show_whitespace = false;
     int terminal_h = 220;
     bool terminal_visible = false;
@@ -76,6 +82,7 @@ struct Settings {
     ExecutionPolicy execution_policy;
     // Profile id → enabled override (missing = leave discovered default).
     std::map<std::string, bool> terminal_profile_enabled;
+    std::map<std::string, std::string> terminal_profile_policy;
     // Knowledge / Strata / MCP / custom terminals persist under Paths::*_path
     // (%LOCALAPPDATA%\ScyllaGPT\*.json) — not embedded in settings.json.
 };

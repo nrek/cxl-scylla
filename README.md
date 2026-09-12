@@ -1,151 +1,176 @@
 # Scylla
 
-![Scylla Workbench screenshot](docs/images/scylla-workbench-screen.png)
+Scylla is a Windows coding workspace for working with AI agents while keeping projects, knowledge, terminals, external connections, and secrets under explicit user control.
 
-Scylla is an experimental Windows-native coding workspace with AI providers, a source editor, integrated terminals, and explicit controls for project access, knowledge folders, connections, and secrets.
-
-The product in this repository is **Scylla Workbench** (`scylla-workbench.exe`). The former AppContainer CLI (Scylla Cage) is archived under [`archive/scylla-cage/`](archive/scylla-cage/) and is not built.
+The primary application is `scylla.exe`, a C# and WinUI 3 desktop shell backed by the native `scylla-core.dll` library. Scylla is under active development and is not yet a finished IDE or a hardened security boundary.
 
 > [!WARNING]
-> This is pre-release software. Review the threat model and lockdown notes, test with non-sensitive data, and verify provider and grant behavior before relying on it. Sandbox and policy controls reduce access; they do not make untrusted software safe.
+> Scylla runs provider tools and approved commands as the signed-in Windows user. Review project grants, Knowledge access, connection policies, and terminal settings before using sensitive data. Application policy reduces accidental access; it does not make untrusted code safe.
 
-## Scylla Workbench
+## What Scylla includes
 
-Workbench is a native C++20 Win32 application with Scintilla and Lexilla. It runs a locally installed Codex app-server over stdio and invokes Claude Code in print mode. Provider software and account access are obtained separately.
-
-| Area | Available now |
+| Area | Current behavior |
 |---|---|
-| Projects and agents | Project tree, tabbed editor, syntax highlighting, file/selection context, local conversations, and provider/model selection. |
-| Terminal | Integrated ConPTY shells, terminal profiles, multiple sessions, rename/restart/duplicate/close actions, and project environment selection. |
-| Knowledge | Additional folders with project scope, agent availability, access settings, folder overrides, and health checks; separate Knowledge and Skills explorer groups. |
-| MCP connections | HTTP OAuth, credential storage, connection management, project scope, and HTTP/stdio connection checks. Live tool invocation is deferred. |
-| Strata | Optional knowledge-service integration with connection status, recent records, previews, and pending counts. |
-| Security | One encrypted app-level Keyring, global/project secret scopes, project environment profiles, and execution policy for protected terminal values. |
+| Projects and files | Multiple project folders, file and folder management, tabbed editing, syntax highlighting, search, Markdown preview, images, and Mermaid diagrams. |
+| Agent chat | Local chat history, file and selection context, Execute/Plan/Ask modes, provider and model selection, streaming responses, progress, cancellation, and changed-file activity. |
+| Providers | ChatGPT/Codex and Claude connections. Available models depend on the connected provider and account. |
+| Terminal | Integrated Windows and WSL terminal profiles with multiple sessions and per-profile agent execution policy. |
+| Knowledge | Additional local folders with project scope and agent availability. Knowledge files can be browsed and referenced from chat. |
+| MCP | Saved HTTP and stdio connections, OAuth authentication, explicit scopes, project assignment, and agent aliases. Support varies by server and authentication flow. |
+| Security | An encrypted application Keyring, project-scoped connection definitions, protected values, and command/query policy checks. |
+| STRATA | A local workspace knowledge index for plans, blueprints, handoffs, and related project material, with optional team synchronization. |
 
-Workbench runs as the signed-in Windows user. Project grants, Knowledge access, terminal policy, provider sign-in, MCP authentication, and Keyring unlock are separate controls. Connecting a service does not make all of its capabilities available to the agent. Codex isolation is policy + Job Object + an isolated Codex home — not an OS AppContainer.
+Scylla does not bundle provider accounts. Install or connect the provider software you intend to use and follow that provider's terms and authentication flow.
 
 ## Requirements
 
-- Windows 10 or Windows 11 (x64)
-- Visual Studio 2022 with **Desktop development with C++**
+For an installed release:
+
+- Windows 10 version 1809 or newer, or Windows 11
+- x64 processor
+- A supported AI provider account for agent chat
+- WebView2 Runtime for embedded web content; current Windows installations normally include it
+
+For a source build:
+
+- Visual Studio 2022 or newer with **Desktop development with C++** and .NET desktop tooling
 - Windows 10/11 SDK
 - CMake 3.20 or newer
-- Optional: ChatGPT desktop/Codex CLI and Claude Code for Workbench providers
+- .NET 8 SDK
 
-Strata is optional and requires a separately configured service or bridge. MCP connections require their own server configuration and, where applicable, authentication. Neither is required for basic editor and provider use. The former WPF launcher is archived; .NET is not required.
+## Installation
 
-## Install from source
+Scylla does not currently publish a general-purpose installer from this repository. Until release packages are available, build it from source.
 
-The instructions below build and run Workbench from a local source checkout. Workbench does not yet ship an installer or auto-updater.
+The planned installer will contain the complete desktop application, its native runtime and broker, and the local STRATA service. Starting Scylla will start the bundled local STRATA service for the current user; users will not need to install Python or STRATA separately. Team synchronization will remain optional and will require a remote endpoint and credential configured in Scylla.
 
-1. Clone this repository using its **Code → HTTPS** URL, or download and extract its ZIP archive. Git is needed only for cloning.
-2. Open **Developer PowerShell for VS 2022** from the Start menu.
-3. Change into the extracted or cloned repository directory containing `CMakeLists.txt` and this README. Run all commands below from that directory.
+### Build from source
 
-Build from the repository root (preferred):
+Open **Developer PowerShell for Visual Studio** and run these commands from the repository root:
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Release --target scyllagpt scyllagpt-tests
-.\build\Release\scyllagpt-tests.exe
+cmake --build build --config Release --target scylla-core-shared
+dotnet build .\scylla-fluent\Scylla.csproj `
+  --configuration Release `
+  -p:Platform=x64
 ```
 
-Native builds use the MSVC runtime; another machine may need the Visual C++ v14 Redistributable (x64).
+Building `scylla-core-shared` also builds the trusted broker. The WinUI project copies `scylla-core.dll` and `scylla-broker.exe` into its output directory and fails if either file is missing.
 
-For a Workbench-only configure tree (same sources, separate build directory):
+Run the source build:
 
 ```powershell
-cmake -S scyllagpt -B scyllagpt/build -G "Visual Studio 17 2022" -A x64
-cmake --build scyllagpt/build --config Release --target scyllagpt scyllagpt-tests
-.\scyllagpt\build\Release\scyllagpt-tests.exe
+.\scylla-fluent\bin\x64\Release\net8.0-windows10.0.19041.0\scylla.exe
 ```
 
-The CMake target is `scyllagpt`; its executable is `scylla-workbench.exe`. The root build writes it to `build/Release`; the standalone build writes it to `scyllagpt/build/Release`. Use the executable from the tree you built. Close Workbench before rebuilding that executable to avoid a linker file-lock error.
+If the native output is outside `build\Release`, pass its directory when building the UI:
 
-Primary outputs:
+```powershell
+dotnet build .\scylla-fluent\Scylla.csproj `
+  --configuration Release `
+  -p:Platform=x64 `
+  -p:ScyllaNativeOutputDir="C:\path\to\native\Release"
+```
+
+## First launch
+
+1. Open one or more project folders. These folders define the workspace available to the selected agent session.
+2. Open **Settings → Providers** and connect ChatGPT/Codex, Claude, or both.
+3. Select a provider, model, and mode in the Agent composer, then begin a chat.
+4. Add supporting documentation through **KNOWLEDGE → Manage** and explicitly choose whether it is available to the agent.
+5. Review **Settings → Terminal**, **Settings → MCP**, and **Settings → Security** before enabling command or connection access.
+
+Provider login and project access are independent. Connecting an account does not grant an agent access to every folder, terminal, MCP server, Keyring entry, or saved connection.
+
+## STRATA
+
+STRATA is Scylla's project knowledge layer. It indexes human-readable project material such as plans, blueprints, handoffs, and documentation so people and agents can find the same working context.
+
+The installer distribution is intended to run STRATA locally when Scylla launches. Local indexing works without a team service. To share or synchronize indexed knowledge, enable Team mode under **Settings → Strata**, enter the HTTPS endpoint and remote API key, then verify the connection. Remote credentials are stored through Windows Credential Manager rather than in the plain settings file.
+
+Source builds do not yet provision or launch STRATA automatically. Their embedded STRATA view expects a compatible local service at `http://127.0.0.1:8765`. This is a development limitation that the installer packaging will remove.
+
+## Configuration and local data
+
+Scylla keeps per-user application data under:
 
 ```text
-build/Release/scylla-workbench.exe
-build/Release/scyllagpt-tests.exe
+%LOCALAPPDATA%\ScyllaGPT\
 ```
 
-## Quick start
+The existing directory name is retained for compatibility. Configure Scylla through the application where possible instead of editing these files directly.
+
+| Data | Storage |
+|---|---|
+| Application preferences and execution policy | Local JSON settings |
+| Projects, conversations, and drafts | Local workspace data |
+| Knowledge sources and project scope | Local Knowledge configuration |
+| Terminal profiles and project environments | Local profile configuration |
+| MCP and project connection metadata | Local connection configuration |
+| OAuth tokens, STRATA remote credentials, and other protected credentials | Windows Credential Manager or the encrypted Scylla Keyring, depending on the feature |
+| Agent runtime state | An application-managed, isolated runtime directory |
+
+Do not commit local application data, credentials, generated build output, or diagnostic logs. Before sharing diagnostics, remove account identifiers, project contents, hostnames, and local filesystem paths.
+
+## Access and security model
+
+- Project folders are explicit workspace grants. Open only folders required for the task.
+- Knowledge sources have their own enablement and agent-availability controls. Treat parent-folder grants carefully when a source contains sensitive child folders.
+- Execute mode may permit edits and approved tools. Plan and Ask are designed for read-only work and deny write escalation.
+- MCP authentication, MCP availability to an agent, and the permissions of the remote service are separate controls.
+- The Scylla Keyring stores protected values. Agents receive brokered operations governed by project and execution policy rather than direct access to the vault.
+- Database and SSH operations require saved project-scoped connections and are restricted by their configured route and policy. Several connection types and approval flows remain under development.
+
+See [SECURITY.md](SECURITY.md) for vulnerability reporting and [the security implementation status](docs/plans/SCYLLA_security_fluent_status.md) for current limits.
+
+## Development and validation
+
+Build the native regression tests alongside the shared core:
 
 ```powershell
+cmake --build build --config Release --target scyllagpt-tests scylla-mcp-tests
 .\build\Release\scyllagpt-tests.exe
-.\build\Release\scylla-workbench.exe
+.\build\Release\scylla-mcp-tests.exe
 ```
 
-Run `scyllagpt-tests.exe` directly: the test executable is not currently registered with CTest. A successful run reports `all tests passed` and exits with code 0.
+Run the Fluent Markdown and preview checks:
 
-1. Open **File → Settings → AI Providers** and connect Codex, Claude Code, or both. Follow the [provider setup instructions](scyllagpt/README.md#first-run) for installation, discovery, and sign-in.
-2. Open a project folder, choose an agent/model, and start a new chat. Confirm the project grant before requesting edits.
-3. Use **View → Terminal** for an integrated shell. Configure shell profiles in **Settings → Terminal**.
-4. If you need documentation outside the project, add its folder in **Settings → Knowledge**, choose its access and project scope, and enable **Available to agent**. Review the access limitation below before granting it.
-5. Configure optional MCP and Strata connections in their Settings sections. Use **Settings → Security** for the Keyring, project environments, and execution policy.
+```powershell
+dotnet run --project .\tests\fluent-preview-tests\PreviewTests.csproj
+```
 
-## Workbench configuration and access
-
-Workbench stores local configuration under `%LOCALAPPDATA%\ScyllaGPT`; the legacy directory name is retained for compatibility.
-
-| Configuration | Location / behavior |
-|---|---|
-| Preferences and execution policy | `settings.json`; configure through Settings. |
-| Knowledge folders | `knowledge.json`; enable sources, choose scope, and control agent availability. |
-| Terminal profiles | `terminals.json`; environment bindings are stored separately in `environments.json`. |
-| MCP connections | `mcp_connections.json`; HTTP OAuth tokens are stored in Windows Credential Manager. |
-| Strata connection | `strata.json`; configure the service/bridge through Settings. |
-| Codex runtime | `codex-home`; managed `config.toml` is rewritten on launch and grant changes. The normal `%USERPROFILE%\.codex` configuration is separate. |
-| Diagnostics | **Help → Diagnostics** and `runtime-stderr.log`. Redact account details, source content, and personal paths before sharing logs. |
-
-With no project selected, Codex uses a read-only policy with shell access disabled. With a project selected, it receives workspace editing access plus enabled, in-scope Knowledge roots marked available to the agent. Turns include the absolute Knowledge paths so the agent can locate those sources.
-
-**Current Knowledge limitation:** Codex receives those source roots as writable roots, including sources labeled read-only in Knowledge Settings. Folder-level `No Access` overrides filter Workbench browsing but are not translated into exclusions from the parent agent grant. Do not rely on these UI settings to enforce read-only or child-folder isolation for the agent. Claude receives the Knowledge path context, but its print-mode launch does not apply the same Codex grant list.
-
-The Keyring is one encrypted application vault; projects define secret scopes and environment-variable bindings. Plain environment values do not require a Keyring. Protected values can be supplied to human terminals according to execution policy; agent terminal environments strip protected values. Secret execution recipes and the agent execution broker remain deferred.
-
-See the [Workbench documentation](scyllagpt/README.md) and [lockdown notes](scyllagpt/docs/lockdown.md) for additional details.
-
-## Troubleshooting
-
-| Symptom | Check |
-|---|---|
-| `cmake` or the Visual Studio generator is unavailable | Install the C++ workload, Windows SDK, and CMake; reopen Developer PowerShell for VS 2022. |
-| Workbench cannot find or connect a provider | Follow [Workbench troubleshooting](scyllagpt/README.md#troubleshooting). |
-| Build cannot find the Workbench target | Re-run the configure command for the chosen build tree. An older generated solution may predate the current targets. |
-| Linker cannot write `scylla-workbench.exe` | Close the running Workbench, then rebuild the same tree. |
-| Agent cannot find Knowledge folders | Confirm source enablement, project scope, and **Available to agent**; check that the grant display includes Knowledge roots. After upgrading, fully quit and launch the newly built executable, then start a new chat. |
+Some UI and provider flows require manual verification because they depend on a real Windows session, installed provider tools, and user authentication. Tests must not use production credentials or production infrastructure.
 
 ## Current limitations
 
-This is an evolving Workbench, not a full IDE. Live MCP tool invocation, Strata context capture/sync UI, Knowledge search and alias routing, secret execution recipes, and the agent secret broker are deferred. Terminal Ports, split panes, and scrollback search are also unfinished. The Problems panel currently lists unsaved documents; it is not a compiler or language-server diagnostic feed. See [capability status](scyllagpt/docs/capability.md) for the wider checklist.
+Scylla is pre-release software. Some provider capabilities, interactive approvals, connection executors, terminal behaviors, and STRATA packaging are still being completed. The editor is not a complete replacement for Visual Studio or VS Code: debugger, extension marketplace, language-server diagnostics, and several advanced terminal features are outside the current scope.
+
+Documentation should distinguish implemented behavior from planned installer behavior. In particular, automatic STRATA provisioning and launch belong to the upcoming installer and are not performed by a source checkout today.
 
 ## Repository layout
 
 ```text
-scyllagpt/              Scylla Workbench (product)
-  src/domain/           Providers, knowledge, MCP, Strata, Keyring, environments
-  src/ui/               Editor, terminal sessions, settings, shared UI
-archive/scylla-cage/    Archived AppContainer CLI (not built)
-archive/                Other historical sources (not built)
-docs/                   Index and Workbench screenshot assets
+scylla-fluent/          Primary WinUI 3 application
+scyllagpt/              Native core, broker, platform integrations, and tests
+tests/                  Cross-layer fixtures and Fluent preview tests
+docs/                   Architecture, status, and implementation handoffs
+archive/                Historical prototypes retained for reference
 ```
 
-## Security notes
-
-- Grant the smallest useful project and Knowledge folders; do not grant an entire user profile.
-- Codex runs as the signed-in Windows user under Workbench policy and sandbox settings — not an OS AppContainer.
-- Report security-sensitive findings privately before publishing details.
+The root CMake project builds the native core and its tests. The `scylla-fluent` .NET project builds the primary desktop application and stages the required native binaries beside it.
 
 ## Documentation
 
-See [docs/README.md](docs/README.md) for the documentation index and [scyllagpt/docs/capability.md](scyllagpt/docs/capability.md) for Workbench capability status.
+- [Fluent application development notes](scylla-fluent/README.md)
+- [Documentation index](docs/README.md)
+- [MCP implementation status](docs/plans/SCYLLA_mcp_catalog_execution_status.md)
+- [Security implementation status](docs/plans/SCYLLA_security_fluent_status.md)
+- [Contributing](CONTRIBUTING.md)
 
 ## Third-party software
 
-Scylla Workbench includes Scintilla, Lexilla, and the Argon2 implementation used by the Keyring. Bundled components retain their own licenses. External Codex, ChatGPT, OpenAI, Anthropic, and Claude products are not distributed by this repository and remain subject to their respective terms.
-
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Scylla uses the Windows App SDK, WebView2, Scintilla, Lexilla, Argon2, and other components listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). External AI providers and their command-line tools are not distributed by this repository and remain subject to their own licenses and terms.
 
 ## License
 

@@ -3,8 +3,9 @@
 // Settings → Security → Connections.
 //
 // CRUD for the saved project connections the brokered `/scylla-query` skill runs against. Every
-// credential field on this page stores a Keyring *name*, never a value: the page reads the Keyring
-// only to list names, and a secret value never passes through it.
+// credential field on this page stores a Keyring *name*, never a value. Private-key file import is
+// the sole exception to the metadata-only UI path: it copies the selected file directly into the
+// Keyring, wipes the transient buffer, and leaves only the generated reference on the connection.
 //
 // Connections are project-scoped and addressed by alias, because that alias is the only thing the
 // agent is allowed to name when it calls the query tool.
@@ -158,6 +159,7 @@ private:
 
     // Credentials
     HWND key_ref_ = nullptr;
+    HWND btn_key_import_ = nullptr;
     HWND passphrase_ref_ = nullptr;
     HWND auth_ref_ = nullptr;
     HWND host_key_ = nullptr;

@@ -45,6 +45,7 @@ public:
     // Registered projects for the scope picker. Pulled lazily so opening Manage always sees the
     // current workspace store instead of a snapshot taken at window creation.
     void set_project_provider(std::function<ProjectList()> provider) { project_provider_ = std::move(provider); }
+    void set_active_project_provider(std::function<std::string()> provider) { active_project_provider_ = std::move(provider); }
 
     void show();
     void hide();
@@ -184,6 +185,7 @@ private:
     ProjectList scope_projects_;
     std::vector<bool> scope_checked_;
     std::function<ProjectList()> project_provider_;
+    std::function<std::string()> active_project_provider_;
     RECT area_{};
 };
 

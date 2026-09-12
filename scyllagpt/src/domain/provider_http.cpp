@@ -202,10 +202,13 @@ bool openai_api_list_models(std::vector<HttpModelRow>* out, std::wstring* error)
         if (!looks_like_openai_chat_model(id)) {
             continue;
         }
-        out->push_back({id, display_from_id(id)});
+        out->push_back({id, display_from_id(id), std::to_string(item.at("created").as_int(0))});
     }
     std::sort(out->begin(), out->end(),
-              [](const HttpModelRow& a, const HttpModelRow& b) { return a.id < b.id; });
+              [](const HttpModelRow& a, const HttpModelRow& b) {
+                  if (a.created.size() != b.created.size()) return a.created.size() > b.created.size();
+                  return a.created != b.created ? a.created > b.created : a.id < b.id;
+              });
     return true;
 }
 
@@ -280,8 +283,11 @@ bool claude_api_list_models(std::vector<HttpModelRow>* out, std::wstring* error)
         }
         return false;
     }
+    std::wstring request_path = L"/v1/models?limit=1000";
+    std::string previous_cursor;
+    for (;;) {
     HttpResult r;
-    if (!http_json(L"api.anthropic.com", INTERNET_DEFAULT_HTTPS_PORT, L"GET", L"/v1/models",
+    if (!http_json(L"api.anthropic.com", INTERNET_DEFAULT_HTTPS_PORT, L"GET", request_path.c_str(),
                    anthropic_headers(key), {}, 60000, &r)) {
         if (error) {
             *error = r.error.empty() ? L"Claude model list failed." : r.error;
@@ -311,10 +317,21 @@ bool claude_api_list_models(std::vector<HttpModelRow>* out, std::wstring* error)
         if (display.empty()) {
             display = id;
         }
-        out->push_back({id, display});
+        out->push_back({id, display, item.at("created_at").as_string("")});
+    }
+    if (!j.at("has_more").as_bool(false)) break;
+    const std::string cursor = j.at("last_id").as_string("");
+    if (cursor.empty() || cursor == previous_cursor ||
+        cursor.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") != std::string::npos) {
+        if (error) *error = L"Claude model list returned an invalid pagination cursor.";
+        out->clear();
+        return false;
+    }
+    previous_cursor = cursor;
+    request_path = L"/v1/models?limit=1000&after_id=" + utf16(cursor);
     }
     std::sort(out->begin(), out->end(),
-              [](const HttpModelRow& a, const HttpModelRow& b) { return a.id < b.id; });
+              [](const HttpModelRow& a, const HttpModelRow& b) { return a.created != b.created ? a.created > b.created : a.id < b.id; });
     return true;
 }
 

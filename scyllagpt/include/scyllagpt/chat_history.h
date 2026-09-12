@@ -47,6 +47,19 @@ inline UserDisplay parse_user_display(const std::string& text) {
         }
     }
     // Compatibility with Scylla's previous prompt prefix on restored threads.
+    // Modern runtime transcripts contain the injected mode/grant header but may
+    // predate the display envelope. Only unwrap recognized leading headers.
+    if (text.starts_with("Execute mode: carry out the requested work and validate the result.") ||
+        text.starts_with("Plan mode: inspect project and Knowledge files read-only.") ||
+        text.starts_with("Ask mode: discover and explain information in project and Knowledge files read-only.") ||
+        text.starts_with("Knowledge folders granted for this turn (absolute paths; not limited to the project cwd):")) {
+        const auto boundary = text.find("\n---\n");
+        const auto crlf_boundary = text.find("\r\n---\r\n");
+        if (boundary != std::string::npos || crlf_boundary != std::string::npos) {
+            const bool crlf = crlf_boundary < boundary;
+            return parse_user_display(text.substr((crlf ? crlf_boundary : boundary) + (crlf ? 7 : 5)));
+        }
+    }
     const auto workflow = text.find("Scylla workflow: ");
     if (workflow != std::string::npos && (text.starts_with("Scylla workflow") || text.starts_with("Knowledge folders granted"))) {
         const std::string end = "This mode applies to this message only.\n\n";
@@ -67,6 +80,10 @@ inline std::string short_chat_title(const std::string& value) {
         out += word;
     }
     return out;
+}
+inline std::string chat_review_request() {
+    return "\nIn your final response, link files that need review and any handoff you created or updated, "
+        "using Markdown links with absolute file paths. Do not repeat your name or introduce yourself.\n";
 }
 inline std::string chat_title_request(const Conversation* chat) {
     return chat && !chat->title_manual && !chat->title_generated

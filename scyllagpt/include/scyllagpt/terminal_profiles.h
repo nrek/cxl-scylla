@@ -58,6 +58,8 @@ std::vector<TerminalProfile> merge_terminal_profiles(const std::vector<TerminalP
 // Returns "ask" | "allow" | "block". Unknown / empty → "ask".
 std::string normalize_agent_terminal_policy(std::string_view raw);
 bool is_valid_agent_terminal_policy(std::string_view raw);
+std::string terminal_agent_policy(const std::map<std::string, std::string>& policies,
+                                 const std::string& id, std::string_view fallback);
 
 std::string terminal_profile_source_string(TerminalProfileSource s);
 TerminalProfileSource parse_terminal_profile_source(std::string_view s);

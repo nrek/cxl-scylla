@@ -347,6 +347,7 @@ enum CmdId : int {
 
     // Credentials section
     Cmd_ConnKeyRef,
+    Cmd_ConnKeyImport,
     Cmd_ConnPassphraseRef,
     Cmd_ConnAuthRef,
     Cmd_ConnHostKey,

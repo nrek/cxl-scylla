@@ -1437,6 +1437,21 @@ KeyringStatus Keyring::remove_secret(std::string_view name) {
     return persist_unlocked();
 }
 
+KeyringStatus Keyring::remove_secret(std::string_view name, SecretScope scope, std::string_view project_id) {
+    if (!unlocked_) return KeyringStatus::UnlockedRequired;
+    const auto it = std::find_if(entries_.begin(), entries_.end(), [&](const Entry& entry) {
+        return entry.name == name && entry.scope == scope &&
+            (scope == SecretScope::Global || entry.project_id == project_id);
+    });
+    if (it == entries_.end()) return KeyringStatus::NotFound;
+    mark_activity();
+    secure_wipe_string(it->value);
+    entries_.erase(it);
+    authorizations_.erase(std::remove_if(authorizations_.begin(), authorizations_.end(),
+        [&](const Auth& auth) { return auth.name == name; }), authorizations_.end());
+    return persist_unlocked();
+}
+
 KeyringStatus Keyring::migrate_from_project_vault(const std::wstring& legacy_path,
                                                   std::string_view passphrase,
                                                   std::string_view project_id) {

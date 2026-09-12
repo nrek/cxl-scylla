@@ -21,9 +21,9 @@ struct Project {
     std::vector<std::wstring> roots;
     std::wstring identity;
     std::string last_thread_id;
-    int files_w = 220;
-    int agent_w = 400;
-    int history_w = 232;
+    int files_w = 300;
+    int agent_w = 650;
+    int history_w = 300;
 };
 
 struct Conversation {
@@ -41,6 +41,7 @@ struct Conversation {
     Json local_messages; // Claude print-mode history; Codex history remains provider-owned.
     bool pinned = false;
     bool archived = false;
+    bool deleted = false; // Local tombstone prevents provider history from reappearing.
     bool resumable = true;
 };
 
@@ -71,6 +72,9 @@ struct WorkspaceStore {
     const Project* by_id(const std::string& id) const;
     Project* active();
     const Project* active() const;
+    std::vector<std::wstring> open_roots() const;
+    bool contains_open_path(const std::wstring& path) const;
+    bool contains_open_project(const std::string& project_id) const;
 
     Conversation* upsert_thread(const std::string& project_id, const std::string& account, const std::string& thread_id,
                                  const std::string& title, const std::string& preview);

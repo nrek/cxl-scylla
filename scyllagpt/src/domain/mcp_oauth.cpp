@@ -184,7 +184,7 @@ HttpExchange http_exchange(const std::wstring& url, const wchar_t* method, const
         return r;
     }
 
-    std::wstring headers = L"Accept: application/json\r\n";
+    std::wstring headers = L"Accept: application/json, text/event-stream\r\n";
     if (!bearer.empty()) {
         headers += L"Authorization: Bearer ";
         headers += utf16(bearer);
@@ -276,6 +276,7 @@ std::vector<std::wstring> prm_candidates(const std::wstring& endpoint, const std
     }
     // Path-aware then root well-known (RFC9728).
     std::wstring path = u.path;
+    if (const auto query = path.find_first_of(L"?#"); query != std::wstring::npos) path.resize(query);
     while (!path.empty() && path.back() == L'/') {
         path.pop_back();
     }
@@ -315,6 +316,7 @@ bool load_as_metadata(const std::string& as_url, AuthServerMeta* out, std::strin
         }
         if (!path.empty() && path != L"/") {
             issuer += path;
+            tries.push_back(u.origin + L"/.well-known/oauth-authorization-server" + path);
         }
         tries.push_back(issuer + L"/.well-known/oauth-authorization-server");
         tries.push_back(issuer + L"/.well-known/openid-configuration");
@@ -781,6 +783,29 @@ bool mcp_oauth_cred_present(const std::string& connection_id) {
     return mcp_oauth_cred_load(connection_id, &t);
 }
 
+std::vector<std::string> mcp_oauth_discover_scopes(const std::wstring& endpoint, std::string* error) {
+    std::vector<std::string> scopes;
+    auto probe = http_exchange(endpoint, L"GET", nullptr, L"", "", 15000);
+    std::string metadata, hint;
+    mcp_oauth_parse_www_authenticate(probe.www_authenticate, &metadata, &hint);
+    for (const auto& url : prm_candidates(endpoint, metadata)) {
+        auto response = http_exchange(url, L"GET", nullptr, L"", "", 15000);
+        if (!response.ok) continue;
+        std::string parse_error;
+        auto document = Json::parse(response.body, &parse_error);
+        if (!parse_error.empty() || !document.has("authorization_servers")) continue;
+        for (const auto& scope : document.at("scopes_supported").array_items()) {
+            if (scope.is_string() && !scope.as_string().empty()) scopes.push_back(scope.as_string());
+        }
+        if (error) *error = scopes.empty()
+            ? "This server does not advertise scopes. Enter documented scopes or choose permissions during provider consent."
+            : "Select the permissions to request.";
+        return scopes;
+    }
+    if (error) *error = "Could not discover scopes. Check the endpoint, or enter scopes from the provider documentation.";
+    return scopes;
+}
+
 McpOAuthResult mcp_oauth_probe(const std::wstring& endpoint, const std::string& access_token) {
     McpOAuthResult r;
     if (endpoint.empty()) {
@@ -788,14 +813,8 @@ McpOAuthResult mcp_oauth_probe(const std::wstring& endpoint, const std::string& 
         r.message = "Endpoint / command is empty";
         return r;
     }
-    // Prefer a lightweight GET; many MCP servers accept initialize-like POSTs only, so treat
-    // 401 as NeedsReauth and any other non-network response with a body as reachable.
-    auto http = http_exchange(endpoint, L"GET", nullptr, L"", access_token, 15000);
-    if (http.status == 0) {
-        // Retry POST empty JSON for streamable HTTP servers that reject GET.
-        const std::string empty_obj = "{}";
-        http = http_exchange(endpoint, L"POST", &empty_obj, L"application/json", access_token, 15000);
-    }
+    const std::string initialize = R"({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"Scylla","version":"1.0"}}})";
+    auto http = http_exchange(endpoint, L"POST", &initialize, L"application/json", access_token, 15000);
     if (http.status == 401 || http.status == 403) {
         r.state = McpAuthState::NeedsReauth;
         r.message = http.status == 401 ? "Authentication required" : "Insufficient permissions";
@@ -806,14 +825,14 @@ McpOAuthResult mcp_oauth_probe(const std::wstring& endpoint, const std::string& 
         r.message = http.message.empty() ? "MCP endpoint unreachable" : http.message;
         return r;
     }
-    // 2xx / 4xx-other / 405 = reachable; with a bearer that was accepted (not 401) call it Healthy.
-    if (!access_token.empty() && http.status != 401) {
+    if (!access_token.empty() && http.status >= 200 && http.status < 300 &&
+        http.body.find("\"result\"") != std::string::npos) {
         r.ok = true;
         r.state = McpAuthState::Healthy;
         r.message = "Endpoint reachable; credentials accepted";
         return r;
     }
-    if (http.status >= 200 && http.status < 500) {
+    if (http.status >= 200 && http.status < 300 && access_token.empty()) {
         r.ok = true;
         r.state = access_token.empty() ? McpAuthState::Unknown : McpAuthState::Healthy;
         r.message = "Endpoint reachable";
@@ -825,7 +844,8 @@ McpOAuthResult mcp_oauth_probe(const std::wstring& endpoint, const std::string& 
 }
 
 McpOAuthResult mcp_oauth_authorize(HWND owner, const std::wstring& endpoint,
-                                   const std::string& connection_id, DWORD timeout_ms) {
+                                   const std::string& connection_id, DWORD timeout_ms,
+                                   const std::vector<std::string>& scopes) {
     McpOAuthResult r;
     if (endpoint.empty()) {
         r.state = McpAuthState::Offline;
@@ -846,6 +866,12 @@ McpOAuthResult mcp_oauth_authorize(HWND owner, const std::wstring& endpoint,
     std::string prm_url;
     std::string scope_hint;
     mcp_oauth_parse_www_authenticate(probe.www_authenticate, &prm_url, &scope_hint);
+    // Only the user's selection determines requested authority, never a challenge hint.
+    scope_hint.clear();
+    for (const auto& scope : scopes) {
+        if (!scope_hint.empty()) scope_hint += ' ';
+        scope_hint += scope;
+    }
 
     // 2) Protected Resource Metadata.
     Json prm;
@@ -884,11 +910,6 @@ McpOAuthResult mcp_oauth_authorize(HWND owner, const std::wstring& endpoint,
         return r;
     }
     std::string resource = prm.at("resource").as_string(canonical_resource(endpoint).c_str());
-    if (prm.has("scopes_supported") && scope_hint.empty() && prm.at("scopes_supported").is_array() &&
-        prm.at("scopes_supported").size() > 0) {
-        // Join a conservative default: first advertised scope only if no WWW-Authenticate hint.
-        scope_hint = prm.at("scopes_supported").at(0).as_string("");
-    }
 
     AuthServerMeta as;
     if (!load_as_metadata(as_url, &as, &r.message)) {
@@ -967,6 +988,8 @@ McpOAuthResult mcp_oauth_authorize(HWND owner, const std::wstring& endpoint,
 
     r = exchange_code(as, client, cb.code, redirect, verifier, resource);
     if (r.ok) {
+        // RFC 6749: omitted scope means the requested scope was granted.
+        if (r.tokens.scope.empty()) r.tokens.scope = scope_hint;
         if (!mcp_oauth_cred_save(connection_id, r.tokens)) {
             r.ok = false;
             r.state = McpAuthState::NeedsReauth;

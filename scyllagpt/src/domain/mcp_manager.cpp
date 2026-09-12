@@ -75,6 +75,11 @@ Json connection_to_json(const McpConnection& c) {
     j["agent_alias"] = Json::string(c.agent_alias);
     j["transport_kind"] = Json::string(mcp_transport_name(c.transport_kind));
     j["endpoint_or_cmd"] = Json::string(utf8(c.endpoint_or_cmd));
+    Json oauth_scopes = Json::array();
+    for (const auto& value : c.oauth_scopes) oauth_scopes.push(Json::string(value));
+    j["oauth_scopes"] = std::move(oauth_scopes);
+    j["scopes_selected"] = Json::boolean(c.scopes_selected);
+    j["has_authenticated"] = Json::boolean(c.has_authenticated);
     Json args = Json::array();
     for (const auto& arg : c.arguments) args.push(Json::string(utf8(arg)));
     j["arguments"] = std::move(args);
@@ -118,6 +123,9 @@ McpConnection connection_from_json(const Json& j) {
     c.agent_alias = McpManager::normalize_alias(j.at("agent_alias").as_string());
     c.transport_kind = mcp_transport_from_name(j.at("transport_kind").as_string("http"));
     c.endpoint_or_cmd = utf16(j.at("endpoint_or_cmd").as_string());
+    for (const auto& value : j.at("oauth_scopes").array_items())
+        if (value.is_string()) c.oauth_scopes.push_back(value.as_string());
+    c.scopes_selected = j.at("scopes_selected").as_bool(false);
     if (const Json& args = j.at("arguments"); args.is_array()) {
         for (const auto& arg : args.array_items()) c.arguments.push_back(utf16(arg.as_string()));
     }
@@ -128,6 +136,8 @@ McpConnection connection_from_json(const Json& j) {
     c.enabled = j.at("enabled").is_null() ? true : j.at("enabled").as_bool(true);
     c.disconnected = j.at("disconnected").is_null() ? false : j.at("disconnected").as_bool(false);
     c.auth_state = mcp_auth_state_from_name(j.at("auth_state").as_string("unknown"));
+    c.has_authenticated = j.at("has_authenticated").as_bool(
+        c.auth_state == McpAuthState::Healthy || c.auth_state == McpAuthState::Expired || c.disconnected);
     c.last_checked_iso = j.at("last_checked_iso").as_string("");
     c.last_error = j.at("last_error").as_string("");
     const Json& scope = j.at("project_scope");
@@ -520,6 +530,7 @@ void McpManager::mark_auth(const std::string& id, McpAuthState state, const std:
         sprintf_s(buf, "%04u-%02u-%02uT%02u:%02u:%02uZ", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
         c->last_checked_iso = buf;
         if (state == McpAuthState::Healthy) {
+            c->has_authenticated = true;
             c->disconnected = false;
             c->enabled = true;
         }
@@ -551,11 +562,27 @@ std::vector<McpServiceTemplate> McpManager::known_templates() {
         {"github", "GitHub", McpTransportKind::Http, "https://api.githubcopilot.com/mcp/", {}, {}},
         {"linear", "Linear", McpTransportKind::Http, "https://mcp.linear.app/mcp", {}, {}},
         {"notion", "Notion", McpTransportKind::Http, "https://mcp.notion.com/mcp", {}, {}},
-        {"figma", "Figma", McpTransportKind::Http, "https://mcp.figma.com/mcp", {}, {}},
+        {"gitlab", "GitLab", McpTransportKind::Http, "https://gitlab.com/api/v4/mcp", {}, {}},
+        {"sentry", "Sentry", McpTransportKind::Http, "https://mcp.sentry.dev/mcp", {}, {}},
+        {"supabase", "Supabase", McpTransportKind::Http, "https://mcp.supabase.com/mcp", {}, {}},
+        {"atlassian", "Atlassian Rovo", McpTransportKind::Http, "https://mcp.atlassian.com/v2/mcp", {}, {}},
         {"workspace-knowledge", "STRATA Workspace Knowledge", McpTransportKind::Stdio, "python",
          {L"-m", L"cxl_strata.workspace_index.mcp_server"},
          {{L"STRATA_WORKSPACE_ROOT", L"d:/projects"}}},
     };
+}
+
+// Verified against each provider's protected resource metadata on 2026-09-11.
+// These are unchecked choices, not default grants. Discovery can refresh the list.
+std::vector<std::string> McpManager::suggested_oauth_scopes(const std::string& service) {
+    if (service == "linear" || service == "linear-readonly") return {"read", "write"};
+    if (service == "github") return {"repo", "read:org", "read:user", "user:email", "read:packages", "write:packages", "read:project", "project", "gist", "notifications"};
+    if (service == "notion") return {"default"};
+    if (service == "gitlab") return {"mcp"};
+    if (service == "sentry") return {"org:read", "project:write", "team:write", "event:write"};
+    if (service == "supabase") return {"organizations:read", "projects:read", "projects:write", "database:write", "database:read", "analytics:read", "secrets:read", "edge_functions:read", "edge_functions:write", "environment:read", "environment:write", "storage:read", "storage:write"};
+    if (service == "atlassian") return {"read:me", "read:account", "offline_access", "email", "read:jira:agent-interface", "write:jira:agent-interface", "search:jira:agent-interface", "delete:jira:agent-interface", "manage:jira:agent-interface", "read:confluence:agent-interface", "write:confluence:agent-interface", "search:confluence:agent-interface", "search:rovo:agent-interface", "search:code:agent-interface", "read:all:twg", "write:all:twg", "read:goals:agent-interface", "write:goals:agent-interface", "read:projects:agent-interface", "write:projects:agent-interface", "read:bitbucket:agent-interface", "write:bitbucket:agent-interface", "read:loom:agent-interface", "write:loom:agent-interface", "read:talent:agent-interface", "write:talent:agent-interface", "read:teams:agent-interface", "write:teams:agent-interface", "read:artifacts:agent-interface", "write:artifacts:agent-interface", "read:focus:agent-interface", "write:focus:agent-interface"};
+    return {};
 }
 
 McpConnection McpManager::from_template(const McpServiceTemplate& t, const std::wstring& account_label) {

@@ -1,0 +1,241 @@
+ok   completed Plan saves Knowledge artifact
+ok   plan registered for originating project
+ok   Ask does not save a plan
+ok   interrupted Plan does not save partial artifact
+ok   Plan and Ask leave project files unchanged
+ok   discovery modes cannot escalate writes
+ok   discovery overrides remove writable roots and network
+ok   discovery modes cannot escalate writes
+ok   discovery overrides remove writable roots and network
+ok   Execute preserves project sandbox grants
+ok   unknown modes rejected
+ok   object parse
+ok   numeric id 0
+ok   dump
+ok   trailing data rejected
+ok   split: incomplete first chunk
+ok   split: second chunk
+ok   two complete lines
+ok   first line
+ok   second line
+ok   combined lines
+ok   unicode escape
+ok   approval decline payload
+ok   no-grant lockdown is read-only
+ok   lockdown disables web_search
+ok   lockdown disables shell_tool
+ok   lockdown disables apps
+ok   lockdown disables remote_plugin
+ok   lockdown disables hooks
+ok   lockdown file_opener none
+ok   lockdown no AGENTS walk
+ok   lockdown on-request not never
+ok   lockdown empty notify
+ok   lockdown shell env inherit none
+ok   lockdown has no computer-use helper
+ok   grant lockdown is workspace-write
+ok   grant lockdown enables shell for browse/search
+ok   cli disable apps
+ok   cli disable shell when no grant
+ok   cli allows shell when grant
+ok   cli still disables apps with grant
+ok   1600 four panes
+ok   1600 mins
+ok   1200 history collapsed
+ok   1000 editor+agent
+ok   focus editor hides sides
+ok   cpp lexer kinds
+ok   cpp path detect
+ok   breadcrumbs
+ok   ts via cpp lexer id
+ok   python lang
+ok   dockerfile lang
+ok   plaintext null
+ok   indent spaces 2
+ok   indent tabs
+ok   same folder same uuid
+ok   same leaf name different dirs
+ok   snapshot unsaved label
+ok   snapshot body
+ok   empty chips empty snapshot
+ok   create roundtrip file
+ok   load crlf as lf
+ok   buffer is lf
+ok   save same hash
+ok   disk still crlf
+ok   save conflict when disk hash moved
+ok   shell app_bg
+ok   app_bg aliases shell
+ok   editor and agent share work surface
+ok   gutter matches editor canvas
+ok   amber identity
+ok   subtle border token
+ok   create v2 argon2 vault
+ok   vault file on disk
+ok   create refuses existing
+ok   open vault
+ok   unlock wrong passphrase fails
+ok   unlock good passphrase
+ok   format version 2
+ok   add global secret
+ok   add project A secret
+ok   add project B secret
+ok   list_refs all count
+ok   ui list global+A
+ok   project B filtered out of A ui list
+ok   list_refs empty while locked
+ok   add_secret requires unlock
+ok   authorize_use
+ok   build_authorized_env_block
+ok   env fragment contains secret once
+ok   authorization consumed
+ok   app vault path
+ok   legacy path under keyrings
+ok   update_description
+ok   should_autolock false when fresh
+ok   should_autolock false when locked
+ok   create seeded legacy v1
+ok   migrate seeded legacy vault
+ok   legacy removed after migrate
+ok   legacy archived .migrated
+ok   migrated secret visible in project scope
+ok   authorize migrated secret
+ok   migrated secret value via broker
+ok   create empty legacy
+ok   migrate bad passphrase
+ok   legacy remains after failed migrate
+ok   no get_secret_value in public header
+ok   scoped deletion removes requested project value
+ok   scoped deletion preserves same name in another project
+ok   scoped deletion cannot fall back to another project
+ok   valid var name
+ok   invalid var name
+ok   add environment
+ok   active set on first add
+ok   add plain var
+ok   save environments
+ok   load environments
+ok   loaded env exists
+ok   loaded var count
+ok   create vault
+ok   open vault
+ok   unlock vault
+ok   add secret
+ok   add secret ref
+ok   human resolve ok
+ok   human includes protected
+ok   human entries
+ok   agent resolve ok
+ok   agent has no protected secrets
+ok   env block double-null terminated shape
+ok   detect inheritance cycle
+ok   normalize connection alias
+ok   valid connection alias
+ok   reject spaced connection alias
+ok   MongoDB connection metadata roundtrips without falling back to MySQL
+ok   settings serialization preserves credential references
+ok   add project connection
+ok   connection count
+ok   resolve project connection alias
+ok   alias remains project scoped
+ok   reject duplicate project alias
+ok   allow alias in different project
+ok   require pinned SSH host key
+ok   require an SSH password or key reference
+ok   password-only SSH credential is accepted
+ok   accept Keyring-referenced hosts, ports, and username
+ok   require an SSH host or a host reference
+ok   require an SSH username or a username reference
+ok   require a database host or a host reference
+ok   save project connections
+ok   load project connections
+ok   round-trip connection
+ok   round-trip secret reference
+ok   round-trip ssh key reference
+ok   round-trip ssh key passphrase reference
+ok   round-trip pinned host key
+ok   round-trip ssh host reference
+ok   round-trip ssh port reference
+ok   round-trip ssh username reference
+ok   round-trip database host reference
+ok   round-trip database port reference
+ok   connection stores references only
+ok   classify read query
+ok   classify modifying CTE
+ok   detect multiple statements outside literals
+ok   classify schema query
+ok   auto allow read query
+ok   ask for data modification
+ok   block statement batch
+ok   enforce result limits
+ok   hide rows for metadata-only results
+ok   broker test connection setup
+ok   broker keeps aliases project scoped
+ok   broker asks before schema change
+ok   broker requires unlocked keyring
+ok   untrusted request never reaches executor
+ok   cancel rejects unknown operation
+ok   SSH connection needs no database credentials
+ok   SSH defaults to requiring approval
+ok   SQL tool cannot execute an SSH connection
+ok   SSH requires an unlocked keyring even with automatic permission
+ok   executor failure reaches broker response
+ok   broker preserves sanitized executor diagnostic
+ok   locked keyring prepares nothing
+ok   refused prepare carries no credentials
+ok   finish preserves the prepare failure
+ok   second refused finish preserves status
+ok   finish of an unready operation never executes
+ok   operation id is released after a refused prepare
+ok   credential lookup by name
+ok   unknown credential returns empty
+ok   wiped credentials are unreadable
+ok   parse tool arguments
+ok   tool arguments carry alias and sql
+ok   reject tool call without sql
+ok   reject oversize sql
+ok   decode broker request
+ok   broker request round-trip
+ok   reject malformed request
+ok   reject unsupported protocol version
+ok   tool result names the refusal
+ok   tool result forbids fabricating rows
+ok   successful tool result carries rows
+ok   unreadable broker response fails loudly
+ok   plan a remote-execution command
+ok   password never reaches argv
+ok   private key never reaches argv
+ok   database username never reaches argv
+ok   sql never reaches argv
+ok   stdin carries username, password, then sql in order
+ok   plan carries the key for the caller to stage
+ok   non-default port is bracketed in known_hosts
+ok   host key checking stays on
+ok   ssh never prompts
+ok   password auth is refused
+ok   agent identities are ignored
+ok   known_hosts path is passed
+ok   an unencrypted key needs no askpass
+ok   plan resolves hosts and ports from the Keyring
+ok   referenced ssh host and user resolve
+ok   referenced ssh port resolves
+ok   referenced database host resolves
+ok   referenced database port resolves
+ok   known_hosts uses the resolved host
+ok   an unresolved host reference fails closed
+ok   a non-numeric port reference fails closed
+ok   refuse a host carrying shell metacharacters
+ok   accept a passphrase-protected key
+ok   a passphrase-protected key requests askpass
+ok   plan carries the passphrase for askpass
+ok   passphrase never reaches argv
+ok   BatchMode is omitted so askpass can supply the key passphrase
+ok   password prompts stay disabled without BatchMode
+ok   encrypted keys remain pinned to the staged identity
+ok   an unresolved passphrase reference fails closed
+ok   default port is not bracketed
+ok   refuse an unpinned host
+ok   refuse ssh password authentication
+ok   refuse a direct route
+ok   refuse an unimplemented engine
+ok   refuse when credenti

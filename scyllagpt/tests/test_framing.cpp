@@ -1,4 +1,7 @@
 #include "scyllagpt/json.h"
+#include "scyllagpt/chat_mode.h"
+#include "scyllagpt/session.h"
+#include "scyllagpt/knowledge.h"
 #include "scyllagpt/language.h"
 #include "scyllagpt/layout.h"
 #include "scyllagpt/lockdown.h"
@@ -29,6 +32,56 @@ static void expect(bool cond, const char* name) {
 }
 
 int main() {
+    {
+        // Exercise real completion handling without starting a provider or using user data.
+        const auto temp = std::filesystem::temp_directory_path() / ("scylla-plan-test-" + std::to_string(GetCurrentProcessId()));
+        const auto project = temp / "project";
+        const auto data = temp / "appdata";
+        std::filesystem::create_directories(project);
+        std::filesystem::create_directories(data);
+        scyllagpt::Session session;
+        session.paths.appdata = data.wstring();
+        session.paths.store_path = (data / "store.json").wstring();
+        session.paths.knowledge_path = (data / "knowledge.json").wstring();
+        session.settings.project_folder = project.wstring();
+        session.project_root = project.wstring();
+        const auto project_id = session.store.open_or_create(project.wstring())->id;
+        session.store.upsert_thread(project_id, "test", "plan-test", "Test plan", "");
+        session.active_thread_id = "plan-test";
+        session.send_user("Inspect the project", "plan");
+        session.handle_line(R"({"method":"item/completed","params":{"threadId":"plan-test","item":{"type":"agentMessage","phase":"final_answer","text":"# Plan\n\n1. Inspect\n2. Validate"}}})");
+        session.handle_line(R"({"method":"turn/completed","params":{"threadId":"plan-test","turn":{"status":"completed"}}})");
+        expect(!session.last_plan_path.empty() && std::filesystem::exists(scyllagpt::utf16(session.last_plan_path)), "completed Plan saves Knowledge artifact");
+        scyllagpt::KnowledgeStore knowledge;
+        knowledge.load(session.paths.knowledge_path);
+        expect(knowledge.source_for_path(scyllagpt::utf16(session.last_plan_path), project_id) != nullptr, "plan registered for originating project");
+        const auto saved = session.last_plan_path;
+        session.send_user("What is here?", "ask");
+        session.handle_line(R"({"method":"item/completed","params":{"threadId":"plan-test","item":{"type":"agentMessage","text":"Findings"}}})");
+        session.handle_line(R"({"method":"turn/completed","params":{"threadId":"plan-test","turn":{"status":"completed"}}})");
+        expect(session.last_plan_path == saved, "Ask does not save a plan");
+        session.send_user("Plan more", "plan");
+        session.handle_line(R"({"method":"item/completed","params":{"threadId":"plan-test","item":{"type":"agentMessage","text":"Partial plan"}}})");
+        session.handle_line(R"({"method":"turn/completed","params":{"threadId":"plan-test","turn":{"status":"interrupted"}}})");
+        expect(session.last_plan_path == saved, "interrupted Plan does not save partial artifact");
+        expect(std::filesystem::is_empty(project), "Plan and Ask leave project files unchanged");
+        std::filesystem::remove_all(temp);
+    }
+    for (const auto* mode : {"ask", "plan"}) {
+        Json params = Json::parse(R"({"approvalPolicy":"on-request","sandboxPolicy":{"type":"workspaceWrite","writableRoots":["D:/project"],"networkAccess":true}})");
+        scyllagpt::apply_chat_mode_policy(params, mode);
+        expect(params.at("approvalPolicy").as_string() == "never", "discovery modes cannot escalate writes");
+        expect(params.at("sandboxPolicy").at("type").as_string() == "readOnly"
+            && !params.at("sandboxPolicy").has("writableRoots")
+            && !params.at("sandboxPolicy").at("networkAccess").as_bool(), "discovery overrides remove writable roots and network");
+    }
+    {
+        Json params = Json::parse(R"({"approvalPolicy":"on-request","sandboxPolicy":{"type":"workspaceWrite","writableRoots":["D:/project"]}})");
+        const auto original = params.dump();
+        scyllagpt::apply_chat_mode_policy(params, "execute");
+        expect(params.dump() == original, "Execute preserves project sandbox grants");
+        expect(!scyllagpt::valid_chat_mode("unknown"), "unknown modes rejected");
+    }
     {
         std::string err;
         Json j = Json::parse(R"({"method":"initialize","id":0,"params":{"clientInfo":{"name":"scylla_gpt","version":"0.1.0"}}})", &err);
@@ -99,13 +152,19 @@ int main() {
         using scyllagpt::compute_panes;
         auto a = compute_panes(1600, 220, 400, 232, false, 0, 0, 0);
         expect(a.show_files && a.show_editor && a.show_agent && a.show_history, "1600 four panes");
-        expect(a.files >= 180 && a.editor >= 400 && a.agent >= 320 && a.history >= 180, "1600 mins");
+        expect(a.files >= 180 && a.editor >= 400 && a.agent >= 300 && a.history >= 180, "1600 mins");
         auto b = compute_panes(1200, 220, 400, 232, false, 0, 0, 0);
         expect(b.show_files && b.show_editor && b.show_agent && !b.show_history, "1200 history collapsed");
         auto c = compute_panes(1000, 220, 400, 232, false, 0, 0, 0);
         expect(!c.show_files && c.show_editor && c.show_agent && !c.show_history, "1000 editor+agent");
         auto d = compute_panes(1440, 220, 400, 232, true, 0, 0, 0);
         expect(!d.show_files && !d.show_history && d.show_editor && d.show_agent, "focus editor hides sides");
+        auto e = compute_panes(4000, 900, 650, 900, false, 0, 0, 0);
+        expect(e.files == 600 && e.agent == 650 && e.history == 600, "side panes cap at 600 and chat log is uncapped");
+        auto f = compute_panes(4000, 0, 0, 0, false, 0, 0, 0);
+        expect(f.files == 300 && f.agent == 650 && f.history == 300, "fresh pane defaults are 300 650 300");
+        auto g = compute_panes(4000, 300, 1200, 300, false, 0, 0, 0);
+        expect(g.agent == 1200, "chat log has no maximum width");
     }
     {
         const auto spans = scyllagpt::lex_cpp(L"int x = 1; // c\n#include <x>\n\"hi\"");

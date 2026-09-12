@@ -1,0 +1,13 @@
+HTTP/1.1 401 Unauthorized
+Content-Security-Policy: default-src 'none'; sandbox
+Content-Type: text/plain; charset=utf-8
+Strict-Transport-Security: max-age=31536000
+www-authenticate: Bearer error="invalid_request", error_description="No access token was provided in this request", resource_metadata="https://api.githubcopilot.com/.well-known/oauth-protected-resource/mcp/"
+X-Content-Type-Options: nosniff
+x-copilot-service-request-id: f23f4aa5-e3cf-4d0d-ab59-c7b74c05091b
+Date: Fri, 11 Sep 2026 18:14:44 GMT
+Content-Length: 51
+x-github-backend: Kubernetes
+X-GitHub-Request-Id: F265:FBC95:321FDA:3CAE60:6AA44514
+x-github-edge-region: iad
+

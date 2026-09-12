@@ -1,0 +1,19 @@
+HTTP/1.1 200 OK
+Date: Fri, 11 Sep 2026 18:14:44 GMT
+Content-Type: application/json
+Content-Length: 1161
+Vary: Origin
+Access-Control-Allow-Origin: 
+Access-Control-Allow-Credentials: true
+Access-Control-Expose-Headers: WWW-Authenticate,Mcp-Protocol-Version,Mcp-Protocol-Id,Mcp-Session-Id,Retry-After,X-RateLimit-Limit,X-RateLimit-Remaining,X-RateLimit-Reset
+Cache-Control: public, max-age=3600
+Server: AtlassianEdge
+X-Content-Type-Options: nosniff
+X-Xss-Protection: 1; mode=block
+Atl-Traceid: 28ec4217f31c48c79530478f0783c6f2
+Atl-Request-Id: 28ec4217-f31c-48c7-9530-478f0783c6f2
+Strict-Transport-Security: max-age=63072000; preload
+Report-To: {"endpoints": [{"url": "https://dz8aopenkvv6s.cloudfront.net"}], "group": "endpoint-1", "include_subdomains": true, "max_age": 600}
+Nel: {"failure_fraction": 0.01, "include_subdomains": true, "max_age": 600, "report_to": "endpoint-1"}
+Server-Timing: atl-edge;dur=12,atl-edge-internal;dur=5,atl-edge-upstream;dur=7,atl-edge-pop;desc="aws-us-west-2"
+

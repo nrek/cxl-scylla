@@ -67,6 +67,27 @@ int run_connection_broker_tests() {
            "broker requires unlocked keyring");
     expect(executor.executions == 0, "untrusted request never reaches executor");
     expect(!broker.cancel("unknown"), "cancel rejects unknown operation");
+    {
+        auto ssh = connection();
+        ssh.ssh_only = true;
+        ssh.alias = "ssh_synq";
+        ssh.terminal_profile_id = "wsl-test";
+        ssh.ssh.host = "host.test";
+        ssh.ssh.username_ref = "SSH_USER";
+        ssh.ssh.private_key_ref = "SSH_KEY";
+        ssh.ssh.host_key = "ssh-ed25519 test";
+        ssh.database = {};
+        expect(manager.upsert(ssh, &error), "SSH connection needs no database credentials");
+        expect(broker.prepare({"ssh-1", "project-a", "ssh_synq", "uname -a", false, true}).response.status == BrokerStatus::ApprovalRequired,
+            "SSH defaults to requiring approval");
+        expect(broker.prepare({"ssh-2", "project-a", "ssh_synq", "SELECT 1", false}).response.status == BrokerStatus::InvalidRequest,
+            "SQL tool cannot execute an SSH connection");
+        ssh.command_authority = ConnectionAuthority::Auto;
+        ssh.id = manager.resolve_alias("project-a", "ssh_synq")->id;
+        manager.upsert(ssh, &error);
+        expect(broker.prepare({"ssh-3", "project-a", "ssh_synq", "uname -a", false, true}).response.status == BrokerStatus::KeyringLocked,
+            "SSH requires an unlocked keyring even with automatic permission");
+    }
 
     // The executor has already sanitized its diagnostics. Preserve that useful
     // reason instead of replacing every failure with a generic broker message.

@@ -17,6 +17,8 @@ struct StrataBinding {
 };
 
 struct StrataSettings {
+    bool enabled = false;
+    bool team = false;
     std::wstring endpoint = L"http://127.0.0.1:8765";
     std::wstring bearer;  // optional Authorization: Bearer …
 };
